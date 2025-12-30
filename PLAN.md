@@ -1,5 +1,31 @@
 # Peregrine: Technical Design & Roadmap
 
+# 🛑 CRITICAL ARCHITECTURAL GUIDELINES (DO NOT VIOLATE) 🛑
+
+### 1. Absolute Determinism (The "Golden Rule")
+*   **Definition**: The Simulation State MUST evolve identically on all clients given the same inputs. A checksum of the SimState at Tick X must match across all machines.
+*   **Math**: Avoid standard `f32`/`f64` for simulation logic if cross-platform determinism is required. Prefer **Fixed-Point Arithmetic** (e.g., `fixed` crate) for positions, velocities, and physics.
+    *   *Exception*: Visuals/Rendering can use floats freely.
+*   **Collections**: **NEVER** iterate over `HashMap` or `HashSet` in the simulation loop. Iteration order is undefined and non-deterministic. Use `BTreeMap`, sorted `Vec`, or `IndexMap`.
+*   **RNG**: **NEVER** use `rand::thread_rng()`. Use a deterministic PRNG (e.g., `ChaCha8`) seeded from the game config/match setup, stored in the Sim resource.
+*   **Time**: **NEVER** use `Time::delta_seconds()` in the simulation. Use a fixed delta time constant (e.g., `1.0/60.0`).
+
+### 2. Strict Sim/Render Separation
+*   **Simulation Layer**: Contains *only* logical data (SimPosition, Health, Cooldowns). Runs at a fixed tick rate (e.g., 20Hz or 60Hz).
+*   **Presentation Layer**: Contains visual data (Transform, Meshes, Audio). Runs at variable frame rate (unlocked).
+*   **Rule**: The Presentation Layer *reads* the Simulation Layer to interpolate visuals. The Simulation Layer **NEVER** knows about the Presentation Layer.
+
+### 3. Performance & Scalability (The "10M Unit" Goal)
+*   **Data-Oriented**: Keep "hot" simulation components small and contiguous. Avoid `Box<T>` or heavy nesting in components.
+*   **Batching**: Do not run A* pathfinding for 10,000 units individually. Use **Flow Fields** or group steering.
+*   **No Allocations**: Avoid memory allocation (Vec::push, new objects) inside the hot simulation loop. Pre-allocate buffers.
+
+### 4. Responsiveness (The "E-Sport" Feel)
+*   **Instant Feedback**: When a player clicks, play the sound and show the marker *immediately* (Frame 0), even if the network command takes 100ms to execute.
+*   **Crisp Movement**: Physics should be snappy (high acceleration/deceleration), not "floaty".
+
+---
+
 ## Technical Architecture: The "Starcraft 2" Standard
 To achieve a high unit count, deterministic multiplayer, and snappy feel, we will adopt the following architectural pillars:
 
@@ -79,43 +105,44 @@ Goal: Create a minimal, testable RTS loop where a player can select a unit and c
 Once the RTS Foundation (Milestone 0) is complete, we will iterate on the simulation engine following this progression:
 
 0. **The Simulation Foundation (Fixed Timestep)**
-   - **Decoupled Loop**: Implement a fixed-timestep loop (e.g., using Bevy's `FixedUpdate`) that runs independently of the frame rate.
-   - **System Ordering**: Define a strict execution order for simulation systems (e.g., `InputProcessing` -> `Movement` -> `CollisionDetection` -> `CollisionResolution`).
-   - **Tick Speed Control**: Add the ability to adjust the simulation tick rate dynamically (for testing and "fast-forward" replays).
-   - **Sim vs. Render State**: Separate logical unit data (e.g., `SimPosition`) from visual data (e.g., `Transform`).
+   - [x] **Decoupled Loop**: Implement a fixed-timestep loop (e.g., using Bevy's `FixedUpdate`) that runs independently of the frame rate.
+   - [x] **System Ordering**: Define a strict execution order for simulation systems (e.g., `InputProcessing` -> `Movement` -> `CollisionDetection` -> `CollisionResolution`).
+   - [x] **Tick Speed Control**: Add the ability to adjust the simulation tick rate dynamically (for testing and "fast-forward" replays).
+   - [x] **Sim vs. Render State**: Separate logical unit data (e.g., `SimPosition`) from visual data (e.g., `Transform`).
 
 1. **Single Unit, Free Space**
-   - One unit.
-   - No collisions, no borders.
-   - Direct movement to target calculated within the Sim loop.
-   - **Visual Interpolation**: Implement basic interpolation so the unit moves smoothly between Sim ticks.
+   - [x] One unit.
+   - [x] No collisions, no borders.
+   - [x] Direct movement to target calculated within the Sim loop.
+   - [x] **Visual Interpolation**: Implement basic interpolation so the unit moves smoothly between Sim ticks.
 
 2. **Multiple Units, Ghosts**
-   - Spawn multiple units.
-   - They move to targets but pass through each other (no collision).
-   - Verify that the Sim loop handles multiple units correctly and deterministically.
+   - [x] Spawn multiple units.
+   - [x] They move to targets but pass through each other (no collision).
+   - [x] Verify that the Sim loop handles multiple units correctly and deterministically.
 
 3. **The Box (Map Borders)**
-   - Define map boundaries in the Sim world.
-   - Units stop or slide when hitting the edge of the map (Sim-side logic).
+   - [x] Define map boundaries in the Sim world.
+   - [x] Units stop or slide when hitting the edge of the map (Sim-side logic).
 
 4. **Basic Unit-Unit Collision (Detection)**
-   - Implement spatial hashing or simple N^2 check in the Sim loop.
-   - Detect when units overlap.
-   - Visual debug indication of overlap (Render-side feedback).
+   - [x] Implement spatial hashing or simple N^2 check in the Sim loop.
+   - [x] Detect when units overlap.
+   - [x] Visual debug indication of overlap (Render-side feedback).
 
 5. **Basic Unit-Unit Collision (Resolution)**
-   - Units push each other apart in the Sim loop.
-   - "Soft" collisions (separation force) to prevent stacking.
-   - Ensure resolution is deterministic.
+   - [x] Units push each other apart in the Sim loop.
+   - [x] "Soft" collisions (separation force) to prevent stacking.
+   - [x] Ensure resolution is deterministic.
 
-6. **External Forces**
-   - Apply a global force (e.g., "Gravity" pulling to the center or a specific direction).
-   - Units must fight this force or be dragged by it.
+6. **External Forces (Wind/Flow Field)**
+   - [x] Add a global resource `GlobalFlow` (vector field or just a constant wind for now).
+   - [x] Apply this force to all units in the Sim loop.
+   - [x] Verify units drift over time.
 
 7. **Static Obstacles**
-   - Place simple shapes (circles/rectangles) as walls.
-   - Units collide and slide against these static obstacles.
+   - [x] Place simple shapes (circles/rectangles) as walls.
+   - [x] Units collide and slide against these static obstacles.
 
 8. **Steering Behaviors (Boids)**
    - Implement Separation, Alignment, and Cohesion.
@@ -130,6 +157,41 @@ Once the RTS Foundation (Milestone 0) is complete, we will iterate on the simula
     - Massive unit count.
     - Full simulation: Borders, Unit Collisions, External Forces, Complex Pathfinding.
     - Optimization pass (Spatial Partitioning, Multithreading, GPU Compute if needed).
+    - **Goal**: 10M units, 1000 FPS (GPU compute likely required), 100 ticks / second.
+
+---
+
+# Physics Refinement & Polish
+
+1. **Physics-Based Movement**
+   - [ ] Implement elastic collisions (bouncing) as a configurable option.
+   - [ ] Allow walls/obstacles to have different physics materials (bouncy vs. sticky).
+   - [ ] "Pinball" feel: Units should feel like physical objects influenced by forces (gravity, wind) rather than just steering agents. This should be configurable.
+
+2. **Configurable Simulation**
+   - [ ] Move all hardcoded constants (starting units, speed, friction, restitution) to `game_config.ron`.
+   - [ ] Allow runtime reloading of physics parameters to tweak the "feel".
+
+---
+
+# Gameplay: Simple RTS
+
+1. **Combat Basics**
+   - [ ] Units have Health and Damage.
+   - [ ] Attack range checks.
+   - [ ] Projectile simulation (if not hitscan).
+
+2. **Unit Interactions**
+   - [ ] Friendly fire logic (optional).
+   - [ ] Reaction to being hit (knockback, flashing).
+   - [ ] Destruction/Death effects.
+
+3. **Lifelike Behaviors (Emergent Complexity)**
+   - [ ] **Predator/Prey Dynamics**: Define factions (e.g., "Wolves" vs "Sheep"). Wolves auto-hunt Sheep; Sheep auto-flee Wolves.
+   - [ ] **Self-Preservation**: Units flee from enemies if HP is low (< 20%).
+   - [ ] **Social Aggro**: If a unit is attacked, nearby allies automatically target the attacker ("Help call").
+   - [ ] **Idle Wandering**: Units shouldn't stand perfectly still. They should patrol or wander slightly when idle.
+   - [ ] **Vision/Awareness**: Units only react to things within a certain "Vision Radius" (Fog of War logic).
 
 ---
 
@@ -142,6 +204,7 @@ Once the RTS Foundation (Milestone 0) is complete, we will iterate on the simula
 2. **Debug Text Overlay**
    - Simple FPS counter.
    - Display unit count or basic debug info using text on screen.
+   - Ensure high FPS is maintainable (performance monitoring).
 
 3. **Basic Camera Control**
    - WASD movement.
@@ -170,7 +233,7 @@ Once the RTS Foundation (Milestone 0) is complete, we will iterate on the simula
    - State transitions (Menu -> Game -> Pause).
 
 9. **Settings & Configuration**
-   - Keybinding configuration menu.
+   - Keybinding configuration menu (move keys to config).
    - Graphics settings (Resolution, VSync).
    - Save/Load settings to disk.
 

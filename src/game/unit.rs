@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use crate::game::simulation::{SimPosition, SimPositionPrev, SimVelocity, SimTarget, SimSet};
+use crate::game::simulation::{SimPosition, SimPositionPrev, SimVelocity, SimTarget, SimSet, Colliding};
 use crate::game::config::{GameConfig, GameConfigHandle};
 
 #[derive(Component)]
@@ -12,6 +12,7 @@ pub struct Selected;
 pub struct UnitMaterials {
     pub normal: Handle<StandardMaterial>,
     pub selected: Handle<StandardMaterial>,
+    pub colliding: Handle<StandardMaterial>,
 }
 
 pub struct UnitPlugin;
@@ -69,11 +70,13 @@ fn sync_visuals(
 }
 
 fn update_selection_visuals(
-    mut query: Query<(Option<&Selected>, &mut MeshMaterial3d<StandardMaterial>), With<Unit>>,
+    mut query: Query<(Option<&Selected>, Option<&Colliding>, &mut MeshMaterial3d<StandardMaterial>), With<Unit>>,
     unit_materials: Res<UnitMaterials>,
 ) {
-    for (selected, mut mat_handle) in query.iter_mut() {
-        let target_mat = if selected.is_some() {
+    for (selected, colliding, mut mat_handle) in query.iter_mut() {
+        let target_mat = if colliding.is_some() {
+            &unit_materials.colliding
+        } else if selected.is_some() {
             &unit_materials.selected
         } else {
             &unit_materials.normal
@@ -93,10 +96,12 @@ fn spawn_test_unit(
     let mesh = meshes.add(Capsule3d::default());
     let normal_mat = materials.add(Color::srgb(0.8, 0.7, 0.6));
     let selected_mat = materials.add(Color::srgb(0.2, 0.8, 0.2));
+    let colliding_mat = materials.add(Color::srgb(0.8, 0.2, 0.2));
 
     commands.insert_resource(UnitMaterials {
         normal: normal_mat.clone(),
         selected: selected_mat.clone(),
+        colliding: colliding_mat.clone(),
     });
 
     for x in -2..3 {
@@ -114,4 +119,6 @@ fn spawn_test_unit(
             ));
         }
     }
+
+
 }

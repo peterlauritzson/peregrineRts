@@ -6,6 +6,8 @@ use serde::Deserialize;
 pub struct GameConfig {
     pub tick_rate: f64,
     pub unit_speed: f32,
+    pub map_width: f32,
+    pub map_height: f32,
 }
 
 #[derive(Resource)]

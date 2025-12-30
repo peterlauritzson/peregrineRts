@@ -9,7 +9,7 @@ mod config;
 use camera::RtsCameraPlugin;
 use unit::UnitPlugin;
 use control::ControlPlugin;
-use simulation::SimulationPlugin;
+use simulation::{SimulationPlugin, SimPosition, StaticObstacle};
 use config::GameConfigPlugin;
 
 pub struct GamePlugin;
@@ -58,5 +58,16 @@ fn setup_game(
             order: 1,
             ..default()
         },
+    ));
+
+    // Obstacle
+    let obstacle_pos = Vec2::new(5.0, 5.0);
+    let obstacle_radius = 2.0;
+    commands.spawn((
+        Mesh3d(meshes.add(Cylinder::new(obstacle_radius, 2.0))),
+        MeshMaterial3d(materials.add(Color::srgb(0.5, 0.5, 0.5))),
+        Transform::from_xyz(obstacle_pos.x, 1.0, obstacle_pos.y),
+        SimPosition(obstacle_pos),
+        StaticObstacle { radius: obstacle_radius },
     ));
 }
