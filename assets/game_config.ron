@@ -3,4 +3,8 @@
     unit_speed: 5.0,
     map_width: 50.0,
     map_height: 50.0,
+    unit_radius: 0.5,
+    collision_push_strength: 10.0,
+    obstacle_push_strength: 20.0,
+    arrival_threshold: 0.01,
 )

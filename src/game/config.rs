@@ -8,6 +8,10 @@ pub struct GameConfig {
     pub unit_speed: f32,
     pub map_width: f32,
     pub map_height: f32,
+    pub unit_radius: f32,
+    pub collision_push_strength: f32,
+    pub obstacle_push_strength: f32,
+    pub arrival_threshold: f32,
 }
 
 #[derive(Resource)]
