@@ -1,6 +1,8 @@
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use crate::game::unit::{Unit, Selected, MoveTarget};
+use crate::game::unit::{Unit, Selected};
+use crate::game::simulation::SimTarget;
+use crate::game::camera::RtsCamera;
 
 pub struct ControlPlugin;
 
@@ -39,7 +41,7 @@ fn handle_input(
     mut commands: Commands,
     mouse_button: Res<ButtonInput<MouseButton>>,
     q_window: Query<&Window, With<PrimaryWindow>>,
-    q_camera: Query<(&Camera, &GlobalTransform)>,
+    q_camera: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     q_units: Query<(Entity, &GlobalTransform), With<Unit>>,
     q_selected: Query<Entity, With<Selected>>,
     mut drag_state: ResMut<DragState>,
@@ -109,6 +111,7 @@ fn handle_input(
                 let mut closest_hit: Option<(Entity, f32)> = None;
                 for (entity, unit_transform) in q_units.iter() {
                     let unit_pos = unit_transform.translation();
+                    // info!("Checking unit at {:?}", unit_pos);
                     let vector_to_unit = unit_pos - ray.origin;
                     let projection = vector_to_unit.dot(ray.direction.into());
                     if projection < 0.0 { continue; }
@@ -155,7 +158,7 @@ fn handle_input(
                 
                 // Command all selected units to move
                 for entity in q_selected.iter() {
-                    commands.entity(entity).insert(MoveTarget(intersection_point));
+                    commands.entity(entity).insert(SimTarget(intersection_point.xz()));
                 }
             }
         }

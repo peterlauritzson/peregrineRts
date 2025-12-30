@@ -1,0 +1,4 @@
+(
+    tick_rate: 30.0,
+    unit_speed: 5.0,
+)

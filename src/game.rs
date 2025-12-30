@@ -3,17 +3,27 @@ use bevy::prelude::*;
 mod camera;
 mod unit;
 mod control;
+mod simulation;
+mod config;
 
 use camera::RtsCameraPlugin;
 use unit::UnitPlugin;
 use control::ControlPlugin;
+use simulation::SimulationPlugin;
+use config::GameConfigPlugin;
 
 pub struct GamePlugin;
 
 impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((RtsCameraPlugin, UnitPlugin, ControlPlugin))
-           .add_systems(Startup, setup_game);
+        app.add_plugins((
+            RtsCameraPlugin,
+            UnitPlugin,
+            ControlPlugin,
+            SimulationPlugin,
+            GameConfigPlugin,
+        ))
+        .add_systems(Startup, setup_game);
     }
 }
 

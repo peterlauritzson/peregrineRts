@@ -11,7 +11,7 @@ impl Plugin for RtsCameraPlugin {
 }
 
 #[derive(Component)]
-struct RtsCamera;
+pub struct RtsCamera;
 
 fn spawn_camera(mut commands: Commands) {
     // RTS Camera: High up, looking down at an angle

@@ -1,13 +1,12 @@
 use bevy::prelude::*;
+use crate::game::simulation::{SimPosition, SimPositionPrev, SimVelocity, SimTarget, SimSet};
+use crate::game::config::{GameConfig, GameConfigHandle};
 
 #[derive(Component)]
 pub struct Unit;
 
 #[derive(Component)]
 pub struct Selected;
-
-#[derive(Component)]
-pub struct MoveTarget(pub Vec3);
 
 #[derive(Resource)]
 pub struct UnitMaterials {
@@ -20,33 +19,52 @@ pub struct UnitPlugin;
 impl Plugin for UnitPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_test_unit)
-           .add_systems(Update, (update_selection_visuals, move_units));
+           .add_systems(FixedUpdate, unit_movement_logic.in_set(SimSet::Steering))
+           .add_systems(Update, (update_selection_visuals, sync_visuals));
     }
 }
 
-fn move_units(
+fn unit_movement_logic(
     mut commands: Commands,
-    mut query: Query<(Entity, &mut Transform, &MoveTarget)>,
+    mut query: Query<(Entity, &SimPosition, &mut SimVelocity, &SimTarget)>,
     time: Res<Time>,
+    config_handle: Res<GameConfigHandle>,
+    game_configs: Res<Assets<GameConfig>>,
 ) {
-    let speed = 5.0;
-    for (entity, mut transform, target) in query.iter_mut() {
-        let mut target_pos = target.0;
-        target_pos.y = transform.translation.y;
+    let speed = game_configs.get(&config_handle.0).map(|c| c.unit_speed).unwrap_or(5.0);
+    let delta = time.delta_secs();
+    
+    // info!("Unit Logic: delta={}, speed={}", delta, speed);
 
-        let direction = target_pos - transform.translation;
+    for (entity, pos, mut vel, target) in query.iter_mut() {
+        let direction = target.0 - pos.0;
         let distance = direction.length();
-
-        if distance < 0.1 {
-            commands.entity(entity).remove::<MoveTarget>();
+        
+        if distance < 0.01 {
+            vel.0 = Vec2::ZERO;
+            commands.entity(entity).remove::<SimTarget>();
+        } else if distance <= speed * delta {
+            // Arrive in this tick
+            if delta > 0.0 {
+                vel.0 = direction / delta;
+            } else {
+                vel.0 = Vec2::ZERO;
+            }
         } else {
-            let move_dir = direction.normalize();
-            transform.translation += move_dir * speed * time.delta_secs();
-            
-            // Optional: Rotate to face target
-            // transform.look_at(target.0, Vec3::Y); 
-            // Note: look_at might be unstable if target is too close or directly up/down.
+            vel.0 = direction.normalize() * speed;
         }
+    }
+}
+
+fn sync_visuals(
+    mut query: Query<(&mut Transform, &SimPosition, &SimPositionPrev)>,
+    fixed_time: Res<Time<Fixed>>,
+) {
+    let alpha = fixed_time.overstep_fraction();
+    for (mut transform, pos, prev_pos) in query.iter_mut() {
+        let interpolated = prev_pos.0.lerp(pos.0, alpha);
+        transform.translation.x = interpolated.x;
+        transform.translation.z = interpolated.y;
     }
 }
 
@@ -83,11 +101,16 @@ fn spawn_test_unit(
 
     for x in -2..3 {
         for z in -2..3 {
+            let pos_x = x as f32 * 2.0;
+            let pos_z = z as f32 * 2.0;
             commands.spawn((
                 Unit,
                 Mesh3d(mesh.clone()),
                 MeshMaterial3d(normal_mat.clone()),
-                Transform::from_xyz(x as f32 * 2.0, 1.0, z as f32 * 2.0),
+                Transform::from_xyz(pos_x, 1.0, pos_z),
+                SimPosition(Vec2::new(pos_x, pos_z)),
+                SimPositionPrev(Vec2::new(pos_x, pos_z)),
+                SimVelocity(Vec2::ZERO),
             ));
         }
     }
