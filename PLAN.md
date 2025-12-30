@@ -174,27 +174,6 @@ Once the RTS Foundation (Milestone 0) is complete, we will iterate on the simula
 
 ---
 
-# Gameplay: Simple RTS
-
-1. **Combat Basics**
-   - [ ] Units have Health and Damage.
-   - [ ] Attack range checks.
-   - [ ] Projectile simulation (if not hitscan).
-
-2. **Unit Interactions**
-   - [ ] Friendly fire logic (optional).
-   - [ ] Reaction to being hit (knockback, flashing).
-   - [ ] Destruction/Death effects.
-
-3. **Lifelike Behaviors (Emergent Complexity)**
-   - [ ] **Predator/Prey Dynamics**: Define factions (e.g., "Wolves" vs "Sheep"). Wolves auto-hunt Sheep; Sheep auto-flee Wolves.
-   - [ ] **Self-Preservation**: Units flee from enemies if HP is low (< 20%).
-   - [ ] **Social Aggro**: If a unit is attacked, nearby allies automatically target the attacker ("Help call").
-   - [ ] **Idle Wandering**: Units shouldn't stand perfectly still. They should patrol or wander slightly when idle.
-   - [ ] **Vision/Awareness**: Units only react to things within a certain "Vision Radius" (Fog of War logic).
-
----
-
 # UI & Interaction Roadmap (Step-by-Step)
 
 1. **Hardcoded View**
@@ -242,6 +221,28 @@ Once the RTS Foundation (Milestone 0) is complete, we will iterate on the simula
     - Save/Load Game state.
     - Styled UI themes, animations, and sound effects for interactions.
     - Complete game loop with Win/Loss screens.
+
+---
+
+# Gameplay: Simple RTS
+
+1. **Combat Basics**
+   - [ ] Units have Health and Damage.
+   - [ ] Attack range checks.
+   - [ ] Projectile simulation (if not hitscan).
+
+2. **Unit Interactions**
+   - [ ] Friendly fire logic (optional).
+   - [ ] Reaction to being hit (knockback, flashing).
+   - [ ] Destruction/Death effects.
+
+3. **Lifelike Behaviors (Emergent Complexity)**
+   - [ ] **Predator/Prey Dynamics**: Define factions (e.g., "Wolves" vs "Sheep"). Wolves auto-hunt Sheep; Sheep auto-flee Wolves.
+   - [ ] **Self-Preservation**: Units flee from enemies if HP is low (< 20%).
+   - [ ] **Social Aggro**: If a unit is attacked, nearby allies automatically target the attacker ("Help call").
+   - [ ] **Idle Wandering**: Units shouldn't stand perfectly still. They should patrol or wander slightly when idle.
+   - [ ] **Vision/Awareness**: Units only react to things within a certain "Vision Radius" (Fog of War logic).
+
 
 ---
 
