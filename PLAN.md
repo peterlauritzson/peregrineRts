@@ -102,8 +102,8 @@ Once the RTS Foundation (Milestone 0) is complete, we will iterate on the simula
    - [x] Units collide and slide against these static obstacles.
 
 8. **Steering Behaviors (Boids)**
-   - Implement Separation, Alignment, and Cohesion.
-   - Units move as a flock rather than individual particles.
+   - [x] Implement Separation, Alignment, and Cohesion.
+   - [x] Units move as a flock rather than individual particles.
 
 9. **Pathfinding (The Labyrinth)**
    - Create a complex map (maze-like).

@@ -5,12 +5,14 @@ mod unit;
 mod control;
 mod simulation;
 mod config;
+pub mod math;
 
 use camera::RtsCameraPlugin;
 use unit::UnitPlugin;
 use control::ControlPlugin;
 use simulation::{SimulationPlugin, SimPosition, StaticObstacle};
 use config::GameConfigPlugin;
+use math::{FixedVec2, FixedNum};
 
 pub struct GamePlugin;
 
@@ -67,7 +69,7 @@ fn setup_game(
         Mesh3d(meshes.add(Cylinder::new(obstacle_radius, 2.0))),
         MeshMaterial3d(materials.add(Color::srgb(0.5, 0.5, 0.5))),
         Transform::from_xyz(obstacle_pos.x, 1.0, obstacle_pos.y),
-        SimPosition(obstacle_pos),
-        StaticObstacle { radius: obstacle_radius },
+        SimPosition(FixedVec2::from_f32(obstacle_pos.x, obstacle_pos.y)),
+        StaticObstacle { radius: FixedNum::from_num(obstacle_radius) },
     ));
 }

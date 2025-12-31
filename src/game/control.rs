@@ -1,7 +1,8 @@
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use crate::game::unit::{Unit, Selected};
-use crate::game::simulation::SimTarget;
+use crate::game::simulation::UnitMoveCommand;
+use crate::game::math::FixedVec2;
 use crate::game::camera::RtsCamera;
 
 pub struct ControlPlugin;
@@ -46,6 +47,7 @@ fn handle_input(
     q_selected: Query<Entity, With<Selected>>,
     mut drag_state: ResMut<DragState>,
     mut q_selection_box: Query<(&mut Node, &mut Visibility), With<SelectionBox>>,
+    mut move_events: MessageWriter<UnitMoveCommand>,
 ) {
     let Some((camera, camera_transform)) = q_camera.iter().next() else { return };
     let Some(window) = q_window.iter().next() else { return };
@@ -158,7 +160,11 @@ fn handle_input(
                 
                 // Command all selected units to move
                 for entity in q_selected.iter() {
-                    commands.entity(entity).insert(SimTarget(intersection_point.xz()));
+                    move_events.write(UnitMoveCommand {
+                        player_id: 0, // Local player
+                        entity,
+                        target: FixedVec2::from_f32(intersection_point.x, intersection_point.z),
+                    });
                 }
             }
         }

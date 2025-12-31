@@ -12,6 +12,13 @@ pub struct GameConfig {
     pub collision_push_strength: f32,
     pub obstacle_push_strength: f32,
     pub arrival_threshold: f32,
+    
+    // Boids
+    pub separation_weight: f32,
+    pub alignment_weight: f32,
+    pub cohesion_weight: f32,
+    pub neighbor_radius: f32,
+    pub separation_radius: f32,
 }
 
 #[derive(Resource)]

@@ -7,4 +7,11 @@
     collision_push_strength: 10.0,
     obstacle_push_strength: 20.0,
     arrival_threshold: 0.01,
+    
+    // Boids
+    separation_weight: 1.5,
+    alignment_weight: 1.0,
+    cohesion_weight: 1.0,
+    neighbor_radius: 5.0,
+    separation_radius: 1.5,
 )
