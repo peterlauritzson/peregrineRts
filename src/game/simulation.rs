@@ -151,10 +151,14 @@ fn update_sim_from_config(
     }
 }
 
+use crate::game::pathfinding::{PathRequest, Path};
+
 fn process_input(
     mut commands: Commands,
     mut move_events: MessageReader<UnitMoveCommand>,
     mut spawn_events: MessageReader<SpawnUnitCommand>,
+    mut path_requests: MessageWriter<PathRequest>,
+    query: Query<&SimPosition>,
 ) {
     // Deterministic Input Processing:
     // 1. Collect all events
@@ -166,8 +170,17 @@ fn process_input(
     moves.sort_by_key(|e| e.player_id);
     
     for event in moves {
-        // Direct Seek: Just set the target. No Flow Field generation.
-        commands.entity(event.entity).insert(SimTarget(event.target));
+        if let Ok(pos) = query.get(event.entity) {
+            // Send Path Request instead of setting SimTarget directly
+            path_requests.write(PathRequest {
+                entity: event.entity,
+                start: pos.0,
+                goal: event.target,
+            });
+            // Remove old target/path components to stop movement until path is found
+            commands.entity(event.entity).remove::<SimTarget>();
+            commands.entity(event.entity).remove::<Path>();
+        }
     }
 
     // Handle Spawn Commands
@@ -212,8 +225,13 @@ pub struct Colliding;
 /// Component for static circular obstacles.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct StaticObstacle {
+    #[allow(dead_code)]
     pub radius: FixedNum,
 }
+
+/// Component to mark obstacles that are part of the flow field.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct FlowFieldObstacle;
 
 fn cache_previous_state(
     mut query: Query<(&mut SimPositionPrev, &SimPosition)>,
@@ -358,24 +376,59 @@ fn apply_global_flow(
 
 fn resolve_obstacle_collisions(
     mut units: Query<(&SimPosition, &mut SimVelocity), Without<StaticObstacle>>,
-    obstacles: Query<(&SimPosition, &StaticObstacle)>,
+    map_flow_field: Res<MapFlowField>,
     sim_config: Res<SimConfig>,
+    free_obstacles: Query<(&SimPosition, &StaticObstacle), Without<FlowFieldObstacle>>,
 ) {
     let unit_radius = sim_config.unit_radius;
     let strength = sim_config.obstacle_push_strength;
+    let flow_field = &map_flow_field.0;
+    let obstacle_radius = flow_field.cell_size / FixedNum::from_num(2.0);
+    let min_dist = unit_radius + obstacle_radius;
+    let min_dist_sq = min_dist * min_dist;
     
     for (u_pos, mut u_vel) in units.iter_mut() {
-        for (o_pos, obstacle) in obstacles.iter() {
-            let min_dist = unit_radius + obstacle.radius;
-            let min_dist_sq = min_dist * min_dist;
+        if let Some((cx, cy)) = flow_field.world_to_grid(u_pos.0) {
+            // Check 3x3 neighbors
+            let range = 1;
+            let min_x = if cx >= range { cx - range } else { 0 };
+            let max_x = if cx + range < flow_field.width { cx + range } else { flow_field.width - 1 };
+            let min_y = if cy >= range { cy - range } else { 0 };
+            let max_y = if cy + range < flow_field.height { cy + range } else { flow_field.height - 1 };
+
+            for y in min_y..=max_y {
+                for x in min_x..=max_x {
+                    if flow_field.cost_field[flow_field.get_index(x, y)] == 255 {
+                        let o_pos = flow_field.grid_to_world(x, y);
+                        let delta = u_pos.0 - o_pos;
+                        let dist_sq = delta.length_squared();
+                        
+                        if dist_sq < min_dist_sq && dist_sq > FixedNum::from_num(0.0001) {
+                            // info!("Obstacle collision detected!");
+                            let dist = dist_sq.sqrt();
+                            let overlap = min_dist - dist;
+                            let dir = delta / dist;
+                            
+                            let impulse = dir * overlap * strength;
+                            
+                            u_vel.0 = u_vel.0 + impulse;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check free obstacles (not in flow field)
+        for (obs_pos, obs) in free_obstacles.iter() {
+            let min_dist_free = unit_radius + obs.radius;
+            let min_dist_sq_free = min_dist_free * min_dist_free;
             
-            let delta = u_pos.0 - o_pos.0;
+            let delta = u_pos.0 - obs_pos.0;
             let dist_sq = delta.length_squared();
             
-            if dist_sq < min_dist_sq && dist_sq > FixedNum::from_num(0.0001) {
-                // info!("Obstacle collision detected!");
+            if dist_sq < min_dist_sq_free && dist_sq > FixedNum::from_num(0.0001) {
                 let dist = dist_sq.sqrt();
-                let overlap = min_dist - dist;
+                let overlap = min_dist_free - dist;
                 let dir = delta / dist;
                 
                 let impulse = dir * overlap * strength;
@@ -430,6 +483,7 @@ fn init_flow_field(
                 let pos = flow_field.grid_to_world(x, y);
                 commands.spawn((
                     StaticObstacle { radius: obstacle_radius },
+                    FlowFieldObstacle,
                     SimPosition(pos),
                     Mesh3d(obstacle_mesh.clone()),
                     MeshMaterial3d(obstacle_mat.clone()),
@@ -542,27 +596,84 @@ fn check_arrival_crowding(
 
 pub fn follow_direct_target(
     mut commands: Commands,
-    mut query: Query<(Entity, &SimPosition, &mut SimVelocity, &SimTarget)>,
+    mut query: Query<(Entity, &SimPosition, &mut SimVelocity, &mut Path)>,
     sim_config: Res<SimConfig>,
+    map_flow_field: Res<MapFlowField>,
 ) {
     let speed = sim_config.unit_speed;
     let threshold = sim_config.arrival_threshold;
     let threshold_sq = threshold * threshold;
+    let flow_field = &map_flow_field.0;
+    let check_radius = sim_config.unit_radius + flow_field.cell_size / FixedNum::from_num(1.5); 
+    let check_radius_sq = check_radius * check_radius;
 
-    for (entity, pos, mut vel, target) in query.iter_mut() {
-        // Check if reached target
-        let delta = target.0 - pos.0;
+    for (entity, pos, mut vel, mut path) in query.iter_mut() {
+        if path.current_index >= path.waypoints.len() {
+            vel.0 = FixedVec2::ZERO;
+            continue;
+        }
+
+        let target = path.waypoints[path.current_index];
+        let delta = target - pos.0;
         let dist_sq = delta.length_squared();
         
+        // Check if reached current waypoint
         if dist_sq < threshold_sq {
-             vel.0 = FixedVec2::ZERO;
-             commands.entity(entity).remove::<SimTarget>();
+             path.current_index += 1;
+             if path.current_index >= path.waypoints.len() {
+                 vel.0 = FixedVec2::ZERO;
+                 commands.entity(entity).remove::<Path>();
+             }
              continue;
         }
 
-        // Direct Seek
+        // Direct Seek to Waypoint
         if dist_sq > FixedNum::ZERO {
-            vel.0 = delta.normalize() * speed;
+            let mut desired_dir = delta.normalize();
+
+            // Obstacle Avoidance / Sliding (Local)
+            if let Some((cx, cy)) = flow_field.world_to_grid(pos.0) {
+                let mut avoidance = FixedVec2::ZERO;
+                let mut count = 0;
+
+                // Check 3x3 neighborhood
+                let range = 1; 
+                let min_x = if cx >= range { cx - range } else { 0 };
+                let max_x = if cx + range < flow_field.width { cx + range } else { flow_field.width - 1 };
+                let min_y = if cy >= range { cy - range } else { 0 };
+                let max_y = if cy + range < flow_field.height { cy + range } else { flow_field.height - 1 };
+
+                for y in min_y..=max_y {
+                    for x in min_x..=max_x {
+                        // If it's an obstacle
+                        if flow_field.cost_field[flow_field.get_index(x, y)] == 255 {
+                            let obs_pos = flow_field.grid_to_world(x, y);
+                            let to_unit = pos.0 - obs_pos;
+                            let dist_to_obs_sq = to_unit.length_squared();
+                            
+                            if dist_to_obs_sq < check_radius_sq && dist_to_obs_sq > FixedNum::from_num(0.0001) {
+                                let dist = dist_to_obs_sq.sqrt();
+                                // Repulsion vector
+                                let push = to_unit / dist; 
+                                avoidance = avoidance + push;
+                                count += 1;
+                            }
+                        }
+                    }
+                }
+
+                if count > 0 {
+                    let avoid_dir = avoidance.normalize();
+                    // Slide: remove component of desired_dir that opposes avoid_dir (i.e. points into the wall)
+                    let dot = desired_dir.dot(avoid_dir);
+                    if dot < FixedNum::ZERO {
+                        desired_dir = desired_dir - avoid_dir * dot;
+                        desired_dir = desired_dir.normalize();
+                    }
+                }
+            }
+
+            vel.0 = desired_dir * speed;
         }
     }
 }

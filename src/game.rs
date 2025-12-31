@@ -8,12 +8,14 @@ mod config;
 pub mod math;
 pub mod flow_field;
 pub mod spatial_hash;
+pub mod pathfinding;
 
 use camera::RtsCameraPlugin;
 use unit::UnitPlugin;
 use control::ControlPlugin;
 use simulation::{SimulationPlugin, SimPosition, StaticObstacle};
 use config::GameConfigPlugin;
+use pathfinding::PathfindingPlugin;
 use math::{FixedVec2, FixedNum};
 
 pub struct GamePlugin;
@@ -26,6 +28,7 @@ impl Plugin for GamePlugin {
             ControlPlugin,
             SimulationPlugin,
             GameConfigPlugin,
+            PathfindingPlugin,
         ))
         .add_systems(Startup, setup_game);
     }
