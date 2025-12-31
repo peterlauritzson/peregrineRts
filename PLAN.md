@@ -111,7 +111,7 @@ Once the RTS Foundation (Milestone 0) is complete, we will iterate on the simula
    - [x] Units navigate from Start to Goal avoiding walls.
 
    > **Note:** Before attempting the 10M unit goal, we must replace the $O(N^2)$ collision checks with a Spatial Hash Grid or Quadtree to improve performance.
-   > **Note:** Pathfinding has been simplified to Direct Seek for performance. We need to ensure it still exhibits complex behavior (e.g. via local avoidance/steering) so units don't look completely unintelligent. Or some stochastic behaviour when it doesn't reach the goal, etc.
+   > **Note:** Pathfinding has been simplified to Direct Seek for performance. We need to ensure it still exhibits complex behavior (e.g. via local avoidance/steering) so units don't look completely unintelligent. Or some stochastic behaviour when it doesn't reach the goal, etc. The pathfinding should use some pre-generated information if possible, so that the units can make some kind of reasonable decisions. We are fine with taking a long time before we start the game, it's just afterwards that it needs to be fast.
 
 10. **The "Million" Unit Stress Test**
     - Massive unit count.

@@ -2,6 +2,7 @@ use bevy::prelude::*;
 use crate::game::config::{GameConfig, GameConfigHandle};
 use crate::game::math::{FixedVec2, FixedNum};
 use crate::game::flow_field::{FlowField, CELL_SIZE};
+use crate::game::spatial_hash::SpatialHash;
 // use std::collections::HashMap;
 
 pub struct SimulationPlugin;
@@ -71,6 +72,7 @@ impl Plugin for SimulationPlugin {
         app.insert_resource(Time::<Fixed>::from_seconds(1.0 / 20.0)); 
         app.init_resource::<GlobalFlow>();
         app.init_resource::<SimConfig>();
+        app.insert_resource(SpatialHash::new(FixedNum::from_num(100), FixedNum::from_num(100), FixedNum::from_num(2)));
         // app.init_resource::<FlowFieldCache>();
         app.insert_resource(MapFlowField(FlowField::default()));
         app.init_resource::<DebugConfig>();
@@ -96,6 +98,7 @@ impl Plugin for SimulationPlugin {
             apply_friction.in_set(SimSet::Steering).before(follow_direct_target),
             follow_direct_target.in_set(SimSet::Steering),
             apply_velocity.in_set(SimSet::Integration),
+            update_spatial_hash.in_set(SimSet::Physics).before(detect_collisions).before(resolve_collisions),
             apply_global_flow.in_set(SimSet::Physics).before(resolve_collisions),
             constrain_to_map_bounds.in_set(SimSet::Physics),
             detect_collisions.in_set(SimSet::Physics),
@@ -108,6 +111,7 @@ impl Plugin for SimulationPlugin {
 fn update_sim_from_config(
     mut fixed_time: ResMut<Time<Fixed>>,
     mut sim_config: ResMut<SimConfig>,
+    mut spatial_hash: ResMut<SpatialHash>,
     config_handle: Res<GameConfigHandle>,
     game_configs: Res<Assets<GameConfig>>,
     mut events: MessageReader<AssetEvent<GameConfig>>,
@@ -132,6 +136,14 @@ fn update_sim_from_config(
                  sim_config.cohesion_weight = FixedNum::from_num(config.cohesion_weight);
                  sim_config.neighbor_radius = FixedNum::from_num(config.neighbor_radius);
                  sim_config.separation_radius = FixedNum::from_num(config.separation_radius);
+
+                 // Resize spatial hash. Cell size should be at least diameter of unit (2 * radius)
+                 // Using neighbor_radius might be better if we use it for boids too.
+                 // But for collision, 2*radius is enough.
+                 // Let's use max(2*radius, neighbor_radius) to support both if we want to use it for boids later.
+                 // For now, just 2*radius + margin.
+                 let cell_size = sim_config.unit_radius * FixedNum::from_num(2.0) * FixedNum::from_num(1.5);
+                 spatial_hash.resize(sim_config.map_width, sim_config.map_height, cell_size);
 
                  info!("Updated tick rate to {}", config.tick_rate);
              }
@@ -250,33 +262,25 @@ fn detect_collisions(
     mut commands: Commands,
     query: Query<(Entity, &SimPosition)>,
     sim_config: Res<SimConfig>,
+    spatial_hash: Res<SpatialHash>,
 ) {
     let radius = sim_config.unit_radius;
-
-    // Reset collision state
-    // Note: In a real ECS, adding/removing components every frame can be expensive (archetype moves).
-    // For now, it's fine for prototyping. A better way would be a boolean field or a resource.
-    // Or we can just query for Colliding and remove it if not colliding.
-    
-    // First, collect all positions
-    let mut units: Vec<(Entity, FixedVec2)> = query.iter().map(|(e, p)| (e, p.0)).collect();
-    units.sort_by_key(|(e, _)| *e); // Sort for determinism
-
     let collision_dist_sq = (radius * FixedNum::from_num(2.0)) * (radius * FixedNum::from_num(2.0));
 
     let mut colliding_entities = std::collections::HashSet::new();
 
-    // N^2 check
-    for i in 0..units.len() {
-        for j in (i + 1)..units.len() {
-            let (e1, p1) = units[i];
-            let (e2, p2) = units[j];
-
-            // Distance squared check
-            let delta = p1 - p2;
-            if delta.length_squared() < collision_dist_sq {
-                colliding_entities.insert(e1);
-                colliding_entities.insert(e2);
+    for (entity, pos) in query.iter() {
+        let potential_collisions = spatial_hash.get_potential_collisions(pos.0, radius * FixedNum::from_num(2.0));
+        
+        for other_entity in potential_collisions {
+            if entity == other_entity { continue; }
+            
+            if let Ok((_, other_pos)) = query.get(other_entity) {
+                let delta = pos.0 - other_pos.0;
+                if delta.length_squared() < collision_dist_sq {
+                    colliding_entities.insert(entity);
+                    break; 
+                }
             }
         }
     }
@@ -294,51 +298,50 @@ fn detect_collisions(
 fn resolve_collisions(
     mut query: Query<(Entity, &SimPosition, &mut SimVelocity)>,
     sim_config: Res<SimConfig>,
+    spatial_hash: Res<SpatialHash>,
 ) {
     let radius = sim_config.unit_radius;
     let min_dist = radius * FixedNum::from_num(2.0);
     let min_dist_sq = min_dist * min_dist;
     let strength = sim_config.collision_push_strength;
     
-    // Collect and sort for determinism
-    let mut units: Vec<_> = query.iter_mut().collect();
-    units.sort_by_key(|(e, _, _)| *e);
+    // Collect positions for lookups
+    let positions: std::collections::HashMap<Entity, FixedVec2> = query.iter().map(|(e, p, _)| (e, p.0)).collect();
+    
+    let mut impulses = std::collections::HashMap::new();
 
-    let mut impulses = vec![FixedVec2::ZERO; units.len()];
-
-    for i in 0..units.len() {
-        for j in (i + 1)..units.len() {
-            let (_, pos1, _) = units[i];
-            let (_, pos2, _) = units[j];
+    for (entity, pos, _) in query.iter() {
+        let potential_collisions = spatial_hash.get_potential_collisions(pos.0, min_dist);
+        let mut total_impulse = FixedVec2::ZERO;
+        
+        for other_entity in potential_collisions {
+            if entity == other_entity { continue; }
             
-            let delta = pos1.0 - pos2.0;
-            let dist_sq = delta.length_squared();
-            
-            if dist_sq < min_dist_sq && dist_sq > FixedNum::from_num(0.0001) {
-                let _dist = dist_sq.sqrt(); // Fixed point sqrt
-                // Wait, FixedVec2::length() returns Fixed.
-                // But here I have dist_sq which is Fixed.
-                // I need sqrt of Fixed.
-                // Assuming Fixed implements sqrt via num-traits or similar if available, 
-                // or I can use a helper.
-                // Since I don't have easy sqrt on Fixed without features, let's use a rough approximation or assume it works.
-                // Actually, `fixed` crate types have `sqrt()` method.
-                let dist = dist_sq.sqrt();
-
-                let overlap = min_dist - dist;
-                let dir = delta / dist;
+            if let Some(other_pos) = positions.get(&other_entity) {
+                let delta = pos.0 - *other_pos;
+                let dist_sq = delta.length_squared();
                 
-                let impulse = dir * overlap * strength;
-                
-                impulses[i] = impulses[i] + impulse;
-                impulses[j] = impulses[j] - impulse;
+                if dist_sq < min_dist_sq && dist_sq > FixedNum::from_num(0.0001) {
+                    let dist = dist_sq.sqrt();
+                    let overlap = min_dist - dist;
+                    let dir = delta / dist;
+                    
+                    let impulse = dir * overlap * strength;
+                    total_impulse = total_impulse + impulse;
+                }
             }
+        }
+        
+        if total_impulse.x != FixedNum::ZERO || total_impulse.y != FixedNum::ZERO {
+            impulses.insert(entity, total_impulse);
         }
     }
 
     // Apply impulses
-    for (i, (_, _, vel)) in units.iter_mut().enumerate() {
-        vel.0 = vel.0 + impulses[i];
+    for (entity, _, mut vel) in query.iter_mut() {
+        if let Some(impulse) = impulses.get(&entity) {
+            vel.0 = vel.0 + *impulse;
+        }
     }
 }
 
@@ -497,6 +500,7 @@ fn check_arrival_crowding(
     query: Query<(Entity, &SimPosition, &SimTarget)>,
     other_units: Query<(Entity, &SimPosition, Option<&SimTarget>), With<SimPosition>>,
     sim_config: Res<SimConfig>,
+    spatial_hash: Res<SpatialHash>,
 ) {
     let radius = sim_config.unit_radius;
     // Use a slightly larger radius for "touching" to be safe
@@ -512,19 +516,23 @@ fn check_arrival_crowding(
         
         if dist_to_target_sq < check_dist_sq {
             // Check for collision with arrived units
-            for (other_entity, other_pos, other_target) in other_units.iter() {
+            let potential_collisions = spatial_hash.get_potential_collisions(pos.0, touch_dist);
+            
+            for other_entity in potential_collisions {
                 if entity == other_entity { continue; }
                 
-                // If other unit has NO target, it is arrived/stopped.
-                if other_target.is_none() {
-                    let dist_sq = (pos.0 - other_pos.0).length_squared();
-                    if dist_sq < collision_dist_sq {
-                        // Colliding with an arrived unit, and we are close to target.
-                        // Consider arrived.
-                        commands.entity(entity).remove::<SimTarget>();
-                        // Also zero velocity to stop immediately
-                        commands.entity(entity).insert(SimVelocity(FixedVec2::ZERO));
-                        break; 
+                if let Ok((_, other_pos, other_target)) = other_units.get(other_entity) {
+                    // If other unit has NO target, it is arrived/stopped.
+                    if other_target.is_none() {
+                        let dist_sq = (pos.0 - other_pos.0).length_squared();
+                        if dist_sq < collision_dist_sq {
+                            // Colliding with an arrived unit, and we are close to target.
+                            // Consider arrived.
+                            commands.entity(entity).remove::<SimTarget>();
+                            // Also zero velocity to stop immediately
+                            commands.entity(entity).insert(SimVelocity(FixedVec2::ZERO));
+                            break; 
+                        }
                     }
                 }
             }
@@ -556,5 +564,15 @@ pub fn follow_direct_target(
         if dist_sq > FixedNum::ZERO {
             vel.0 = delta.normalize() * speed;
         }
+    }
+}
+
+fn update_spatial_hash(
+    mut spatial_hash: ResMut<SpatialHash>,
+    query: Query<(Entity, &SimPosition)>,
+) {
+    spatial_hash.clear();
+    for (entity, pos) in query.iter() {
+        spatial_hash.insert(entity, pos.0);
     }
 }
