@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use crate::game::simulation::{SimPosition, SimPositionPrev, SimVelocity, SimTarget, SimSet, Colliding, SimConfig, SpawnUnitCommand};
+use crate::game::simulation::{SimPosition, SimPositionPrev, SimVelocity, SimSet, Colliding, SimConfig, SpawnUnitCommand, follow_direct_target};
 use crate::game::math::{FixedVec2, FixedNum};
 
 #[derive(Component)]
@@ -23,37 +23,9 @@ pub struct UnitPlugin;
 impl Plugin for UnitPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, (setup_unit_resources, spawn_test_unit).chain())
-           .add_systems(FixedUpdate, (unit_movement_logic, apply_boids_steering).chain().in_set(SimSet::Steering))
+           // unit_movement_logic is replaced by follow_flow_field in simulation.rs
+           .add_systems(FixedUpdate, (apply_boids_steering).chain().in_set(SimSet::Steering).after(follow_direct_target))
            .add_systems(Update, (spawn_unit_visuals, update_selection_visuals, sync_visuals));
-    }
-}
-
-pub fn unit_movement_logic(
-    mut commands: Commands,
-    mut query: Query<(Entity, &SimPosition, &mut SimVelocity, &SimTarget)>,
-    sim_config: Res<SimConfig>,
-) {
-    let speed = sim_config.unit_speed;
-    let delta = FixedNum::from_num(1.0) / FixedNum::from_num(sim_config.tick_rate);
-    let arrival_threshold = sim_config.arrival_threshold;
-
-    for (entity, pos, mut vel, target) in query.iter_mut() {
-        let direction = target.0 - pos.0;
-        let distance = direction.length();
-        
-        if distance < arrival_threshold {
-            vel.0 = FixedVec2::ZERO;
-            commands.entity(entity).remove::<SimTarget>();
-        } else if distance <= speed * delta {
-            // Arrive in this tick
-            if delta > FixedNum::ZERO {
-                vel.0 = direction / delta;
-            } else {
-                vel.0 = FixedVec2::ZERO;
-            }
-        } else {
-            vel.0 = direction.normalize() * speed;
-        }
     }
 }
 

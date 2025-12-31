@@ -106,9 +106,12 @@ Once the RTS Foundation (Milestone 0) is complete, we will iterate on the simula
    - [x] Units move as a flock rather than individual particles.
 
 9. **Pathfinding (The Labyrinth)**
-   - Create a complex map (maze-like).
-   - Implement Flow Fields or A* for pathfinding.
-   - Units navigate from Start to Goal avoiding walls.
+   - [x] Create a complex map (maze-like).
+   - [x] Implement Flow Fields or A* for pathfinding.
+   - [x] Units navigate from Start to Goal avoiding walls.
+
+   > **Note:** Before attempting the 10M unit goal, we must replace the $O(N^2)$ collision checks with a Spatial Hash Grid or Quadtree to improve performance.
+   > **Note:** Pathfinding has been simplified to Direct Seek for performance. We need to ensure it still exhibits complex behavior (e.g. via local avoidance/steering) so units don't look completely unintelligent. Or some stochastic behaviour when it doesn't reach the goal, etc.
 
 10. **The "Million" Unit Stress Test**
     - Massive unit count.

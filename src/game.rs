@@ -6,6 +6,7 @@ mod control;
 mod simulation;
 mod config;
 pub mod math;
+pub mod flow_field;
 
 use camera::RtsCameraPlugin;
 use unit::UnitPlugin;

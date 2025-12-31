@@ -1,6 +1,8 @@
 use bevy::prelude::*;
 use crate::game::config::{GameConfig, GameConfigHandle};
 use crate::game::math::{FixedVec2, FixedNum};
+use crate::game::flow_field::{FlowField, CELL_SIZE};
+// use std::collections::HashMap;
 
 pub struct SimulationPlugin;
 
@@ -16,6 +18,9 @@ pub enum SimSet {
 pub struct GlobalFlow {
     pub velocity: FixedVec2,
 }
+
+#[derive(Resource, Default)]
+pub struct MapFlowField(pub FlowField);
 
 #[derive(Event, Message, Debug, Clone)]
 pub struct UnitMoveCommand {
@@ -47,6 +52,17 @@ pub struct SimConfig {
     pub separation_radius: FixedNum,
 }
 
+#[derive(Resource)]
+pub struct DebugConfig {
+    pub show_flow_field: bool,
+}
+
+impl Default for DebugConfig {
+    fn default() -> Self {
+        Self { show_flow_field: false }
+    }
+}
+
 impl Plugin for SimulationPlugin {
     fn build(&self, app: &mut App) {
         // Configure FixedUpdate
@@ -55,6 +71,9 @@ impl Plugin for SimulationPlugin {
         app.insert_resource(Time::<Fixed>::from_seconds(1.0 / 20.0)); 
         app.init_resource::<GlobalFlow>();
         app.init_resource::<SimConfig>();
+        // app.init_resource::<FlowFieldCache>();
+        app.insert_resource(MapFlowField(FlowField::default()));
+        app.init_resource::<DebugConfig>();
         // app.register_type::<GlobalFlow>(); // Removed Reflect
         app.add_message::<UnitMoveCommand>();
         app.add_message::<SpawnUnitCommand>();
@@ -68,10 +87,14 @@ impl Plugin for SimulationPlugin {
         ).chain());
 
         // Register Systems
-        app.add_systems(Update, update_sim_from_config);
+        app.add_systems(Startup, init_flow_field);
+        app.add_systems(Update, (update_sim_from_config, toggle_debug, draw_flow_field_gizmos));
         app.add_systems(FixedUpdate, (
             cache_previous_state.in_set(SimSet::Input),
             process_input.in_set(SimSet::Input),
+            check_arrival_crowding.in_set(SimSet::Steering).before(follow_direct_target),
+            apply_friction.in_set(SimSet::Steering).before(follow_direct_target),
+            follow_direct_target.in_set(SimSet::Steering),
             apply_velocity.in_set(SimSet::Integration),
             apply_global_flow.in_set(SimSet::Physics).before(resolve_collisions),
             constrain_to_map_bounds.in_set(SimSet::Physics),
@@ -131,6 +154,7 @@ fn process_input(
     moves.sort_by_key(|e| e.player_id);
     
     for event in moves {
+        // Direct Seek: Just set the target. No Flow Field generation.
         commands.entity(event.entity).insert(SimTarget(event.target));
     }
 
@@ -167,7 +191,7 @@ pub struct SimVelocity(pub FixedVec2);
 
 /// Logical target position for movement.
 #[derive(Component, Debug, Clone, Copy, Default)]
-pub struct SimTarget(pub FixedVec2);
+pub struct SimTarget(#[allow(dead_code)] pub FixedVec2);
 
 /// Component to mark if a unit is currently colliding with another unit.
 #[derive(Component, Debug, Clone, Copy, Default)]
@@ -355,6 +379,182 @@ fn resolve_obstacle_collisions(
                 
                 u_vel.0 = u_vel.0 + impulse;
             }
+        }
+    }
+}
+
+fn init_flow_field(
+    mut commands: Commands, 
+    mut map_flow_field: ResMut<MapFlowField>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let width = 50;
+    let height = 50;
+    let cell_size = FixedNum::from_num(CELL_SIZE);
+    let origin = FixedVec2::new(
+        FixedNum::from_num(-(width as f32) * CELL_SIZE / 2.0),
+        FixedNum::from_num(-(height as f32) * CELL_SIZE / 2.0),
+    );
+
+    map_flow_field.0 = FlowField::new(width, height, cell_size, origin);
+    let flow_field = &mut map_flow_field.0;
+
+    // Create a maze-like structure
+    // Simple walls
+    for x in 10..40 {
+        flow_field.set_obstacle(x, 25); // Horizontal wall
+    }
+    for y in 10..40 {
+        if y != 25 { // Leave a gap
+             flow_field.set_obstacle(25, y); // Vertical wall
+        }
+    }
+    
+    // Add some random blocks (deterministic)
+    flow_field.set_obstacle(15, 15);
+    flow_field.set_obstacle(35, 35);
+    flow_field.set_obstacle(15, 35);
+    flow_field.set_obstacle(35, 15);
+
+    let obstacle_radius = cell_size / FixedNum::from_num(2.0);
+    let obstacle_mesh = meshes.add(Cylinder::new(obstacle_radius.to_num::<f32>(), 2.0));
+    let obstacle_mat = materials.add(Color::srgb(0.5, 0.5, 0.5));
+    
+    for y in 0..height {
+        for x in 0..width {
+            if flow_field.cost_field[flow_field.get_index(x, y)] == 255 {
+                let pos = flow_field.grid_to_world(x, y);
+                commands.spawn((
+                    StaticObstacle { radius: obstacle_radius },
+                    SimPosition(pos),
+                    Mesh3d(obstacle_mesh.clone()),
+                    MeshMaterial3d(obstacle_mat.clone()),
+                    Transform::from_xyz(pos.x.to_num(), 1.0, pos.y.to_num()),
+                ));
+            }
+        }
+    }
+}
+
+fn toggle_debug(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut debug_config: ResMut<DebugConfig>,
+) {
+    if keyboard.just_pressed(KeyCode::KeyG) {
+        debug_config.show_flow_field = !debug_config.show_flow_field;
+        info!("Flow field debug: {}", debug_config.show_flow_field);
+    }
+}
+
+fn draw_flow_field_gizmos(
+    // flow_field_cache: Res<FlowFieldCache>,
+    debug_config: Res<DebugConfig>,
+    _gizmos: Gizmos,
+) {
+    if !debug_config.show_flow_field {
+        return;
+    }
+
+    // Flow fields are currently disabled for performance.
+    // If we re-enable them, we can uncomment this.
+    /*
+    // Draw the first active flow field found
+    if let Some(flow_field) = flow_field_cache.fields.values().next() {
+        for y in 0..flow_field.height {
+            for x in 0..flow_field.width {
+                let idx = flow_field.get_index(x, y);
+                let vec = flow_field.vector_field[idx];
+                if vec != FixedVec2::ZERO {
+                    let start = flow_field.grid_to_world(x, y).to_vec2();
+                    let end = start + vec.to_vec2() * 0.8; // Scale for visibility
+                    gizmos.arrow(
+                        Vec3::new(start.x, 0.5, start.y),
+                        Vec3::new(end.x, 0.5, end.y),
+                        Color::WHITE,
+                    );
+                }
+            }
+        }
+    }
+    */
+}
+
+fn apply_friction(
+    mut query: Query<&mut SimVelocity>,
+) {
+    let friction = FixedNum::from_num(0.9);
+    for mut vel in query.iter_mut() {
+        vel.0 = vel.0 * friction;
+        if vel.0.length_squared() < FixedNum::from_num(0.01) {
+            vel.0 = FixedVec2::ZERO;
+        }
+    }
+}
+
+fn check_arrival_crowding(
+    mut commands: Commands,
+    query: Query<(Entity, &SimPosition, &SimTarget)>,
+    other_units: Query<(Entity, &SimPosition, Option<&SimTarget>), With<SimPosition>>,
+    sim_config: Res<SimConfig>,
+) {
+    let radius = sim_config.unit_radius;
+    // Use a slightly larger radius for "touching" to be safe
+    let touch_dist = radius * FixedNum::from_num(2.1);
+    let collision_dist_sq = touch_dist * touch_dist; 
+    // If within a reasonable distance to target (e.g. 3 unit radii or threshold)
+    // If they are crowding, they might be a bit further than threshold.
+    let check_dist = radius * FixedNum::from_num(4.0);
+    let check_dist_sq = check_dist * check_dist;
+
+    for (entity, pos, target) in query.iter() {
+        let dist_to_target_sq = (pos.0 - target.0).length_squared();
+        
+        if dist_to_target_sq < check_dist_sq {
+            // Check for collision with arrived units
+            for (other_entity, other_pos, other_target) in other_units.iter() {
+                if entity == other_entity { continue; }
+                
+                // If other unit has NO target, it is arrived/stopped.
+                if other_target.is_none() {
+                    let dist_sq = (pos.0 - other_pos.0).length_squared();
+                    if dist_sq < collision_dist_sq {
+                        // Colliding with an arrived unit, and we are close to target.
+                        // Consider arrived.
+                        commands.entity(entity).remove::<SimTarget>();
+                        // Also zero velocity to stop immediately
+                        commands.entity(entity).insert(SimVelocity(FixedVec2::ZERO));
+                        break; 
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub fn follow_direct_target(
+    mut commands: Commands,
+    mut query: Query<(Entity, &SimPosition, &mut SimVelocity, &SimTarget)>,
+    sim_config: Res<SimConfig>,
+) {
+    let speed = sim_config.unit_speed;
+    let threshold = sim_config.arrival_threshold;
+    let threshold_sq = threshold * threshold;
+
+    for (entity, pos, mut vel, target) in query.iter_mut() {
+        // Check if reached target
+        let delta = target.0 - pos.0;
+        let dist_sq = delta.length_squared();
+        
+        if dist_sq < threshold_sq {
+             vel.0 = FixedVec2::ZERO;
+             commands.entity(entity).remove::<SimTarget>();
+             continue;
+        }
+
+        // Direct Seek
+        if dist_sq > FixedNum::ZERO {
+            vel.0 = delta.normalize() * speed;
         }
     }
 }
