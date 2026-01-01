@@ -2,8 +2,7 @@ use bevy::prelude::*;
 
 use bevy::window::WindowResolution;
 
-mod game;
-use game::GamePlugin;
+use peregrine::game::GamePlugin;
 
 fn main() {
     App::new()

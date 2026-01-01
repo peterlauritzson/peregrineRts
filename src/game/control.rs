@@ -1,9 +1,10 @@
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use crate::game::unit::{Unit, Selected};
-use crate::game::simulation::UnitMoveCommand;
-use crate::game::math::FixedVec2;
+use crate::game::simulation::{UnitMoveCommand, SimPosition, ForceSource, ForceType};
+use crate::game::math::{FixedVec2, FixedNum};
 use crate::game::camera::RtsCamera;
+use crate::game::config::{GameConfig, GameConfigHandle};
 
 pub struct ControlPlugin;
 
@@ -11,7 +12,7 @@ impl Plugin for ControlPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<DragState>()
            .add_systems(Startup, setup_selection_box)
-           .add_systems(Update, handle_input);
+           .add_systems(Update, (handle_input, handle_debug_spawning));
     }
 }
 
@@ -48,10 +49,13 @@ fn handle_input(
     mut drag_state: ResMut<DragState>,
     mut q_selection_box: Query<(&mut Node, &mut Visibility), With<SelectionBox>>,
     mut move_events: MessageWriter<UnitMoveCommand>,
+    config_handle: Res<GameConfigHandle>,
+    game_configs: Res<Assets<GameConfig>>,
 ) {
     let Some((camera, camera_transform)) = q_camera.iter().next() else { return };
     let Some(window) = q_window.iter().next() else { return };
     let Some(cursor_position) = window.cursor_position() else { return };
+    let Some(config) = game_configs.get(&config_handle.0) else { return };
 
     // Left Click: Selection Logic
     if mouse_button.just_pressed(MouseButton::Left) {
@@ -99,7 +103,7 @@ fn handle_input(
             let size = max - min;
 
             // If drag is small, treat as click
-            let is_click = size.length() < 5.0;
+            let is_click = size.length() < config.selection_drag_threshold;
 
             // Deselect all first (unless Shift is held - TODO)
             for (entity, _) in q_units.iter() {
@@ -120,7 +124,7 @@ fn handle_input(
                     let closest_point = ray.origin + ray.direction * projection;
                     let distance_sq = closest_point.distance_squared(unit_pos);
 
-                    if distance_sq < 1.0 { // Radius 1.0
+                    if distance_sq < config.selection_click_radius * config.selection_click_radius { // Radius 1.0
                         if closest_hit.is_none() || projection < closest_hit.unwrap().1 {
                             closest_hit = Some((entity, projection));
                         }
@@ -165,6 +169,62 @@ fn handle_input(
                         entity,
                         target: FixedVec2::from_f32(intersection_point.x, intersection_point.z),
                     });
+                }
+            }
+        }
+    }
+}
+
+fn handle_debug_spawning(
+    mut commands: Commands,
+    keys: Res<ButtonInput<KeyCode>>,
+    q_window: Query<&Window, With<PrimaryWindow>>,
+    q_camera: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
+    config_handle: Res<GameConfigHandle>,
+    game_configs: Res<Assets<GameConfig>>,
+) {
+    let Some((camera, camera_transform)) = q_camera.iter().next() else { return };
+    let Some(window) = q_window.iter().next() else { return };
+    let Some(cursor_position) = window.cursor_position() else { return };
+    let Some(config) = game_configs.get(&config_handle.0) else { return };
+
+    if keys.just_pressed(config.key_spawn_black_hole) || keys.just_pressed(config.key_spawn_wind_spot) {
+         let Ok(ray) = camera.viewport_to_world(camera_transform, cursor_position) else { return };
+        
+        // Intersect with ground plane (y=0)
+        let normal = Vec3::Y;
+        let denom = ray.direction.dot(normal);
+
+        if denom.abs() > 0.0001 {
+            let t = -ray.origin.y / denom;
+            if t >= 0.0 {
+                let intersection_point = ray.origin + ray.direction * t;
+                let pos_fixed = FixedVec2::from_f32(intersection_point.x, intersection_point.z);
+
+                if keys.just_pressed(config.key_spawn_black_hole) {
+                    // Spawn Black Hole (Attract)
+                    info!("Spawning Black Hole at {:?}", pos_fixed);
+                    commands.spawn((
+                        Transform::from_translation(intersection_point),
+                        GlobalTransform::default(),
+                        SimPosition(pos_fixed),
+                        ForceSource {
+                            force_type: ForceType::Radial(FixedNum::from_num(config.black_hole_strength)), // Positive = Attract
+                            radius: FixedNum::from_num(config.force_source_radius),
+                        }
+                    ));
+                } else if keys.just_pressed(config.key_spawn_wind_spot) {
+                    // Spawn Wind Spot (Repel)
+                    info!("Spawning Wind Spot at {:?}", pos_fixed);
+                     commands.spawn((
+                        Transform::from_translation(intersection_point),
+                        GlobalTransform::default(),
+                        SimPosition(pos_fixed),
+                        ForceSource {
+                            force_type: ForceType::Radial(FixedNum::from_num(config.wind_spot_strength)), // Negative = Repel
+                            radius: FixedNum::from_num(config.force_source_radius),
+                        }
+                    ));
                 }
             }
         }

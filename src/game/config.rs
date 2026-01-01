@@ -10,8 +10,46 @@ pub struct GameConfig {
     pub map_height: f32,
     pub unit_radius: f32,
     pub collision_push_strength: f32,
+    pub collision_restitution: f32,
+    pub collision_drag: f32,
+    pub collision_iterations: usize,
+    pub collision_search_radius_multiplier: f32,
+    pub obstacle_search_range: i32,
+    pub epsilon: f32,
     pub obstacle_push_strength: f32,
     pub arrival_threshold: f32,
+
+    // Controls
+    pub key_camera_forward: KeyCode,
+    pub key_camera_backward: KeyCode,
+    pub key_camera_left: KeyCode,
+    pub key_camera_right: KeyCode,
+    pub key_debug_flow: KeyCode,
+    pub key_debug_graph: KeyCode,
+    pub key_spawn_black_hole: KeyCode,
+    pub key_spawn_wind_spot: KeyCode,
+
+    // Camera
+    pub camera_speed: f32,
+    pub camera_zoom_speed: f32,
+
+    // Gameplay
+    pub black_hole_strength: f32,
+    pub wind_spot_strength: f32,
+    pub force_source_radius: f32,
+    pub selection_drag_threshold: f32,
+    pub selection_click_radius: f32,
+
+    // Physics
+    pub max_force: f32,
+    pub steering_force: f32,
+    pub repulsion_force: f32,
+    pub repulsion_decay: f32,
+    pub friction: f32,
+    pub min_velocity: f32,
+    pub braking_force: f32,
+    pub touch_dist_multiplier: f32,
+    pub check_dist_multiplier: f32,
     
     // Boids
     pub separation_weight: f32,

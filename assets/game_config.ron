@@ -4,9 +4,46 @@
     map_width: 50.0,
     map_height: 50.0,
     unit_radius: 0.5,
-    collision_push_strength: 10.0,
-    obstacle_push_strength: 20.0,
+    collision_push_strength: 1.0,
+    collision_restitution: 0.5,
+    collision_drag: 0.02,
+    collision_iterations: 4,
+    collision_search_radius_multiplier: 4.0,
+    obstacle_search_range: 1,
+    epsilon: 0.0001,
+    obstacle_push_strength: 1.0,
     arrival_threshold: 0.01,
+
+    // Controls
+    key_camera_forward: KeyW,
+    key_camera_backward: KeyS,
+    key_camera_left: KeyA,
+    key_camera_right: KeyD,
+    key_debug_flow: KeyF,
+    key_debug_graph: KeyG,
+    key_spawn_black_hole: KeyB,
+    key_spawn_wind_spot: KeyV,
+
+    // Camera
+    camera_speed: 20.0,
+    camera_zoom_speed: 50.0,
+
+    // Gameplay
+    black_hole_strength: 50.0,
+    wind_spot_strength: -50.0,
+    force_source_radius: 10.0,
+    selection_drag_threshold: 5.0,
+    selection_click_radius: 1.0,
+
+    max_force: 40.0,
+    steering_force: 40.0,
+    repulsion_force: 20.0,
+    repulsion_decay: 2.0,
+    friction: 0.98,
+    min_velocity: 0.01,
+    braking_force: 5.0,
+    touch_dist_multiplier: 2.1,
+    check_dist_multiplier: 4.0,
     
     // Boids
     separation_weight: 1.5,

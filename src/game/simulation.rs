@@ -15,9 +15,16 @@ pub enum SimSet {
     Integration // Applying velocity to position
 }
 
-#[derive(Resource, Default)]
-pub struct GlobalFlow {
-    pub velocity: FixedVec2,
+#[derive(Component, Debug, Clone)]
+pub struct ForceSource {
+    pub force_type: ForceType,
+    pub radius: FixedNum, 
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ForceType {
+    Radial(FixedNum), // Strength. >0 attract, <0 repel.
+    Directional(FixedVec2), // Vector force.
 }
 
 #[derive(Resource, Default)]
@@ -36,7 +43,40 @@ pub struct SpawnUnitCommand {
     pub position: FixedVec2,
 }
 
-#[derive(Resource, Default)]
+#[derive(Event, Message, Debug, Clone)]
+pub struct CollisionEvent {
+    pub entity1: Entity,
+    pub entity2: Entity,
+    pub overlap: FixedNum,
+    pub normal: FixedVec2,
+}
+
+pub mod layers {
+    pub const NONE: u32 = 0;
+    pub const UNIT: u32 = 1 << 0;
+    pub const OBSTACLE: u32 = 1 << 1;
+    pub const PROJECTILE: u32 = 1 << 2;
+    pub const ALL: u32 = u32::MAX;
+}
+
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Collider {
+    pub radius: FixedNum,
+    pub layer: u32,
+    pub mask: u32,
+}
+
+impl Default for Collider {
+    fn default() -> Self {
+        Self {
+            radius: FixedNum::from_num(0.5),
+            layer: layers::UNIT,
+            mask: layers::UNIT | layers::OBSTACLE,
+        }
+    }
+}
+
+#[derive(Resource)]
 pub struct SimConfig {
     pub tick_rate: f64,
     pub unit_speed: FixedNum,
@@ -44,23 +84,83 @@ pub struct SimConfig {
     pub map_height: FixedNum,
     pub unit_radius: FixedNum,
     pub collision_push_strength: FixedNum,
+    pub collision_restitution: FixedNum,
+    pub collision_drag: FixedNum,
+    pub collision_iterations: usize,
+    pub collision_search_radius_multiplier: FixedNum,
+    pub obstacle_search_range: i32,
+    pub epsilon: FixedNum,
     pub obstacle_push_strength: FixedNum,
     pub arrival_threshold: FixedNum,
+    pub max_force: FixedNum,
+    pub steering_force: FixedNum,
+    pub repulsion_force: FixedNum,
+    pub repulsion_decay: FixedNum,
+    pub friction: FixedNum,
+    pub min_velocity: FixedNum,
+    pub braking_force: FixedNum,
+    pub touch_dist_multiplier: FixedNum,
+    pub check_dist_multiplier: FixedNum,
     pub separation_weight: FixedNum,
     pub alignment_weight: FixedNum,
     pub cohesion_weight: FixedNum,
     pub neighbor_radius: FixedNum,
     pub separation_radius: FixedNum,
+    pub black_hole_strength: FixedNum,
+    pub wind_spot_strength: FixedNum,
+    pub force_source_radius: FixedNum,
+}
+
+impl Default for SimConfig {
+    fn default() -> Self {
+        Self {
+            tick_rate: 30.0,
+            unit_speed: FixedNum::from_num(5.0),
+            map_width: FixedNum::from_num(50.0),
+            map_height: FixedNum::from_num(50.0),
+            unit_radius: FixedNum::from_num(0.5),
+            collision_push_strength: FixedNum::from_num(1.0),
+            collision_restitution: FixedNum::from_num(0.5),
+            collision_drag: FixedNum::from_num(0.1),
+            collision_iterations: 4,
+            collision_search_radius_multiplier: FixedNum::from_num(4.0),
+            obstacle_search_range: 1,
+            epsilon: FixedNum::from_num(0.0001),
+            obstacle_push_strength: FixedNum::from_num(1.0),
+            arrival_threshold: FixedNum::from_num(0.1),
+            max_force: FixedNum::from_num(20.0),
+            steering_force: FixedNum::from_num(15.0),
+            repulsion_force: FixedNum::from_num(20.0),
+            repulsion_decay: FixedNum::from_num(2.0),
+            friction: FixedNum::from_num(0.9),
+            min_velocity: FixedNum::from_num(0.01),
+            braking_force: FixedNum::from_num(5.0),
+            touch_dist_multiplier: FixedNum::from_num(2.1),
+            check_dist_multiplier: FixedNum::from_num(4.0),
+            separation_weight: FixedNum::from_num(1.0),
+            alignment_weight: FixedNum::from_num(1.0),
+            cohesion_weight: FixedNum::from_num(1.0),
+            neighbor_radius: FixedNum::from_num(5.0),
+            separation_radius: FixedNum::from_num(1.5),
+            black_hole_strength: FixedNum::from_num(50.0),
+            wind_spot_strength: FixedNum::from_num(-50.0),
+            force_source_radius: FixedNum::from_num(10.0),
+        }
+    }
 }
 
 #[derive(Resource)]
 pub struct DebugConfig {
     pub show_flow_field: bool,
+    pub show_pathfinding_graph: bool,
 }
 
 impl Default for DebugConfig {
     fn default() -> Self {
-        Self { show_flow_field: false }
+        Self { 
+            show_flow_field: false,
+            show_pathfinding_graph: false,
+        }
     }
 }
 
@@ -70,7 +170,6 @@ impl Plugin for SimulationPlugin {
         // Time::<Fixed>::from_hz might be deprecated or removed.
         // Using from_seconds(1.0 / 20.0)
         app.insert_resource(Time::<Fixed>::from_seconds(1.0 / 20.0)); 
-        app.init_resource::<GlobalFlow>();
         app.init_resource::<SimConfig>();
         app.insert_resource(SpatialHash::new(FixedNum::from_num(100), FixedNum::from_num(100), FixedNum::from_num(2)));
         // app.init_resource::<FlowFieldCache>();
@@ -79,13 +178,14 @@ impl Plugin for SimulationPlugin {
         // app.register_type::<GlobalFlow>(); // Removed Reflect
         app.add_message::<UnitMoveCommand>();
         app.add_message::<SpawnUnitCommand>();
+        app.add_message::<CollisionEvent>();
 
         // Configure System Sets
         app.configure_sets(FixedUpdate, (
             SimSet::Input,
             SimSet::Steering,
-            SimSet::Physics,
             SimSet::Integration,
+            SimSet::Physics,
         ).chain());
 
         // Register Systems
@@ -97,11 +197,11 @@ impl Plugin for SimulationPlugin {
             check_arrival_crowding.in_set(SimSet::Steering).before(follow_direct_target),
             apply_friction.in_set(SimSet::Steering).before(follow_direct_target),
             follow_direct_target.in_set(SimSet::Steering),
+            apply_forces.in_set(SimSet::Steering).before(follow_direct_target),
             apply_velocity.in_set(SimSet::Integration),
             update_spatial_hash.in_set(SimSet::Physics).before(detect_collisions).before(resolve_collisions),
-            apply_global_flow.in_set(SimSet::Physics).before(resolve_collisions),
             constrain_to_map_bounds.in_set(SimSet::Physics),
-            detect_collisions.in_set(SimSet::Physics),
+            detect_collisions.in_set(SimSet::Physics).before(resolve_collisions),
             resolve_collisions.in_set(SimSet::Physics),
             resolve_obstacle_collisions.in_set(SimSet::Physics),
         ));
@@ -129,13 +229,31 @@ fn update_sim_from_config(
                  sim_config.map_height = FixedNum::from_num(config.map_height);
                  sim_config.unit_radius = FixedNum::from_num(config.unit_radius);
                  sim_config.collision_push_strength = FixedNum::from_num(config.collision_push_strength);
+                 sim_config.collision_restitution = FixedNum::from_num(config.collision_restitution);
+                 sim_config.collision_drag = FixedNum::from_num(config.collision_drag);
+                 sim_config.collision_iterations = config.collision_iterations;
+                 sim_config.collision_search_radius_multiplier = FixedNum::from_num(config.collision_search_radius_multiplier);
+                 sim_config.obstacle_search_range = config.obstacle_search_range;
+                 sim_config.epsilon = FixedNum::from_num(config.epsilon);
                  sim_config.obstacle_push_strength = FixedNum::from_num(config.obstacle_push_strength);
+                 sim_config.friction = FixedNum::from_num(config.friction);
+                 sim_config.min_velocity = FixedNum::from_num(config.min_velocity);
+                 sim_config.braking_force = FixedNum::from_num(config.braking_force);
+                 sim_config.touch_dist_multiplier = FixedNum::from_num(config.touch_dist_multiplier);
+                 sim_config.check_dist_multiplier = FixedNum::from_num(config.check_dist_multiplier);
                  sim_config.arrival_threshold = FixedNum::from_num(config.arrival_threshold);
+                 sim_config.max_force = FixedNum::from_num(config.max_force);
+                 sim_config.steering_force = FixedNum::from_num(config.steering_force);
+                 sim_config.repulsion_force = FixedNum::from_num(config.repulsion_force);
+                 sim_config.repulsion_decay = FixedNum::from_num(config.repulsion_decay);
                  sim_config.separation_weight = FixedNum::from_num(config.separation_weight);
                  sim_config.alignment_weight = FixedNum::from_num(config.alignment_weight);
                  sim_config.cohesion_weight = FixedNum::from_num(config.cohesion_weight);
                  sim_config.neighbor_radius = FixedNum::from_num(config.neighbor_radius);
                  sim_config.separation_radius = FixedNum::from_num(config.separation_radius);
+                 sim_config.black_hole_strength = FixedNum::from_num(config.black_hole_strength);
+                 sim_config.wind_spot_strength = FixedNum::from_num(config.wind_spot_strength);
+                 sim_config.force_source_radius = FixedNum::from_num(config.force_source_radius);
 
                  // Resize spatial hash. Cell size should be at least diameter of unit (2 * radius)
                  // Using neighbor_radius might be better if we use it for boids too.
@@ -197,6 +315,8 @@ fn process_input(
             SimPosition(event.position),
             SimPositionPrev(event.position),
             SimVelocity(FixedVec2::ZERO),
+            SimAcceleration(FixedVec2::ZERO),
+            Collider::default(),
         ));
     }
 }
@@ -213,6 +333,10 @@ pub struct SimPositionPrev(pub FixedVec2);
 /// Logical velocity of an entity.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct SimVelocity(pub FixedVec2);
+
+/// Logical acceleration of an entity.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct SimAcceleration(pub FixedVec2);
 
 /// Logical target position for movement.
 #[derive(Component, Debug, Clone, Copy, Default)]
@@ -243,11 +367,21 @@ fn cache_previous_state(
 
 fn apply_velocity(
     sim_config: Res<SimConfig>,
-    mut query: Query<(&mut SimPosition, &SimVelocity)>,
+    mut query: Query<(&mut SimPosition, &mut SimVelocity, &mut SimAcceleration)>,
 ) {
     let delta = FixedNum::from_num(1.0) / FixedNum::from_num(sim_config.tick_rate);
 
-    for (mut pos, vel) in query.iter_mut() {
+    for (mut pos, mut vel, mut acc) in query.iter_mut() {
+        // Apply acceleration
+        if acc.0.length_squared() > FixedNum::ZERO {
+            vel.0 = vel.0 + acc.0 * delta;
+            // Limit velocity to max speed? Or let drag handle it?
+            // Let's clamp it for safety, though drag is better.
+            // Actually, let's not clamp here, let steering/drag handle it.
+            // But we should reset acceleration.
+            acc.0 = FixedVec2::ZERO;
+        }
+
         if vel.0.length_squared() > FixedNum::ZERO {
             pos.0 = pos.0 + vel.0 * delta;
         }
@@ -278,33 +412,66 @@ fn constrain_to_map_bounds(
 
 fn detect_collisions(
     mut commands: Commands,
-    query: Query<(Entity, &SimPosition)>,
-    sim_config: Res<SimConfig>,
+    query: Query<(Entity, &SimPosition, &Collider)>,
     spatial_hash: Res<SpatialHash>,
+    sim_config: Res<SimConfig>,
+    mut events: MessageWriter<CollisionEvent>,
 ) {
-    let radius = sim_config.unit_radius;
-    let collision_dist_sq = (radius * FixedNum::from_num(2.0)) * (radius * FixedNum::from_num(2.0));
-
     let mut colliding_entities = std::collections::HashSet::new();
 
-    for (entity, pos) in query.iter() {
-        let potential_collisions = spatial_hash.get_potential_collisions(pos.0, radius * FixedNum::from_num(2.0));
+    // We need to check collisions.
+    // To avoid duplicates, we can enforce order, but SpatialHash returns neighbors which might include entities "behind" us in iteration order.
+    // A simple way is to iterate all, check neighbors, and only process if entity1 < entity2.
+    
+    for (entity, pos, collider) in query.iter() {
+        // Query radius: my radius + max possible neighbor radius.
+        // For now, we assume max neighbor radius is similar to ours or use a safe upper bound.
+        // Let's use 2.0 * radius as a safe search radius for now, assuming units are similar size.
+        // Ideally SpatialHash should handle this better.
+        let search_radius = collider.radius * sim_config.collision_search_radius_multiplier; 
         
-        for other_entity in potential_collisions {
-            if entity == other_entity { continue; }
+        let potential_collisions = spatial_hash.get_potential_collisions(pos.0, search_radius);
+        
+        for (other_entity, _) in potential_collisions {
+            if entity >= other_entity { continue; } // Avoid self and duplicates
             
-            if let Ok((_, other_pos)) = query.get(other_entity) {
+            if let Ok((_, other_pos, other_collider)) = query.get(other_entity) {
+                // Check layers
+                if (collider.mask & other_collider.layer) == 0 && (other_collider.mask & collider.layer) == 0 {
+                    continue;
+                }
+
+                let min_dist = collider.radius + other_collider.radius;
+                let min_dist_sq = min_dist * min_dist;
+
                 let delta = pos.0 - other_pos.0;
-                if delta.length_squared() < collision_dist_sq {
+                let dist_sq = delta.length_squared();
+                
+                if dist_sq < min_dist_sq {
                     colliding_entities.insert(entity);
-                    break; 
+                    colliding_entities.insert(other_entity);
+                    
+                    let dist = dist_sq.sqrt();
+                    let overlap = min_dist - dist;
+                    let normal = if dist > sim_config.epsilon {
+                        delta / dist
+                    } else {
+                        FixedVec2::new(FixedNum::ONE, FixedNum::ZERO) // Arbitrary
+                    };
+
+                    events.write(CollisionEvent {
+                        entity1: entity,
+                        entity2: other_entity,
+                        overlap,
+                        normal,
+                    });
                 }
             }
         }
     }
 
     // Sync component state
-    for (entity, _) in query.iter() {
+    for (entity, _, _) in query.iter() {
         if colliding_entities.contains(&entity) {
             commands.entity(entity).insert(Colliding);
         } else {
@@ -313,84 +480,96 @@ fn detect_collisions(
     }
 }
 
-fn resolve_collisions(
-    mut query: Query<(Entity, &SimPosition, &mut SimVelocity)>,
+fn apply_friction(
+    mut query: Query<&mut SimVelocity>,
     sim_config: Res<SimConfig>,
-    spatial_hash: Res<SpatialHash>,
 ) {
-    let radius = sim_config.unit_radius;
-    let min_dist = radius * FixedNum::from_num(2.0);
-    let min_dist_sq = min_dist * min_dist;
-    let strength = sim_config.collision_push_strength;
-    
-    // Collect positions for lookups
-    let positions: std::collections::HashMap<Entity, FixedVec2> = query.iter().map(|(e, p, _)| (e, p.0)).collect();
-    
-    let mut impulses = std::collections::HashMap::new();
-
-    for (entity, pos, _) in query.iter() {
-        let potential_collisions = spatial_hash.get_potential_collisions(pos.0, min_dist);
-        let mut total_impulse = FixedVec2::ZERO;
-        
-        for other_entity in potential_collisions {
-            if entity == other_entity { continue; }
-            
-            if let Some(other_pos) = positions.get(&other_entity) {
-                let delta = pos.0 - *other_pos;
-                let dist_sq = delta.length_squared();
-                
-                if dist_sq < min_dist_sq && dist_sq > FixedNum::from_num(0.0001) {
-                    let dist = dist_sq.sqrt();
-                    let overlap = min_dist - dist;
-                    let dir = delta / dist;
-                    
-                    let impulse = dir * overlap * strength;
-                    total_impulse = total_impulse + impulse;
-                }
-            }
-        }
-        
-        if total_impulse.x != FixedNum::ZERO || total_impulse.y != FixedNum::ZERO {
-            impulses.insert(entity, total_impulse);
-        }
-    }
-
-    // Apply impulses
-    for (entity, _, mut vel) in query.iter_mut() {
-        if let Some(impulse) = impulses.get(&entity) {
-            vel.0 = vel.0 + *impulse;
+    let friction = sim_config.friction;
+    let min_velocity_sq = sim_config.min_velocity * sim_config.min_velocity;
+    for mut vel in query.iter_mut() {
+        vel.0 = vel.0 * friction;
+        if vel.0.length_squared() < min_velocity_sq {
+            vel.0 = FixedVec2::ZERO;
         }
     }
 }
 
-fn apply_global_flow(
-    flow: Res<GlobalFlow>,
-    mut query: Query<&mut SimVelocity>,
+fn apply_forces(
+    mut units: Query<(&SimPosition, &mut SimAcceleration)>,
+    sources: Query<(&SimPosition, &ForceSource)>,
 ) {
-    if flow.velocity.length_squared() > FixedNum::ZERO {
-        for mut vel in query.iter_mut() {
-            vel.0 = vel.0 + flow.velocity;
+    for (u_pos, mut u_acc) in units.iter_mut() {
+        for (s_pos, source) in sources.iter() {
+             let delta = s_pos.0 - u_pos.0;
+             let dist_sq = delta.length_squared();
+             
+             // Check radius
+             if source.radius > FixedNum::ZERO {
+                 let r_sq = source.radius * source.radius;
+                 if dist_sq > r_sq { continue; }
+             }
+
+             match source.force_type {
+                 ForceType::Radial(strength) => {
+                     let dist = dist_sq.sqrt();
+                     if dist > FixedNum::from_num(0.1) {
+                         let dir = delta / dist;
+                         u_acc.0 = u_acc.0 + dir * strength;
+                     }
+                 },
+                 ForceType::Directional(dir) => {
+                     u_acc.0 = u_acc.0 + dir;
+                 }
+             }
+        }
+    }
+}
+
+fn resolve_collisions(
+    mut query: Query<&mut SimAcceleration>,
+    sim_config: Res<SimConfig>,
+    mut events: MessageReader<CollisionEvent>,
+) {
+    let repulsion_strength = sim_config.repulsion_force;
+    let decay = sim_config.repulsion_decay;
+    
+    for event in events.read() {
+        // Apply repulsion force based on overlap
+        // Force increases as overlap increases
+        let force_mag = repulsion_strength * (FixedNum::ONE + event.overlap * decay);
+        let force = event.normal * force_mag;
+        
+        // Apply to entity 1
+        if let Ok(mut acc1) = query.get_mut(event.entity1) {
+            acc1.0 = acc1.0 + force;
+        }
+        
+        // Apply to entity 2 (opposite direction)
+        if let Ok(mut acc2) = query.get_mut(event.entity2) {
+            acc2.0 = acc2.0 - force;
         }
     }
 }
 
 fn resolve_obstacle_collisions(
-    mut units: Query<(&SimPosition, &mut SimVelocity), Without<StaticObstacle>>,
+    mut units: Query<(Entity, &SimPosition, &mut SimAcceleration, &Collider), Without<StaticObstacle>>,
     map_flow_field: Res<MapFlowField>,
     sim_config: Res<SimConfig>,
-    free_obstacles: Query<(&SimPosition, &StaticObstacle), Without<FlowFieldObstacle>>,
+    free_obstacles: Query<(&SimPosition, &Collider), (With<StaticObstacle>, Without<FlowFieldObstacle>)>,
 ) {
-    let unit_radius = sim_config.unit_radius;
-    let strength = sim_config.obstacle_push_strength;
+    let repulsion_strength = sim_config.repulsion_force;
+    let decay = sim_config.repulsion_decay;
     let flow_field = &map_flow_field.0;
     let obstacle_radius = flow_field.cell_size / FixedNum::from_num(2.0);
-    let min_dist = unit_radius + obstacle_radius;
-    let min_dist_sq = min_dist * min_dist;
     
-    for (u_pos, mut u_vel) in units.iter_mut() {
+    for (_entity, u_pos, mut u_acc, u_collider) in units.iter_mut() {
+        let unit_radius = u_collider.radius;
+        let min_dist = unit_radius + obstacle_radius;
+        let min_dist_sq = min_dist * min_dist;
+
         if let Some((cx, cy)) = flow_field.world_to_grid(u_pos.0) {
             // Check 3x3 neighbors
-            let range = 1;
+            let range = sim_config.obstacle_search_range as usize;
             let min_x = if cx >= range { cx - range } else { 0 };
             let max_x = if cx + range < flow_field.width { cx + range } else { flow_field.width - 1 };
             let min_y = if cy >= range { cy - range } else { 0 };
@@ -403,15 +582,14 @@ fn resolve_obstacle_collisions(
                         let delta = u_pos.0 - o_pos;
                         let dist_sq = delta.length_squared();
                         
-                        if dist_sq < min_dist_sq && dist_sq > FixedNum::from_num(0.0001) {
-                            // info!("Obstacle collision detected!");
+                        if dist_sq < min_dist_sq && dist_sq > sim_config.epsilon {
                             let dist = dist_sq.sqrt();
                             let overlap = min_dist - dist;
                             let dir = delta / dist;
-                            
-                            let impulse = dir * overlap * strength;
-                            
-                            u_vel.0 = u_vel.0 + impulse;
+
+                            // Apply force
+                            let force_mag = repulsion_strength * (FixedNum::ONE + overlap * decay);
+                            u_acc.0 = u_acc.0 + dir * force_mag;
                         }
                     }
                 }
@@ -419,21 +597,21 @@ fn resolve_obstacle_collisions(
         }
 
         // Check free obstacles (not in flow field)
-        for (obs_pos, obs) in free_obstacles.iter() {
-            let min_dist_free = unit_radius + obs.radius;
+        for (obs_pos, obs_collider) in free_obstacles.iter() {
+            let min_dist_free = unit_radius + obs_collider.radius;
             let min_dist_sq_free = min_dist_free * min_dist_free;
-            
+
             let delta = u_pos.0 - obs_pos.0;
             let dist_sq = delta.length_squared();
-            
-            if dist_sq < min_dist_sq_free && dist_sq > FixedNum::from_num(0.0001) {
+
+            if dist_sq < min_dist_sq_free && dist_sq > sim_config.epsilon {
                 let dist = dist_sq.sqrt();
                 let overlap = min_dist_free - dist;
                 let dir = delta / dist;
-                
-                let impulse = dir * overlap * strength;
-                
-                u_vel.0 = u_vel.0 + impulse;
+
+                // Apply force
+                let force_mag = repulsion_strength * (FixedNum::ONE + overlap * decay);
+                u_acc.0 = u_acc.0 + dir * force_mag;
             }
         }
     }
@@ -488,6 +666,11 @@ fn init_flow_field(
                     Mesh3d(obstacle_mesh.clone()),
                     MeshMaterial3d(obstacle_mat.clone()),
                     Transform::from_xyz(pos.x.to_num(), 1.0, pos.y.to_num()),
+                    Collider {
+                        radius: obstacle_radius,
+                        layer: layers::OBSTACLE,
+                        mask: layers::UNIT | layers::PROJECTILE,
+                    },
                 ));
             }
         }
@@ -497,10 +680,18 @@ fn init_flow_field(
 fn toggle_debug(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut debug_config: ResMut<DebugConfig>,
+    config_handle: Res<GameConfigHandle>,
+    game_configs: Res<Assets<GameConfig>>,
 ) {
-    if keyboard.just_pressed(KeyCode::KeyG) {
+    let Some(config) = game_configs.get(&config_handle.0) else { return };
+
+    if keyboard.just_pressed(config.key_debug_flow) {
         debug_config.show_flow_field = !debug_config.show_flow_field;
         info!("Flow field debug: {}", debug_config.show_flow_field);
+    }
+    if keyboard.just_pressed(config.key_debug_graph) {
+        debug_config.show_pathfinding_graph = !debug_config.show_pathfinding_graph;
+        info!("Pathfinding graph debug: {}", debug_config.show_pathfinding_graph);
     }
 }
 
@@ -537,18 +728,6 @@ fn draw_flow_field_gizmos(
     */
 }
 
-fn apply_friction(
-    mut query: Query<&mut SimVelocity>,
-) {
-    let friction = FixedNum::from_num(0.9);
-    for mut vel in query.iter_mut() {
-        vel.0 = vel.0 * friction;
-        if vel.0.length_squared() < FixedNum::from_num(0.01) {
-            vel.0 = FixedVec2::ZERO;
-        }
-    }
-}
-
 fn check_arrival_crowding(
     mut commands: Commands,
     query: Query<(Entity, &SimPosition, &SimTarget)>,
@@ -558,11 +737,11 @@ fn check_arrival_crowding(
 ) {
     let radius = sim_config.unit_radius;
     // Use a slightly larger radius for "touching" to be safe
-    let touch_dist = radius * FixedNum::from_num(2.1);
+    let touch_dist = radius * sim_config.touch_dist_multiplier;
     let collision_dist_sq = touch_dist * touch_dist; 
     // If within a reasonable distance to target (e.g. 3 unit radii or threshold)
     // If they are crowding, they might be a bit further than threshold.
-    let check_dist = radius * FixedNum::from_num(4.0);
+    let check_dist = radius * sim_config.check_dist_multiplier;
     let check_dist_sq = check_dist * check_dist;
 
     for (entity, pos, target) in query.iter() {
@@ -572,7 +751,7 @@ fn check_arrival_crowding(
             // Check for collision with arrived units
             let potential_collisions = spatial_hash.get_potential_collisions(pos.0, touch_dist);
             
-            for other_entity in potential_collisions {
+            for (other_entity, _) in potential_collisions {
                 if entity == other_entity { continue; }
                 
                 if let Ok((_, other_pos, other_target)) = other_units.get(other_entity) {
@@ -596,20 +775,23 @@ fn check_arrival_crowding(
 
 pub fn follow_direct_target(
     mut commands: Commands,
-    mut query: Query<(Entity, &SimPosition, &mut SimVelocity, &mut Path)>,
+    mut query: Query<(Entity, &SimPosition, &SimVelocity, &mut SimAcceleration, &mut Path)>,
     sim_config: Res<SimConfig>,
-    map_flow_field: Res<MapFlowField>,
 ) {
     let speed = sim_config.unit_speed;
-    let threshold = sim_config.arrival_threshold;
+    let max_force = sim_config.steering_force;
+    let dt = FixedNum::ONE / FixedNum::from_num(sim_config.tick_rate);
+    let step_dist = speed * dt;
+    // Use the larger of the configured threshold or the distance traveled in one frame
+    let threshold = if step_dist > sim_config.arrival_threshold { step_dist } else { sim_config.arrival_threshold };
     let threshold_sq = threshold * threshold;
-    let flow_field = &map_flow_field.0;
-    let check_radius = sim_config.unit_radius + flow_field.cell_size / FixedNum::from_num(1.5); 
-    let check_radius_sq = check_radius * check_radius;
 
-    for (entity, pos, mut vel, mut path) in query.iter_mut() {
+    for (entity, pos, vel, mut acc, mut path) in query.iter_mut() {
+        // info!("Processing entity {:?}", entity);
         if path.current_index >= path.waypoints.len() {
-            vel.0 = FixedVec2::ZERO;
+            // Apply braking force to stop
+            let braking_force = -vel.0 * sim_config.braking_force; 
+            acc.0 = acc.0 + braking_force;
             continue;
         }
 
@@ -621,59 +803,25 @@ pub fn follow_direct_target(
         if dist_sq < threshold_sq {
              path.current_index += 1;
              if path.current_index >= path.waypoints.len() {
-                 vel.0 = FixedVec2::ZERO;
                  commands.entity(entity).remove::<Path>();
              }
              continue;
         }
 
-        // Direct Seek to Waypoint
+        // Seek behavior
         if dist_sq > FixedNum::ZERO {
-            let mut desired_dir = delta.normalize();
-
-            // Obstacle Avoidance / Sliding (Local)
-            if let Some((cx, cy)) = flow_field.world_to_grid(pos.0) {
-                let mut avoidance = FixedVec2::ZERO;
-                let mut count = 0;
-
-                // Check 3x3 neighborhood
-                let range = 1; 
-                let min_x = if cx >= range { cx - range } else { 0 };
-                let max_x = if cx + range < flow_field.width { cx + range } else { flow_field.width - 1 };
-                let min_y = if cy >= range { cy - range } else { 0 };
-                let max_y = if cy + range < flow_field.height { cy + range } else { flow_field.height - 1 };
-
-                for y in min_y..=max_y {
-                    for x in min_x..=max_x {
-                        // If it's an obstacle
-                        if flow_field.cost_field[flow_field.get_index(x, y)] == 255 {
-                            let obs_pos = flow_field.grid_to_world(x, y);
-                            let to_unit = pos.0 - obs_pos;
-                            let dist_to_obs_sq = to_unit.length_squared();
-                            
-                            if dist_to_obs_sq < check_radius_sq && dist_to_obs_sq > FixedNum::from_num(0.0001) {
-                                let dist = dist_to_obs_sq.sqrt();
-                                // Repulsion vector
-                                let push = to_unit / dist; 
-                                avoidance = avoidance + push;
-                                count += 1;
-                            }
-                        }
-                    }
-                }
-
-                if count > 0 {
-                    let avoid_dir = avoidance.normalize();
-                    // Slide: remove component of desired_dir that opposes avoid_dir (i.e. points into the wall)
-                    let dot = desired_dir.dot(avoid_dir);
-                    if dot < FixedNum::ZERO {
-                        desired_dir = desired_dir - avoid_dir * dot;
-                        desired_dir = desired_dir.normalize();
-                    }
-                }
-            }
-
-            vel.0 = desired_dir * speed;
+            let desired_vel = delta.normalize() * speed;
+            let steer = desired_vel - vel.0;
+            
+            // Limit steering force
+            let steer_len_sq = steer.length_squared();
+            let final_steer = if steer_len_sq > max_force * max_force {
+                steer.normalize() * max_force
+            } else {
+                steer
+            };
+            
+            acc.0 = acc.0 + final_steer;
         }
     }
 }

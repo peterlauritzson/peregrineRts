@@ -90,3 +90,10 @@ impl std::ops::Div<FixedNum> for FixedVec2 {
         Self { x: self.x / rhs, y: self.y / rhs }
     }
 }
+
+impl std::ops::Neg for FixedVec2 {
+    type Output = Self;
+    fn neg(self) -> Self::Output {
+        Self { x: -self.x, y: -self.y }
+    }
+}

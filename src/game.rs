@@ -3,8 +3,8 @@ use bevy::prelude::*;
 mod camera;
 mod unit;
 mod control;
-mod simulation;
-mod config;
+pub mod simulation;
+pub mod config;
 pub mod math;
 pub mod flow_field;
 pub mod spatial_hash;
@@ -13,7 +13,7 @@ pub mod pathfinding;
 use camera::RtsCameraPlugin;
 use unit::UnitPlugin;
 use control::ControlPlugin;
-use simulation::{SimulationPlugin, SimPosition, StaticObstacle};
+use simulation::{SimulationPlugin, SimPosition, StaticObstacle, Collider, layers};
 use config::GameConfigPlugin;
 use pathfinding::PathfindingPlugin;
 use math::{FixedVec2, FixedNum};
@@ -76,5 +76,10 @@ fn setup_game(
         Transform::from_xyz(obstacle_pos.x, 1.0, obstacle_pos.y),
         SimPosition(FixedVec2::from_f32(obstacle_pos.x, obstacle_pos.y)),
         StaticObstacle { radius: FixedNum::from_num(obstacle_radius) },
+        Collider {
+            radius: FixedNum::from_num(obstacle_radius),
+            layer: layers::OBSTACLE,
+            mask: layers::UNIT,
+        },
     ));
 }

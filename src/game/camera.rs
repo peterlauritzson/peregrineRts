@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 use bevy::input::mouse::MouseWheel;
+use crate::game::config::{GameConfig, GameConfigHandle};
 
 pub struct RtsCameraPlugin;
 
@@ -31,25 +32,29 @@ fn move_camera(
     keys: Res<ButtonInput<KeyCode>>,
     mut scroll_evr: MessageReader<MouseWheel>,
     time: Res<Time>,
+    config_handle: Res<GameConfigHandle>,
+    game_configs: Res<Assets<GameConfig>>,
 ) {
-    let Ok(mut transform) = query.single_mut() else { return };
+    let Some(mut transform) = query.iter_mut().next() else { return };
+    let Some(config) = game_configs.get(&config_handle.0) else { return };
+    
     let mut velocity = Vec3::ZERO;
-    let speed = 20.0;
-    let zoom_speed = 50.0;
+    let speed = config.camera_speed;
+    let zoom_speed = config.camera_zoom_speed;
 
     // Forward/Backward (Z)
-    if keys.pressed(KeyCode::KeyW) {
+    if keys.pressed(config.key_camera_forward) {
         velocity.z -= 1.0;
     }
-    if keys.pressed(KeyCode::KeyS) {
+    if keys.pressed(config.key_camera_backward) {
         velocity.z += 1.0;
     }
 
     // Left/Right (X)
-    if keys.pressed(KeyCode::KeyA) {
+    if keys.pressed(config.key_camera_left) {
         velocity.x -= 1.0;
     }
-    if keys.pressed(KeyCode::KeyD) {
+    if keys.pressed(config.key_camera_right) {
         velocity.x += 1.0;
     }
 

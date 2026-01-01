@@ -107,11 +107,11 @@ Once the RTS Foundation (Milestone 0) is complete, we will iterate on the simula
 
 9. **Pathfinding (The Labyrinth)**
    - [x] Create a complex map (maze-like).
-   - [x] Implement Flow Fields or A* for pathfinding.
-   - [x] Units navigate from Start to Goal avoiding walls.
+   - [x] Implement Hierarchical Pathfinding (HPA*) for scalable navigation.
+   - [x] Units navigate from Start to Goal avoiding walls using high-level graph and local A*.
 
    > **Note:** Before attempting the 10M unit goal, we must replace the $O(N^2)$ collision checks with a Spatial Hash Grid or Quadtree to improve performance.
-   > **Note:** Pathfinding has been simplified to Direct Seek for performance. We need to ensure it still exhibits complex behavior (e.g. via local avoidance/steering) so units don't look completely unintelligent. Or some stochastic behaviour when it doesn't reach the goal, etc. The pathfinding should use some pre-generated information if possible, so that the units can make some kind of reasonable decisions. We are fine with taking a long time before we start the game, it's just afterwards that it needs to be fast.
+   > **Note:** HPA* implementation is complete (Level 0, 1, 2). Units now use the hierarchical graph for long-distance planning.
 
 10. **The "Million" Unit Stress Test**
     - Massive unit count.

@@ -6,7 +6,7 @@ pub struct SpatialHash {
     cell_size: FixedNum,
     cols: usize,
     rows: usize,
-    cells: Vec<Vec<Entity>>,
+    cells: Vec<Vec<(Entity, FixedVec2)>>,
     map_width: FixedNum,
     map_height: FixedNum,
 }
@@ -69,11 +69,11 @@ impl SpatialHash {
 
     pub fn insert(&mut self, entity: Entity, pos: FixedVec2) {
         if let Some(idx) = self.get_cell_idx(pos) {
-            self.cells[idx].push(entity);
+            self.cells[idx].push((entity, pos));
         }
     }
 
-    pub fn get_potential_collisions(&self, pos: FixedVec2, query_radius: FixedNum) -> Vec<Entity> {
+    pub fn get_potential_collisions(&self, pos: FixedVec2, query_radius: FixedNum) -> Vec<(Entity, FixedVec2)> {
         let mut result = Vec::new();
         
         let half_w = self.map_width / FixedNum::from_num(2.0);
