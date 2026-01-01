@@ -21,6 +21,7 @@
     key_camera_right: KeyD,
     key_debug_flow: KeyF,
     key_debug_graph: KeyG,
+    key_debug_path: KeyH,
     key_spawn_black_hole: KeyB,
     key_spawn_wind_spot: KeyV,
 

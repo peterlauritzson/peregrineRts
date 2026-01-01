@@ -3,6 +3,7 @@ use crate::game::config::{GameConfig, GameConfigHandle};
 use crate::game::math::{FixedVec2, FixedNum};
 use crate::game::flow_field::{FlowField, CELL_SIZE};
 use crate::game::spatial_hash::SpatialHash;
+use crate::game::unit::Selected;
 // use std::collections::HashMap;
 
 pub struct SimulationPlugin;
@@ -153,6 +154,7 @@ impl Default for SimConfig {
 pub struct DebugConfig {
     pub show_flow_field: bool,
     pub show_pathfinding_graph: bool,
+    pub show_paths: bool,
 }
 
 impl Default for DebugConfig {
@@ -160,6 +162,7 @@ impl Default for DebugConfig {
         Self { 
             show_flow_field: false,
             show_pathfinding_graph: false,
+            show_paths: false,
         }
     }
 }
@@ -190,7 +193,7 @@ impl Plugin for SimulationPlugin {
 
         // Register Systems
         app.add_systems(Startup, init_flow_field);
-        app.add_systems(Update, (update_sim_from_config, toggle_debug, draw_flow_field_gizmos));
+        app.add_systems(Update, (update_sim_from_config, toggle_debug, draw_flow_field_gizmos, draw_force_sources, draw_unit_paths));
         app.add_systems(FixedUpdate, (
             cache_previous_state.in_set(SimSet::Input),
             process_input.in_set(SimSet::Input),
@@ -693,6 +696,10 @@ fn toggle_debug(
         debug_config.show_pathfinding_graph = !debug_config.show_pathfinding_graph;
         info!("Pathfinding graph debug: {}", debug_config.show_pathfinding_graph);
     }
+    if keyboard.just_pressed(config.key_debug_path) {
+        debug_config.show_paths = !debug_config.show_paths;
+        info!("Path debug: {}", debug_config.show_paths);
+    }
 }
 
 fn draw_flow_field_gizmos(
@@ -833,5 +840,58 @@ fn update_spatial_hash(
     spatial_hash.clear();
     for (entity, pos) in query.iter() {
         spatial_hash.insert(entity, pos.0);
+    }
+}
+
+fn draw_force_sources(
+    query: Query<(&Transform, &ForceSource)>,
+    mut gizmos: Gizmos,
+) {
+    for (transform, source) in query.iter() {
+        let color = match source.force_type {
+            ForceType::Radial(strength) => {
+                if strength > FixedNum::ZERO {
+                    Color::srgb(0.5, 0.0, 0.5) // Purple for Black Hole
+                } else {
+                    Color::srgb(0.0, 1.0, 1.0) // Cyan for Wind
+                }
+            },
+            ForceType::Directional(_) => Color::srgb(1.0, 1.0, 0.0),
+        };
+        
+        let radius = source.radius.to_num::<f32>();
+        gizmos.circle(transform.translation, radius, color);
+        // Draw a smaller inner circle to indicate center
+        gizmos.circle(transform.translation, 0.5, color);
+    }
+}
+
+fn draw_unit_paths(
+    query: Query<(&Transform, &Path), With<Selected>>,
+    debug_config: Res<DebugConfig>,
+    mut gizmos: Gizmos,
+) {
+    if !debug_config.show_paths {
+        return;
+    }
+
+    for (transform, path) in query.iter() {
+        if path.waypoints.is_empty() || path.current_index >= path.waypoints.len() {
+            continue;
+        }
+
+        let mut current_pos = transform.translation;
+        // Lift up slightly to avoid z-fighting
+        current_pos.y = 0.5;
+        
+        for i in path.current_index..path.waypoints.len() {
+            let wp = path.waypoints[i];
+            let next_pos = Vec3::new(wp.x.to_num(), 0.5, wp.y.to_num());
+            
+            gizmos.line(current_pos, next_pos, Color::srgb(0.0, 1.0, 0.0));
+            gizmos.sphere(next_pos, 0.2, Color::srgb(0.0, 1.0, 0.0));
+            
+            current_pos = next_pos;
+        }
     }
 }

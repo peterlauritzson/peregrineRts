@@ -26,6 +26,7 @@ pub struct GameConfig {
     pub key_camera_right: KeyCode,
     pub key_debug_flow: KeyCode,
     pub key_debug_graph: KeyCode,
+    pub key_debug_path: KeyCode,
     pub key_spawn_black_hole: KeyCode,
     pub key_spawn_wind_spot: KeyCode,
 
