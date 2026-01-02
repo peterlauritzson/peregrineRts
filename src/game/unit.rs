@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use crate::game::simulation::{SimPosition, SimPositionPrev, SimVelocity, SimSet, Colliding, SimConfig, SpawnUnitCommand, follow_direct_target};
+use crate::game::simulation::{SimPosition, SimPositionPrev, SimVelocity, SimSet, Colliding, SimConfig, SpawnUnitCommand, follow_path};
 use crate::game::math::{FixedVec2, FixedNum};
 
 #[derive(Component)]
@@ -24,7 +24,7 @@ impl Plugin for UnitPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, (setup_unit_resources, spawn_test_unit).chain())
            // unit_movement_logic is replaced by follow_flow_field in simulation.rs
-           .add_systems(FixedUpdate, (apply_boids_steering).chain().in_set(SimSet::Steering).after(follow_direct_target))
+           .add_systems(FixedUpdate, (apply_boids_steering).chain().in_set(SimSet::Steering).after(follow_path))
            .add_systems(Update, (spawn_unit_visuals, update_selection_visuals, sync_visuals));
     }
 }

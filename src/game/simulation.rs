@@ -3,7 +3,7 @@ use crate::game::config::{GameConfig, GameConfigHandle};
 use crate::game::math::{FixedVec2, FixedNum};
 use crate::game::flow_field::{FlowField, CELL_SIZE};
 use crate::game::spatial_hash::SpatialHash;
-use crate::game::unit::Selected;
+use crate::game::pathfinding::{Path, HierarchicalGraph, CLUSTER_SIZE};
 // use std::collections::HashMap;
 
 pub struct SimulationPlugin;
@@ -197,10 +197,10 @@ impl Plugin for SimulationPlugin {
         app.add_systems(FixedUpdate, (
             cache_previous_state.in_set(SimSet::Input),
             process_input.in_set(SimSet::Input),
-            check_arrival_crowding.in_set(SimSet::Steering).before(follow_direct_target),
-            apply_friction.in_set(SimSet::Steering).before(follow_direct_target),
-            follow_direct_target.in_set(SimSet::Steering),
-            apply_forces.in_set(SimSet::Steering).before(follow_direct_target),
+            check_arrival_crowding.in_set(SimSet::Steering).before(follow_path),
+            apply_friction.in_set(SimSet::Steering).before(follow_path),
+            follow_path.in_set(SimSet::Steering),
+            apply_forces.in_set(SimSet::Steering).before(follow_path),
             apply_velocity.in_set(SimSet::Integration),
             update_spatial_hash.in_set(SimSet::Physics).before(detect_collisions).before(resolve_collisions),
             constrain_to_map_bounds.in_set(SimSet::Physics),
@@ -272,7 +272,7 @@ fn update_sim_from_config(
     }
 }
 
-use crate::game::pathfinding::{PathRequest, Path};
+use crate::game::pathfinding::PathRequest;
 
 fn process_input(
     mut commands: Commands,
@@ -703,36 +703,59 @@ fn toggle_debug(
 }
 
 fn draw_flow_field_gizmos(
-    // flow_field_cache: Res<FlowFieldCache>,
+    graph: Res<HierarchicalGraph>,
+    map_flow_field: Res<MapFlowField>,
     debug_config: Res<DebugConfig>,
-    _gizmos: Gizmos,
+    mut gizmos: Gizmos,
 ) {
     if !debug_config.show_flow_field {
         return;
     }
 
-    // Flow fields are currently disabled for performance.
-    // If we re-enable them, we can uncomment this.
-    /*
-    // Draw the first active flow field found
-    if let Some(flow_field) = flow_field_cache.fields.values().next() {
-        for y in 0..flow_field.height {
-            for x in 0..flow_field.width {
-                let idx = flow_field.get_index(x, y);
-                let vec = flow_field.vector_field[idx];
-                if vec != FixedVec2::ZERO {
-                    let start = flow_field.grid_to_world(x, y).to_vec2();
-                    let end = start + vec.to_vec2() * 0.8; // Scale for visibility
-                    gizmos.arrow(
-                        Vec3::new(start.x, 0.5, start.y),
-                        Vec3::new(end.x, 0.5, end.y),
-                        Color::WHITE,
-                    );
+    let flow_field = &map_flow_field.0;
+
+    for ((cx, cy), cluster) in &graph.clusters {
+        let min_x = cx * CLUSTER_SIZE;
+        let min_y = cy * CLUSTER_SIZE;
+
+        // Debug: Draw a box around active clusters with cached fields
+        if !cluster.flow_field_cache.is_empty() {
+             let center_x = (min_x as f32 + CLUSTER_SIZE as f32 / 2.0) * CELL_SIZE;
+             let center_y = (min_y as f32 + CLUSTER_SIZE as f32 / 2.0) * CELL_SIZE;
+             gizmos.rect(
+                 Isometry3d::new(
+                     Vec3::new(center_x, 0.6, center_y),
+                     Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+                 ),
+                 Vec2::new(CLUSTER_SIZE as f32 * CELL_SIZE, CLUSTER_SIZE as f32 * CELL_SIZE),
+                 Color::srgb(1.0, 0.5, 0.0).with_alpha(0.3),
+             );
+        }
+
+        for local_field in cluster.flow_field_cache.values() {
+            for ly in 0..local_field.height {
+                for lx in 0..local_field.width {
+                    let idx = ly * local_field.width + lx;
+                    if idx < local_field.vectors.len() {
+                        let vec = local_field.vectors[idx];
+                        if vec != FixedVec2::ZERO {
+                            let gx = min_x + lx;
+                            let gy = min_y + ly;
+                            
+                            let start = flow_field.grid_to_world(gx, gy).to_vec2();
+                            let end = start + vec.to_vec2() * 0.4; // Scale for visibility
+
+                            gizmos.arrow(
+                                Vec3::new(start.x, 0.6, start.y),
+                                Vec3::new(end.x, 0.6, end.y),
+                                Color::srgb(0.5, 0.5, 1.0), // Light blue for flow vectors
+                            );
+                        }
+                    }
                 }
             }
         }
     }
-    */
 }
 
 fn check_arrival_crowding(
@@ -780,56 +803,143 @@ fn check_arrival_crowding(
     }
 }
 
-pub fn follow_direct_target(
+pub fn follow_path(
     mut commands: Commands,
     mut query: Query<(Entity, &SimPosition, &SimVelocity, &mut SimAcceleration, &mut Path)>,
     sim_config: Res<SimConfig>,
+    mut graph: ResMut<HierarchicalGraph>,
+    map_flow_field: Res<MapFlowField>,
 ) {
     let speed = sim_config.unit_speed;
     let max_force = sim_config.steering_force;
     let dt = FixedNum::ONE / FixedNum::from_num(sim_config.tick_rate);
     let step_dist = speed * dt;
-    // Use the larger of the configured threshold or the distance traveled in one frame
     let threshold = if step_dist > sim_config.arrival_threshold { step_dist } else { sim_config.arrival_threshold };
     let threshold_sq = threshold * threshold;
+    
+    let flow_field = &map_flow_field.0;
 
     for (entity, pos, vel, mut acc, mut path) in query.iter_mut() {
-        // info!("Processing entity {:?}", entity);
-        if path.current_index >= path.waypoints.len() {
-            // Apply braking force to stop
-            let braking_force = -vel.0 * sim_config.braking_force; 
-            acc.0 = acc.0 + braking_force;
-            continue;
-        }
+        match &mut *path {
+            Path::Direct(target) => {
+                let delta = *target - pos.0;
+                if delta.length_squared() < threshold_sq {
+                    commands.entity(entity).remove::<Path>();
+                    acc.0 = acc.0 - vel.0 * sim_config.braking_force;
+                    continue;
+                }
+                seek(pos.0, *target, vel.0, &mut acc.0, speed, max_force);
+            },
+            Path::LocalAStar { waypoints, current_index } => {
+                if *current_index >= waypoints.len() {
+                    let braking_force = -vel.0 * sim_config.braking_force; 
+                    acc.0 = acc.0 + braking_force;
+                    continue;
+                }
 
-        let target = path.waypoints[path.current_index];
-        let delta = target - pos.0;
-        let dist_sq = delta.length_squared();
-        
-        // Check if reached current waypoint
-        if dist_sq < threshold_sq {
-             path.current_index += 1;
-             if path.current_index >= path.waypoints.len() {
-                 commands.entity(entity).remove::<Path>();
-             }
-             continue;
-        }
+                let target = waypoints[*current_index];
+                let delta = target - pos.0;
+                let dist_sq = delta.length_squared();
+                
+                if dist_sq < threshold_sq {
+                     *current_index += 1;
+                     if *current_index >= waypoints.len() {
+                         commands.entity(entity).remove::<Path>();
+                     }
+                     continue;
+                }
+                seek(pos.0, target, vel.0, &mut acc.0, speed, max_force);
+            },
+            Path::Hierarchical { portals, final_goal, current_index } => {
+                if *current_index >= portals.len() {
+                     let delta = *final_goal - pos.0;
+                     if delta.length_squared() < threshold_sq {
+                         commands.entity(entity).remove::<Path>();
+                         acc.0 = acc.0 - vel.0 * sim_config.braking_force;
+                         continue;
+                     }
+                     seek(pos.0, *final_goal, vel.0, &mut acc.0, speed, max_force);
+                     continue;
+                }
 
-        // Seek behavior
-        if dist_sq > FixedNum::ZERO {
-            let desired_vel = delta.normalize() * speed;
-            let steer = desired_vel - vel.0;
-            
-            // Limit steering force
-            let steer_len_sq = steer.length_squared();
-            let final_steer = if steer_len_sq > max_force * max_force {
-                steer.normalize() * max_force
-            } else {
-                steer
-            };
-            
-            acc.0 = acc.0 + final_steer;
+                let target_portal_id = portals[*current_index];
+                
+                let current_grid = flow_field.world_to_grid(pos.0);
+                if let Some((gx, gy)) = current_grid {
+                    let cx = gx / CLUSTER_SIZE;
+                    let cy = gy / CLUSTER_SIZE;
+                    let current_cluster_id = (cx, cy);
+                    
+                    if let Some(portal) = graph.nodes.get(target_portal_id) {
+                        if current_cluster_id != portal.cluster {
+                            if *current_index + 1 < portals.len() {
+                                let next_portal_id = portals[*current_index + 1];
+                                if let Some(next_portal) = graph.nodes.get(next_portal_id) {
+                                    if next_portal.cluster == current_cluster_id {
+                                        *current_index += 1;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        let target_portal_id = portals[*current_index];
+                        let portal = graph.nodes[target_portal_id].clone(); 
+                        
+                        if current_cluster_id == portal.cluster {
+                             if let Some(cluster) = graph.clusters.get_mut(&current_cluster_id) {
+                                 let local_field = cluster.get_flow_field(target_portal_id, &portal, flow_field);
+                                 
+                                 let min_x = cx * CLUSTER_SIZE;
+                                 let min_y = cy * CLUSTER_SIZE;
+                                 
+                                 if gx >= min_x && gy >= min_y {
+                                     let lx = gx - min_x;
+                                     let ly = gy - min_y;
+                                     let idx = ly * local_field.width + lx;
+                                     
+                                     if idx < local_field.vectors.len() {
+                                         let dir = local_field.vectors[idx];
+                                         if dir != FixedVec2::ZERO {
+                                             let desired_vel = dir * speed;
+                                             let steer = desired_vel - vel.0;
+                                             let steer_len_sq = steer.length_squared();
+                                             let final_steer = if steer_len_sq > max_force * max_force {
+                                                 steer.normalize() * max_force
+                                             } else {
+                                                 steer
+                                             };
+                                             acc.0 = acc.0 + final_steer;
+                                         } else {
+                                             let target_pos = flow_field.grid_to_world(portal.node.x, portal.node.y);
+                                             seek(pos.0, target_pos, vel.0, &mut acc.0, speed, max_force);
+                                         }
+                                     }
+                                 }
+                             }
+                        } else {
+                            let target_pos = flow_field.grid_to_world(portal.node.x, portal.node.y);
+                            seek(pos.0, target_pos, vel.0, &mut acc.0, speed, max_force);
+                        }
+                    }
+                }
+            }
         }
+    }
+}
+
+fn seek(pos: FixedVec2, target: FixedVec2, vel: FixedVec2, acc: &mut FixedVec2, speed: FixedNum, max_force: FixedNum) {
+    let delta = target - pos;
+    let dist_sq = delta.length_squared();
+    if dist_sq > FixedNum::ZERO {
+        let desired_vel = delta.normalize() * speed;
+        let steer = desired_vel - vel;
+        let steer_len_sq = steer.length_squared();
+        let final_steer = if steer_len_sq > max_force * max_force {
+            steer.normalize() * max_force
+        } else {
+            steer
+        };
+        *acc = *acc + final_steer;
     }
 }
 
@@ -867,31 +977,61 @@ fn draw_force_sources(
 }
 
 fn draw_unit_paths(
-    query: Query<(&Transform, &Path), With<Selected>>,
+    query: Query<(&Transform, &Path)>,
     debug_config: Res<DebugConfig>,
     mut gizmos: Gizmos,
+    map_flow_field: Res<MapFlowField>,
+    graph: Res<HierarchicalGraph>,
 ) {
     if !debug_config.show_paths {
         return;
     }
+    
+    let flow_field = &map_flow_field.0;
 
     for (transform, path) in query.iter() {
-        if path.waypoints.is_empty() || path.current_index >= path.waypoints.len() {
-            continue;
-        }
-
         let mut current_pos = transform.translation;
-        // Lift up slightly to avoid z-fighting
         current_pos.y = 0.5;
-        
-        for i in path.current_index..path.waypoints.len() {
-            let wp = path.waypoints[i];
-            let next_pos = Vec3::new(wp.x.to_num(), 0.5, wp.y.to_num());
-            
-            gizmos.line(current_pos, next_pos, Color::srgb(0.0, 1.0, 0.0));
-            gizmos.sphere(next_pos, 0.2, Color::srgb(0.0, 1.0, 0.0));
-            
-            current_pos = next_pos;
+
+        match path {
+            Path::Direct(target) => {
+                let next_pos = Vec3::new(target.x.to_num(), 0.5, target.y.to_num());
+                gizmos.line(current_pos, next_pos, Color::srgb(0.0, 1.0, 0.0));
+                gizmos.sphere(next_pos, 0.2, Color::srgb(0.0, 1.0, 0.0));
+            },
+            Path::LocalAStar { waypoints, current_index } => {
+                if *current_index >= waypoints.len() { continue; }
+                for i in *current_index..waypoints.len() {
+                    let wp = waypoints[i];
+                    let next_pos = Vec3::new(wp.x.to_num(), 0.5, wp.y.to_num());
+                    gizmos.line(current_pos, next_pos, Color::srgb(0.0, 1.0, 0.0));
+                    gizmos.sphere(next_pos, 0.2, Color::srgb(0.0, 1.0, 0.0));
+                    current_pos = next_pos;
+                }
+            },
+            Path::Hierarchical { portals, final_goal, current_index } => {
+                if *current_index >= portals.len() {
+                    let next_pos = Vec3::new(final_goal.x.to_num(), 0.5, final_goal.y.to_num());
+                    gizmos.line(current_pos, next_pos, Color::srgb(0.0, 1.0, 0.0));
+                    gizmos.sphere(next_pos, 0.2, Color::srgb(0.0, 1.0, 0.0));
+                    continue;
+                }
+                
+                for i in *current_index..portals.len() {
+                    let portal_id = portals[i];
+                    if let Some(portal) = graph.nodes.get(portal_id) {
+                        let wp = flow_field.grid_to_world(portal.node.x, portal.node.y);
+                        let next_pos = Vec3::new(wp.x.to_num(), 0.5, wp.y.to_num());
+                        gizmos.line(current_pos, next_pos, Color::srgb(0.0, 1.0, 0.0));
+                        gizmos.sphere(next_pos, 0.2, Color::srgb(0.0, 1.0, 0.0));
+                        current_pos = next_pos;
+                    }
+                }
+                // Draw line to final goal
+                let next_pos = Vec3::new(final_goal.x.to_num(), 0.5, final_goal.y.to_num());
+                gizmos.line(current_pos, next_pos, Color::srgb(0.0, 1.0, 0.0));
+                gizmos.sphere(next_pos, 0.2, Color::srgb(0.0, 1.0, 0.0));
+            }
         }
     }
 }

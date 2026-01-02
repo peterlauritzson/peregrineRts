@@ -8,8 +8,8 @@ The solution is **Hierarchical Pathfinding A* (HPA*)**. This approach divides th
 ### Key Features
 *   **Scalability:** Pathfinding cost depends on the number of *clusters*, not the number of *tiles*.
 *   **Dynamic Updates:** Placing a building only triggers a re-calculation for the specific cluster it touches, not the whole map.
-*   **Memory Efficient:** We store one abstract graph, not a flow field for every unit.
-*   **"Google Maps" Style:** Units plan a high-level route (Highway) and only calculate detailed steps for the immediate local area.
+*   **Memory Efficient:** We store one abstract graph, and cache small *local* flow fields only for active clusters.
+*   **Robust Movement:** Units use **Local Flow Fields** to navigate within a cluster. This makes them immune to getting "stuck" after collisions, as the map itself guides them back to the path.
 
 ---
 
@@ -28,14 +28,15 @@ The solution is **Hierarchical Pathfinding A* (HPA*)**. This approach divides th
         id: (usize, usize), // Grid coordinates (e.g., 2, 4)
         portals: Vec<PortalId>,
         // Cache of distances between portals inside this cluster
-        intra_cluster_costs: HashMap<(PortalId, PortalId), FixedNum>, 
+        intra_cluster_costs: HashMap<(PortalId, PortalId), FixedNum>,
+        // NEW: Cache of flow fields for specific exit portals
+        flow_field_cache: HashMap<PortalId, LocalFlowField>,
     }
     ```
 
 ### Level 2: The Abstract Graph (The "Highway Network")
 *   **Nodes (Portals):** A `Portal` is a transition point between two adjacent clusters.
-    *   *Simplification Phase:* Initially, the "Portal" can just be the center of the shared edge.
-    *   *Advanced Phase:* A Portal is a specific walkable segment on the border.
+    *   *Definition:* A Portal is a **range of tiles** (an edge segment), not a single point. This allows units to use the full width of a hallway.
 *   **Edges:**
     1.  **Inter-Cluster:** Connection between two portals that share a border (Cost ~ 1.0).
     2.  **Intra-Cluster:** Connection between two portals *inside* the same cluster (Cost = calculated via local A*).
@@ -61,10 +62,16 @@ The solution is **Hierarchical Pathfinding A* (HPA*)**. This approach divides th
 1.  Run **A*** on the **Abstract Graph**.
 2.  **Result:** A list of Portals (e.g., `Start -> Portal A -> Portal B -> Goal`).
 
-### C. Movement & Refinement
-1.  The Unit receives the list of Portals as "Waypoints".
-2.  **Steering:** The unit steers towards the *next* Portal in the list.
-3.  **Local Avoidance:** The unit uses the existing `Boids` / `Steering` behaviors to avoid local dynamic units while heading to the Portal.
+### C. Movement & Refinement (Hybrid Approach)
+1.  **High-Level:** The Unit receives the list of Portals as "Waypoints" (e.g., `Portal A -> Portal B`).
+2.  **Low-Level (Local Flow Fields):**
+    *   The unit identifies which Cluster it is currently in.
+    *   It requests a **Local Flow Field** for its immediate target (`Portal A`).
+    *   If the field is not cached, the System generates it (using the *entire edge* of Portal A as the target, not just the center).
+3.  **Physics:**
+    *   The unit reads the vector from the tile under its feet.
+    *   This vector is combined with Boids/Separation forces.
+    *   **Robustness:** If a unit is pushed by a collision, it simply lands on a new tile and follows the new vector. No re-pathing required.
 
 ### D. Dynamic Updates (Building Placement)
 1.  User places a wall in `Cluster (2, 2)`.
@@ -100,14 +107,23 @@ We will build this iteratively to ensure the game remains playable at every step
     *   Runs A* on the Graph nodes.
     *   Returns the list of Portal positions.
 
-### Phase 3: Dynamic Updates
+### Phase 3: Local Flow Fields (The "Last Mile")
+*Goal: Robust movement and collision recovery.*
+1.  Implement `LocalFlowField` struct (small grid, e.g., 10x10).
+2.  Implement `FlowFieldCache` in the `Cluster` struct.
+3.  Update Unit Movement Logic:
+    *   Instead of `seek(target_pos)`, use `get_flow_vector(current_pos)`.
+    *   Generate flow fields on demand when a unit requests a portal that isn't cached.
+
+### Phase 4: Dynamic Updates
 *Goal: Handle map changes.*
 1.  Listen for `ObstacleAdded` events.
 2.  Identify affected Clusters.
-3.  Trigger `GraphGenerator::update_cluster(cluster_id)`.
-4.  Verify that units re-path if their current path is invalidated.
+3.  **Invalidate Cache:** Clear the `flow_field_cache` for that cluster.
+4.  Trigger `GraphGenerator::update_cluster(cluster_id)`.
+5.  Verify that units re-path if their current path is invalidated.
 
-### Phase 4: Optimization & Polish
+### Phase 5: Optimization & Polish
 *Goal: Smooth movement and performance.*
 1.  **Portal Refinement:** Instead of "Center of Edge", find the actual walkable gaps.
 2.  **Path Smoothing:** Post-process the path to remove "zig-zags" between portals.

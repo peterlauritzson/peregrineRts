@@ -1,10 +1,10 @@
 use bevy::prelude::*;
 use crate::game::math::{FixedVec2, FixedNum};
 use crate::game::simulation::{MapFlowField, DebugConfig};
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::cmp::Ordering;
 
-const CLUSTER_SIZE: usize = 10;
+pub const CLUSTER_SIZE: usize = 10;
 
 #[derive(Event, Message, Debug, Clone)]
 pub struct PathRequest {
@@ -14,17 +14,28 @@ pub struct PathRequest {
     pub goal: FixedVec2,
 }
 
-#[derive(Component, Debug, Clone, Default)]
-pub struct Path {
-    pub waypoints: Vec<FixedVec2>,
-    pub current_index: usize,
+#[derive(Component, Debug, Clone)]
+pub enum Path {
+    Direct(FixedVec2),
+    LocalAStar { waypoints: Vec<FixedVec2>, current_index: usize },
+    Hierarchical {
+        portals: Vec<usize>,
+        final_goal: FixedVec2,
+        current_index: usize,
+    }
+}
+
+impl Default for Path {
+    fn default() -> Self {
+        Path::Direct(FixedVec2::ZERO)
+    }
 }
 
 #[derive(Resource, Default)]
 pub struct HierarchicalGraph {
     pub nodes: Vec<Portal>,
     pub edges: HashMap<usize, Vec<(usize, FixedNum)>>, // PortalId -> [(TargetPortalId, Cost)]
-    pub cluster_portals: HashMap<(usize, usize), Vec<usize>>,
+    pub clusters: HashMap<(usize, usize), Cluster>,
     pub initialized: bool,
 }
 
@@ -32,17 +43,43 @@ impl HierarchicalGraph {
     pub fn reset(&mut self) {
         self.nodes.clear();
         self.edges.clear();
-        self.cluster_portals.clear();
+        self.clusters.clear();
         self.initialized = false;
+    }
+
+    pub fn clear_cluster_cache(&mut self, cluster_id: (usize, usize)) {
+        if let Some(cluster) = self.clusters.get_mut(&cluster_id) {
+            cluster.clear_cache();
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Cluster {
+    pub id: (usize, usize),
+    pub portals: Vec<usize>,
+    pub flow_field_cache: HashMap<usize, LocalFlowField>,
+}
+
+impl Cluster {
+    pub fn clear_cache(&mut self) {
+        self.flow_field_cache.clear();
     }
 }
 
 #[derive(Clone, Debug)]
+pub struct LocalFlowField {
+    pub width: usize,
+    pub height: usize,
+    pub vectors: Vec<FixedVec2>, // Row-major, size width * height
+}
+
+#[derive(Clone, Debug)]
 pub struct Portal {
-    #[allow(dead_code)]
     pub id: usize,
     pub node: Node,
-    #[allow(dead_code)]
+    pub range_min: Node,
+    pub range_max: Node,
     pub cluster: (usize, usize),
 }
 
@@ -98,7 +135,16 @@ fn build_graph(
     let width_clusters = (flow_field.width + CLUSTER_SIZE - 1) / CLUSTER_SIZE;
     let height_clusters = (flow_field.height + CLUSTER_SIZE - 1) / CLUSTER_SIZE;
 
-    let mut cluster_portals: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+    // Initialize clusters
+    for cy in 0..height_clusters {
+        for cx in 0..width_clusters {
+            graph.clusters.insert((cx, cy), Cluster {
+                id: (cx, cy),
+                portals: Vec::new(),
+                flow_field_cache: HashMap::new(),
+            });
+        }
+    }
 
     // 1. Find Portals (Inter-cluster edges)
     
@@ -126,13 +172,13 @@ fn build_graph(
                     }
                 } else {
                     if let Some(sy) = start_segment {
-                        create_portal_vertical(&mut graph, &mut cluster_portals, x1, x2, sy, y - 1, cx, cy, cx + 1, cy);
+                        create_portal_vertical(&mut graph, x1, x2, sy, y - 1, cx, cy, cx + 1, cy);
                         start_segment = None;
                     }
                 }
             }
             if let Some(sy) = start_segment {
-                 create_portal_vertical(&mut graph, &mut cluster_portals, x1, x2, sy, end_y - 1, cx, cy, cx + 1, cy);
+                 create_portal_vertical(&mut graph, x1, x2, sy, end_y - 1, cx, cy, cx + 1, cy);
             }
         }
     }
@@ -161,19 +207,24 @@ fn build_graph(
                     }
                 } else {
                     if let Some(sx) = start_segment {
-                        create_portal_horizontal(&mut graph, &mut cluster_portals, sx, x - 1, y1, y2, cx, cy, cx, cy + 1);
+                        create_portal_horizontal(&mut graph, sx, x - 1, y1, y2, cx, cy, cx, cy + 1);
                         start_segment = None;
                     }
                 }
             }
             if let Some(sx) = start_segment {
-                create_portal_horizontal(&mut graph, &mut cluster_portals, sx, end_x - 1, y1, y2, cx, cy, cx, cy + 1);
+                create_portal_horizontal(&mut graph, sx, end_x - 1, y1, y2, cx, cy, cx, cy + 1);
             }
         }
     }
 
     // 2. Intra-Cluster Edges
-    for ((cx, cy), portals) in cluster_portals.iter() {
+    let cluster_keys: Vec<(usize, usize)> = graph.clusters.keys().cloned().collect();
+
+    for key in cluster_keys {
+        let portals = graph.clusters[&key].portals.clone();
+        let (cx, cy) = key;
+        
         let min_x = cx * CLUSTER_SIZE;
         let max_x = ((cx + 1) * CLUSTER_SIZE).min(flow_field.width) - 1;
         let min_y = cy * CLUSTER_SIZE;
@@ -195,14 +246,129 @@ fn build_graph(
         }
     }
 
-    graph.cluster_portals = cluster_portals;
     graph.initialized = true;
     info!("Hierarchical Graph Built. Nodes: {}, Edges: {}", graph.nodes.len(), graph.edges.values().map(|v| v.len()).sum::<usize>());
 }
 
+impl Cluster {
+    pub fn get_flow_field(
+        &mut self,
+        portal_id: usize,
+        portal: &Portal,
+        map_flow_field: &crate::game::flow_field::FlowField,
+    ) -> &LocalFlowField {
+        if !self.flow_field_cache.contains_key(&portal_id) {
+            let field = generate_local_flow_field(self.id, portal, map_flow_field);
+            self.flow_field_cache.insert(portal_id, field);
+        }
+        self.flow_field_cache.get(&portal_id).unwrap()
+    }
+}
+
+fn generate_local_flow_field(
+    cluster_id: (usize, usize),
+    portal: &Portal,
+    map_flow_field: &crate::game::flow_field::FlowField,
+) -> LocalFlowField {
+    let (cx, cy) = cluster_id;
+    let min_x = cx * CLUSTER_SIZE;
+    let max_x = ((cx + 1) * CLUSTER_SIZE).min(map_flow_field.width);
+    let min_y = cy * CLUSTER_SIZE;
+    let max_y = ((cy + 1) * CLUSTER_SIZE).min(map_flow_field.height);
+    
+    let width = max_x - min_x;
+    let height = max_y - min_y;
+    let size = width * height;
+    
+    let mut integration_field = vec![u32::MAX; size];
+    let mut queue = VecDeque::new();
+    
+    // Initialize target cells (Portal Range)
+    let p_min_x = portal.range_min.x;
+    let p_max_x = portal.range_max.x;
+    let p_min_y = portal.range_min.y;
+    let p_max_y = portal.range_max.y;
+    
+    for y in p_min_y..=p_max_y {
+        for x in p_min_x..=p_max_x {
+            if x >= min_x && x < max_x && y >= min_y && y < max_y {
+                let lx = x - min_x;
+                let ly = y - min_y;
+                let idx = ly * width + lx;
+                integration_field[idx] = 0;
+                queue.push_back((lx, ly));
+            }
+        }
+    }
+    
+    // Dijkstra
+    while let Some((lx, ly)) = queue.pop_front() {
+        let idx = ly * width + lx;
+        let cost = integration_field[idx];
+        
+        let neighbors = [
+            (lx.wrapping_sub(1), ly),
+            (lx + 1, ly),
+            (lx, ly.wrapping_sub(1)),
+            (lx, ly + 1),
+        ];
+        
+        for (nx, ny) in neighbors {
+            if nx >= width || ny >= height { continue; }
+            
+            let gx = min_x + nx;
+            let gy = min_y + ny;
+            
+            // Check global obstacle
+            if map_flow_field.cost_field[map_flow_field.get_index(gx, gy)] == 255 {
+                continue;
+            }
+            
+            let n_idx = ny * width + nx;
+            if integration_field[n_idx] == u32::MAX {
+                integration_field[n_idx] = cost + 1;
+                queue.push_back((nx, ny));
+            }
+        }
+    }
+    
+    // Generate Vectors
+    let mut vectors = vec![FixedVec2::ZERO; size];
+    for y in 0..height {
+        for x in 0..width {
+            let idx = y * width + x;
+            if integration_field[idx] == u32::MAX { continue; }
+            if integration_field[idx] == 0 { continue; } // Target
+            
+            let mut best_cost = integration_field[idx];
+            let mut best_dir = FixedVec2::ZERO;
+            
+            // Check neighbors for lowest cost
+             let neighbors = [
+                (x.wrapping_sub(1), y, FixedVec2::new(FixedNum::from_num(-1), FixedNum::ZERO)),
+                (x + 1, y, FixedVec2::new(FixedNum::ONE, FixedNum::ZERO)),
+                (x, y.wrapping_sub(1), FixedVec2::new(FixedNum::ZERO, FixedNum::from_num(-1))),
+                (x, y + 1, FixedVec2::new(FixedNum::ZERO, FixedNum::ONE)),
+            ];
+            
+            for (nx, ny, dir) in neighbors {
+                if nx >= width || ny >= height { continue; }
+                let n_idx = ny * width + nx;
+                if integration_field[n_idx] < best_cost {
+                    best_cost = integration_field[n_idx];
+                    best_dir = dir;
+                }
+            }
+            
+            vectors[idx] = best_dir;
+        }
+    }
+    
+    LocalFlowField { width, height, vectors }
+}
+
 fn create_portal_vertical(
     graph: &mut HierarchicalGraph,
-    cluster_portals: &mut HashMap<(usize, usize), Vec<usize>>,
     x1: usize, x2: usize,
     y_start: usize, y_end: usize,
     c1x: usize, c1y: usize,
@@ -211,12 +377,24 @@ fn create_portal_vertical(
     let mid_y = (y_start + y_end) / 2;
     
     let id1 = graph.nodes.len();
-    graph.nodes.push(Portal { id: id1, node: Node { x: x1, y: mid_y }, cluster: (c1x, c1y) });
-    cluster_portals.entry((c1x, c1y)).or_default().push(id1);
+    graph.nodes.push(Portal { 
+        id: id1, 
+        node: Node { x: x1, y: mid_y }, 
+        range_min: Node { x: x1, y: y_start },
+        range_max: Node { x: x1, y: y_end },
+        cluster: (c1x, c1y) 
+    });
+    graph.clusters.entry((c1x, c1y)).or_default().portals.push(id1);
 
     let id2 = graph.nodes.len();
-    graph.nodes.push(Portal { id: id2, node: Node { x: x2, y: mid_y }, cluster: (c2x, c2y) });
-    cluster_portals.entry((c2x, c2y)).or_default().push(id2);
+    graph.nodes.push(Portal { 
+        id: id2, 
+        node: Node { x: x2, y: mid_y }, 
+        range_min: Node { x: x2, y: y_start },
+        range_max: Node { x: x2, y: y_end },
+        cluster: (c2x, c2y) 
+    });
+    graph.clusters.entry((c2x, c2y)).or_default().portals.push(id2);
 
     let cost = FixedNum::from_num(1.0);
     graph.edges.entry(id1).or_default().push((id2, cost));
@@ -225,7 +403,6 @@ fn create_portal_vertical(
 
 fn create_portal_horizontal(
     graph: &mut HierarchicalGraph,
-    cluster_portals: &mut HashMap<(usize, usize), Vec<usize>>,
     x_start: usize, x_end: usize,
     y1: usize, y2: usize,
     c1x: usize, c1y: usize,
@@ -234,12 +411,24 @@ fn create_portal_horizontal(
     let mid_x = (x_start + x_end) / 2;
     
     let id1 = graph.nodes.len();
-    graph.nodes.push(Portal { id: id1, node: Node { x: mid_x, y: y1 }, cluster: (c1x, c1y) });
-    cluster_portals.entry((c1x, c1y)).or_default().push(id1);
+    graph.nodes.push(Portal { 
+        id: id1, 
+        node: Node { x: mid_x, y: y1 }, 
+        range_min: Node { x: x_start, y: y1 },
+        range_max: Node { x: x_end, y: y1 },
+        cluster: (c1x, c1y) 
+    });
+    graph.clusters.entry((c1x, c1y)).or_default().portals.push(id1);
 
     let id2 = graph.nodes.len();
-    graph.nodes.push(Portal { id: id2, node: Node { x: mid_x, y: y2 }, cluster: (c2x, c2y) });
-    cluster_portals.entry((c2x, c2y)).or_default().push(id2);
+    graph.nodes.push(Portal { 
+        id: id2, 
+        node: Node { x: mid_x, y: y2 }, 
+        range_min: Node { x: x_start, y: y2 },
+        range_max: Node { x: x_end, y: y2 },
+        cluster: (c2x, c2y) 
+    });
+    graph.clusters.entry((c2x, c2y)).or_default().portals.push(id2);
 
     let cost = FixedNum::from_num(1.0);
     graph.edges.entry(id1).or_default().push((id2, cost));
@@ -312,13 +501,10 @@ fn find_path_hierarchical(
     goal: Node,
     flow_field: &crate::game::flow_field::FlowField,
     graph: &HierarchicalGraph
-) -> Option<Vec<FixedVec2>> {
+) -> Option<Path> {
     // 1. Check Line of Sight
     if has_line_of_sight(start, goal, flow_field) {
-        return Some(vec![
-            flow_field.grid_to_world(start.x, start.y),
-            flow_field.grid_to_world(goal.x, goal.y)
-        ]);
+        return Some(Path::Direct(flow_field.grid_to_world(goal.x, goal.y)));
     }
 
     let start_cluster = (start.x / CLUSTER_SIZE, start.y / CLUSTER_SIZE);
@@ -331,7 +517,9 @@ fn find_path_hierarchical(
         let min_y = start_cluster.1 * CLUSTER_SIZE;
         let max_y = ((start_cluster.1 + 1) * CLUSTER_SIZE).min(flow_field.height) - 1;
         
-        return find_path_astar_local_points(start, goal, flow_field, min_x, max_x, min_y, max_y);
+        if let Some(points) = find_path_astar_local_points(start, goal, flow_field, min_x, max_x, min_y, max_y) {
+            return Some(Path::LocalAStar { waypoints: points, current_index: 0 });
+        }
     }
 
     // 2. Check if close enough for local A* even if different clusters
@@ -349,8 +537,8 @@ fn find_path_hierarchical(
          let min_y = min_y.max(0);
          let max_y = max_y.min(flow_field.height - 1);
 
-         if let Some(path) = find_path_astar_local_points(start, goal, flow_field, min_x, max_x, min_y, max_y) {
-             return Some(path);
+         if let Some(points) = find_path_astar_local_points(start, goal, flow_field, min_x, max_x, min_y, max_y) {
+             return Some(Path::LocalAStar { waypoints: points, current_index: 0 });
          }
     }
 
@@ -361,8 +549,8 @@ fn find_path_hierarchical(
     // Add start node connections to graph
     // Find portals in start cluster
     let mut start_portals = Vec::new();
-    if let Some(portals) = graph.cluster_portals.get(&start_cluster) {
-        for &portal_id in portals {
+    if let Some(cluster) = graph.clusters.get(&start_cluster) {
+        for &portal_id in &cluster.portals {
             let portal_node = graph.nodes[portal_id].node;
             let min_x = start_cluster.0 * CLUSTER_SIZE;
             let max_x = ((start_cluster.0 + 1) * CLUSTER_SIZE).min(flow_field.width) - 1;
@@ -380,8 +568,8 @@ fn find_path_hierarchical(
     }
 
     let mut goal_portals = HashSet::new();
-    if let Some(portals) = graph.cluster_portals.get(&goal_cluster) {
-        for &portal_id in portals {
+    if let Some(cluster) = graph.clusters.get(&goal_cluster) {
+        for &portal_id in &cluster.portals {
             goal_portals.insert(portal_id);
         }
     }
@@ -418,19 +606,21 @@ fn find_path_hierarchical(
     }
 
     if let Some(end_portal) = final_portal {
-        let mut path = Vec::new();
-        path.push(flow_field.grid_to_world(goal.x, goal.y));
-        
+        let mut portals = Vec::new();
         let mut curr = end_portal;
-        path.push(flow_field.grid_to_world(graph.nodes[curr].node.x, graph.nodes[curr].node.y));
+        portals.push(curr);
         
         while let Some(&prev) = came_from.get(&curr) {
             curr = prev;
-            path.push(flow_field.grid_to_world(graph.nodes[curr].node.x, graph.nodes[curr].node.y));
+            portals.push(curr);
         }
+        portals.reverse();
         
-        path.reverse();
-        return Some(path);
+        return Some(Path::Hierarchical {
+            portals,
+            final_goal: flow_field.grid_to_world(goal.x, goal.y),
+            current_index: 0,
+        });
     }
 
     None
@@ -480,17 +670,14 @@ fn process_path_requests(
 
         if let (Some(start_node), Some(goal_node)) = (start_node_opt, goal_node_opt) {
             info!("Grid coords: {:?} -> {:?}", start_node, goal_node);
-            if let Some(waypoints) = find_path_hierarchical(
+            if let Some(path) = find_path_hierarchical(
                 Node { x: start_node.0, y: start_node.1 },
                 Node { x: goal_node.0, y: goal_node.1 },
                 flow_field,
                 &graph
             ) {
-                info!("Path found with {} waypoints: {:?}", waypoints.len(), waypoints);
-                commands.entity(request.entity).insert(Path {
-                    waypoints,
-                    current_index: 0,
-                });
+                info!("Path found: {:?}", path);
+                commands.entity(request.entity).insert(path);
             } else {
                 warn!("No path found");
             }
