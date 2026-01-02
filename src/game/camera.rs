@@ -1,20 +1,25 @@
 use bevy::prelude::*;
 use bevy::input::mouse::MouseWheel;
 use crate::game::config::{GameConfig, GameConfigHandle};
+use crate::game::GameState;
 
 pub struct RtsCameraPlugin;
 
 impl Plugin for RtsCameraPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_camera)
-           .add_systems(Update, move_camera);
+        app.add_systems(OnEnter(GameState::InGame), spawn_camera)
+           .add_systems(OnEnter(GameState::Editor), spawn_camera)
+           .add_systems(Update, move_camera.run_if(in_state(GameState::InGame).or(in_state(GameState::Editor))));
     }
 }
 
 #[derive(Component)]
 pub struct RtsCamera;
 
-fn spawn_camera(mut commands: Commands) {
+fn spawn_camera(mut commands: Commands, query: Query<Entity, With<RtsCamera>>) {
+    if !query.is_empty() {
+        return;
+    }
     // RTS Camera: High up, looking down at an angle
     let translation = Vec3::new(0.0, 15.0, 15.0);
     let look_at = Vec3::ZERO;

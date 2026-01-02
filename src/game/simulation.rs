@@ -5,6 +5,7 @@ use crate::game::flow_field::{FlowField, CELL_SIZE};
 use crate::game::spatial_hash::SpatialHash;
 use crate::game::pathfinding::{Path, HierarchicalGraph, CLUSTER_SIZE};
 use crate::game::map::{self, MAP_VERSION};
+use crate::game::GameState;
 use std::time::{Instant, Duration};
 // use std::collections::HashMap;
 
@@ -204,11 +205,11 @@ impl Plugin for SimulationPlugin {
             SimSet::Steering,
             SimSet::Integration,
             SimSet::Physics,
-        ).chain());
+        ).chain().run_if(in_state(GameState::InGame).or(in_state(GameState::Editor))));
 
         // Register Systems
         app.add_systems(Startup, init_flow_field);
-        app.add_systems(Update, (update_sim_from_config, apply_new_obstacles, toggle_debug, draw_flow_field_gizmos, draw_force_sources, draw_unit_paths));
+        app.add_systems(Update, (update_sim_from_config, apply_new_obstacles, toggle_debug, draw_flow_field_gizmos, draw_force_sources, draw_unit_paths).run_if(in_state(GameState::InGame).or(in_state(GameState::Editor))));
         app.add_systems(FixedUpdate, (
             sim_start.before(SimSet::Input),
             cache_previous_state.in_set(SimSet::Input),
@@ -309,6 +310,7 @@ fn update_sim_from_config(
                              // Spawn obstacles from map
                              for obs in &map_data.obstacles {
                                  commands.spawn((
+                                     crate::game::GameEntity,
                                      Mesh3d(meshes.add(Cylinder::new(obs.radius.to_num(), 2.0))),
                                      MeshMaterial3d(materials.add(Color::srgb(0.5, 0.5, 0.5))),
                                      Transform::from_xyz(obs.position.x.to_num(), 1.0, obs.position.y.to_num()),
@@ -365,6 +367,7 @@ fn update_sim_from_config(
                          let obstacle_radius = FixedNum::from_num(2.0);
                          
                          commands.spawn((
+                             crate::game::GameEntity,
                              Mesh3d(meshes.add(Cylinder::new(obstacle_radius.to_num(), 2.0))),
                              MeshMaterial3d(materials.add(Color::srgb(0.5, 0.5, 0.5))),
                              Transform::from_xyz(obstacle_pos.x.to_num(), 1.0, obstacle_pos.y.to_num()),
@@ -442,6 +445,7 @@ fn process_input(
         // To be strictly deterministic across clients, we would need to reserve Entity IDs 
         // or use a deterministic ID generator.
         commands.spawn((
+            crate::game::GameEntity,
             crate::game::unit::Unit,
             SimPosition(event.position),
             SimPositionPrev(event.position),

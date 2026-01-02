@@ -30,6 +30,7 @@ pub struct GameConfig {
     pub key_spawn_black_hole: KeyCode,
     pub key_spawn_wind_spot: KeyCode,
     pub key_spawn_unit: KeyCode,
+    pub key_pause: KeyCode,
 
     // Camera
     pub camera_speed: f32,

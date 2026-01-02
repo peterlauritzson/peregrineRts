@@ -25,6 +25,7 @@
     key_spawn_black_hole: KeyB,
     key_spawn_wind_spot: KeyV,
     key_spawn_unit: Space,
+    key_pause: Escape,
 
     // Camera
     camera_speed: 20.0,

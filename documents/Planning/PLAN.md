@@ -142,50 +142,65 @@ Once the RTS Foundation (Milestone 0) is complete, we will iterate on the simula
 # UI & Interaction Roadmap (Step-by-Step)
 
 1. **Hardcoded View**
-   - Fixed camera position and angle.
-   - No UI elements, just the rendered scene.
+   - [x] Fixed camera position and angle.
+   - [x] No UI elements, just the rendered scene.
 
 2. **Debug Text Overlay**
-   - Simple FPS counter.
-   - Display unit count or basic debug info using text on screen.
-   - Ensure high FPS is maintainable (performance monitoring).
+   - [x] Simple FPS counter.
+   - [x] Display unit count or basic debug info using text on screen.
+   - [x] Ensure high FPS is maintainable (performance monitoring).
 
 3. **Basic Camera Control**
-   - WASD movement.
-   - Zoom in/out.
-   - Clamp camera to map bounds.
+   - [x] WASD movement.
+   - [x] Zoom in/out.
+   - [x] Clamp camera to map bounds.
 
-4. **Selection Visuals**
-   - Draw a selection box (drag-select).
-   - Highlight selected units (circles or outlines).
+4. **Main Menu & Game State Architecture**
+   - [x] **Game States**: Implement `GameState` enum (MainMenu, InGame, Paused, Editor).
+   - [x] **Main Menu Screen**:
+     - "Play Game" (Loads default map).
+     - "Map Editor" (Loads editor mode).
+     - "Settings" (Submenu).
+     - "Quit".
+   - [x] **Pause Logic**:
+     - Pressing ESC in-game toggles Pause state.
+     - In Single Player: Simulation loop stops.
+     - In Multiplayer: Menu opens but simulation continues (future proofing).
 
-5. **Simple HUD (Heads-Up Display)**
-   - Bottom bar panel.
-   - Display info of the currently selected unit (e.g., "Marine", Health: 100).
+5. **Settings & Controls Menu**
+   - [ ] **Keybindings UI**:
+     - List all active actions (Camera Move, Stop, Attack, etc.).
+     - Allow rebinding keys.
+     - Persist bindings to `game_config.ron` or `settings.ron`.
+   - [ ] **Video/Audio**: Basic sliders/toggles (Volume, Fullscreen).
 
-6. **Command Card**
-   - Buttons for actions (Move, Stop, Attack).
-   - Clicking a button triggers the action for selected units.
+6. **In-Game HUD (Heads-Up Display)**
+   - [ ] **Selection Panel**: Display details of selected units (Count, Type, Health).
+   - [ ] **Command Card**: Grid of buttons for unit actions (Move, Stop, Attack, Patrol).
+   - [ ] **Minimap**:
+     - Render map bounds and units as dots.
+     - Camera frustum rectangle.
+     - Click to move camera.
 
-7. **Minimap Prototype**
-   - A small rectangle showing unit positions as dots.
-   - Click on minimap to move camera.
+7. **Selection Visuals & Interaction**
+   - [ ] **Drag Selection**: Draw a rectangle on screen; select all units inside.
+   - [ ] **Health Bars**: Render health bars above units (toggleable).
+   - [ ] **Selection Circles**: Render rings around selected units.
 
-8. **Main Menu & Game States**
-   - Start Screen (Play, Quit).
-   - Pause Menu (Resume, Quit).
-   - State transitions (Menu -> Game -> Pause).
+8. **Map Editor UI & Tools**
+   - [ ] **Editor Overlay**:
+     - "Tool Palette" (Place Wall, Remove Wall, Set Start Point).
+     - "Brush Size" slider.
+   - [ ] **Map Operations**:
+     - "Re-bake Map": Button to trigger `build_graph` and flow field generation.
+     - "Save Map": Open dialog or input field to save to `.pmap` file.
+     - "Load Map": List available maps and load one.
+   - [ ] **Visual Feedback**: Show "dirty" clusters that need re-baking.
 
-9. **Settings & Configuration**
-   - Keybinding configuration menu (move keys to config).
-   - Graphics settings (Resolution, VSync).
-   - Save/Load settings to disk.
-
-10. **The "Polished" Experience**
-    - Fully customizable UI.
-    - Save/Load Game state.
-    - Styled UI themes, animations, and sound effects for interactions.
-    - Complete game loop with Win/Loss screens.
+9. **The "Polished" Experience**
+    - [ ] Styled UI themes (Nine-patch borders, custom fonts).
+    - [ ] Sound effects for UI interactions (Hover, Click).
+    - [ ] Win/Loss screens with "Return to Menu" options.
 
 ---
 

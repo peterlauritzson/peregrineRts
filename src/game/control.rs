@@ -5,6 +5,7 @@ use crate::game::simulation::{UnitMoveCommand, SimPosition, ForceSource, ForceTy
 use crate::game::math::{FixedVec2, FixedNum};
 use crate::game::camera::RtsCamera;
 use crate::game::config::{GameConfig, GameConfigHandle};
+use crate::game::GameState;
 
 pub struct ControlPlugin;
 
@@ -12,7 +13,7 @@ impl Plugin for ControlPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<DragState>()
            .add_systems(Startup, setup_selection_box)
-           .add_systems(Update, (handle_input, handle_debug_spawning));
+           .add_systems(Update, (handle_input, handle_debug_spawning).run_if(in_state(GameState::InGame).or(in_state(GameState::Editor))));
     }
 }
 
@@ -208,6 +209,7 @@ fn handle_debug_spawning(
                     // Spawn Black Hole (Attract)
                     info!("Spawning Black Hole at {:?}", pos_fixed);
                     commands.spawn((
+                        crate::game::GameEntity,
                         Transform::from_translation(intersection_point),
                         GlobalTransform::default(),
                         SimPosition(pos_fixed),
@@ -220,6 +222,7 @@ fn handle_debug_spawning(
                     // Spawn Wind Spot (Repel)
                     info!("Spawning Wind Spot at {:?}", pos_fixed);
                      commands.spawn((
+                        crate::game::GameEntity,
                         Transform::from_translation(intersection_point),
                         GlobalTransform::default(),
                         SimPosition(pos_fixed),

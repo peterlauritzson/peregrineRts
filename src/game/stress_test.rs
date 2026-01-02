@@ -5,6 +5,7 @@ use crate::game::simulation::{SpawnUnitCommand, SimConfig};
 use crate::game::math::{FixedVec2, FixedNum};
 use crate::game::spatial_hash::SpatialHash;
 use crate::game::camera::RtsCamera;
+use crate::game::config::{GameConfig, GameConfigHandle};
 use rand::{rng, Rng};
 
 pub struct StressTestPlugin;
@@ -41,8 +42,12 @@ fn handle_stress_test_input(
     q_window: Query<&Window, With<PrimaryWindow>>,
     q_camera: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     mut spawn_events: MessageWriter<SpawnUnitCommand>,
+    config_handle: Res<GameConfigHandle>,
+    game_configs: Res<Assets<GameConfig>>,
 ) {
-    if keys.just_pressed(KeyCode::Space) {
+    let Some(config) = game_configs.get(&config_handle.0) else { return };
+
+    if keys.just_pressed(config.key_spawn_unit) {
         let Some((camera, camera_transform)) = q_camera.iter().next() else { return };
         let Some(window) = q_window.iter().next() else { return };
         let Some(cursor_position) = window.cursor_position() else { return };

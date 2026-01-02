@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use crate::game::math::{FixedVec2, FixedNum};
 use crate::game::simulation::{MapFlowField, DebugConfig};
+use crate::game::GameState;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::cmp::Ordering;
 use serde::{Serialize, Deserialize};
@@ -90,8 +91,8 @@ impl Plugin for PathfindingPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<PathRequest>();
         app.init_resource::<HierarchicalGraph>();
-        app.add_systems(Update, (build_graph, draw_graph_gizmos));
-        app.add_systems(FixedUpdate, process_path_requests);
+        app.add_systems(Update, (build_graph, draw_graph_gizmos).run_if(in_state(GameState::InGame).or(in_state(GameState::Editor))));
+        app.add_systems(FixedUpdate, process_path_requests.run_if(in_state(GameState::InGame).or(in_state(GameState::Editor))));
     }
 }
 
