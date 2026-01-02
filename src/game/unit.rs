@@ -98,6 +98,7 @@ fn update_health_bars(
 fn update_selection_circle_visibility(
     q_added: Query<&Children, (With<Unit>, Added<Selected>)>,
     q_children_lookup: Query<&Children>,
+    q_selected: Query<Entity, With<Selected>>,
     mut q_vis: Query<&mut Visibility, With<SelectionCircle>>,
     mut removed_selected: RemovedComponents<Selected>,
 ) {
@@ -112,6 +113,9 @@ fn update_selection_circle_visibility(
 
     // Handle Removed Selected
     for entity in removed_selected.read() {
+        if q_selected.contains(entity) {
+            continue;
+        }
         if let Ok(children) = q_children_lookup.get(entity) {
             for child in children.iter() {
                 if let Ok(mut vis) = q_vis.get_mut(child) {

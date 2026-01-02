@@ -5,6 +5,7 @@ use crate::game::simulation::UnitStopCommand;
 use crate::game::control::InputMode;
 use crate::game::simulation::SimPosition;
 use crate::game::config::{GameConfig, GameConfigHandle};
+use crate::game::camera::RtsCamera;
 
 pub struct HudPlugin;
 
@@ -27,6 +28,9 @@ struct HudRoot;
 
 #[derive(Component)]
 struct Minimap;
+
+#[derive(Component)]
+struct MinimapCameraFrame;
 
 #[derive(Component)]
 struct MinimapDot(Entity);
@@ -76,16 +80,15 @@ fn setup_hud(mut commands: Commands) {
                 Minimap,
             )).with_children(|p| {
                  p.spawn((
-                    Text::new("Minimap"),
-                    TextFont {
-                        font_size: 20.0,
-                        ..default()
-                    },
-                    TextColor(Color::WHITE),
                     Node {
-                        margin: UiRect::all(Val::Auto),
+                        position_type: PositionType::Absolute,
+                        border: UiRect::all(Val::Px(1.0)),
+                        width: Val::Px(40.0), 
+                        height: Val::Px(30.0),
                         ..default()
                     },
+                    BorderColor::from(Color::WHITE),
+                    MinimapCameraFrame,
                 ));
             });
 
@@ -205,10 +208,12 @@ fn setup_hud(mut commands: Commands) {
 
 fn minimap_system(
     mut commands: Commands,
-    q_minimap: Query<(Entity, &Node), (With<Minimap>, Without<MinimapDot>)>,
+    q_minimap: Query<(Entity, &ComputedNode), (With<Minimap>, Without<MinimapDot>)>,
     q_units: Query<(Entity, &SimPosition, Option<&Selected>), Without<UnitMinimapDot>>,
     mut q_dots: Query<(Entity, &MinimapDot, &mut Node, &mut BackgroundColor), Without<Minimap>>,
     q_units_lookup: Query<(&SimPosition, Option<&Selected>)>,
+    q_camera: Query<&Transform, With<RtsCamera>>,
+    mut q_camera_frame: Query<&mut Node, (With<MinimapCameraFrame>, Without<MinimapDot>, Without<Minimap>)>,
     config_handle: Res<GameConfigHandle>,
     game_configs: Res<Assets<GameConfig>>,
 ) {
@@ -217,8 +222,8 @@ fn minimap_system(
     
     let map_width = config.map_width;
     let map_height = config.map_height;
-    let minimap_w = minimap_node.width.resolve(200.0, 200.0, Vec2::ZERO).unwrap_or(200.0);
-    let minimap_h = minimap_node.height.resolve(200.0, 200.0, Vec2::ZERO).unwrap_or(200.0);
+    let minimap_w = minimap_node.size().x;
+    let minimap_h = minimap_node.size().y;
 
     // Spawn new dots
     for (unit_entity, pos, selected) in q_units.iter() {
@@ -226,13 +231,13 @@ fn minimap_system(
         let y_pct = (pos.0.y.to_num::<f32>() + map_height / 2.0) / map_height;
 
         let x = (x_pct * minimap_w).clamp(0.0, minimap_w);
-        let y = ((1.0 - y_pct) * minimap_h).clamp(0.0, minimap_h);
+        let y = (y_pct * minimap_h).clamp(0.0, minimap_h);
 
         let dot = commands.spawn((
             Node {
                 position_type: PositionType::Absolute,
-                left: Val::Px(x),
-                top: Val::Px(y),
+                left: Val::Px(x - 2.0),
+                top: Val::Px(y - 2.0),
                 width: Val::Px(4.0),
                 height: Val::Px(4.0),
                 ..default()
@@ -252,20 +257,34 @@ fn minimap_system(
              let y_pct = (pos.0.y.to_num::<f32>() + map_height / 2.0) / map_height;
              
              let x = (x_pct * minimap_w).clamp(0.0, minimap_w);
-             let y = ((1.0 - y_pct) * minimap_h).clamp(0.0, minimap_h);
+             let y = (y_pct * minimap_h).clamp(0.0, minimap_h);
 
-             node.left = Val::Px(x);
-             node.top = Val::Px(y);
+             node.left = Val::Px(x - 2.0);
+             node.top = Val::Px(y - 2.0);
              *bg_color = BackgroundColor(if selected.is_some() { Color::srgb(0.0, 1.0, 0.0) } else { Color::srgb(1.0, 0.0, 0.0) });
         } else {
             // Unit dead
             commands.entity(dot_entity).despawn();
         }
     }
+
+    // Update Camera Frame
+    if let Ok(camera_transform) = q_camera.single() {
+        if let Ok(mut frame_node) = q_camera_frame.single_mut() {
+            let x_pct = (camera_transform.translation.x + map_width / 2.0) / map_width;
+            let y_pct = (camera_transform.translation.z + map_height / 2.0) / map_height;
+
+            let x = (x_pct * minimap_w).clamp(0.0, minimap_w);
+            let y = (y_pct * minimap_h).clamp(0.0, minimap_h);
+
+            // Assuming frame size 40x30
+            frame_node.left = Val::Px(x - 20.0);
+            frame_node.top = Val::Px(y - 15.0);
+        }
+    }
 }
 
 use bevy::window::PrimaryWindow;
-use crate::game::camera::RtsCamera;
 
 fn minimap_input_system(
     mouse_button: Res<ButtonInput<MouseButton>>,
@@ -296,7 +315,7 @@ fn minimap_input_system(
         let pct_y = relative_y / rect.height();
         
         let map_x = pct_x * config.map_width - config.map_width / 2.0;
-        let map_z = (1.0 - pct_y) * config.map_height - config.map_height / 2.0;
+        let map_z = pct_y * config.map_height - config.map_height / 2.0;
         
         for mut cam_transform in q_camera.iter_mut() {
             // Simple move. Ideally we'd account for camera angle offset.
