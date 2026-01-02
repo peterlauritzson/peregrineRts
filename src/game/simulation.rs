@@ -137,8 +137,8 @@ impl Default for SimConfig {
         Self {
             tick_rate: 30.0,
             unit_speed: FixedNum::from_num(5.0),
-            map_width: FixedNum::from_num(50.0),
-            map_height: FixedNum::from_num(50.0),
+            map_width: FixedNum::from_num(2048.0),
+            map_height: FixedNum::from_num(2048.0),
             unit_radius: FixedNum::from_num(0.5),
             collision_push_strength: FixedNum::from_num(1.0),
             collision_restitution: FixedNum::from_num(0.5),
@@ -773,13 +773,14 @@ fn resolve_obstacle_collisions(
 
 fn init_flow_field(
     mut map_flow_field: ResMut<MapFlowField>,
+    sim_config: Res<SimConfig>,
 ) {
-    let width = 50;
-    let height = 50;
+    let width = (sim_config.map_width / FixedNum::from_num(CELL_SIZE)).ceil().to_num::<usize>();
+    let height = (sim_config.map_height / FixedNum::from_num(CELL_SIZE)).ceil().to_num::<usize>();
     let cell_size = FixedNum::from_num(CELL_SIZE);
     let origin = FixedVec2::new(
-        FixedNum::from_num(-(width as f32) * CELL_SIZE / 2.0),
-        FixedNum::from_num(-(height as f32) * CELL_SIZE / 2.0),
+        -sim_config.map_width / FixedNum::from_num(2.0),
+        -sim_config.map_height / FixedNum::from_num(2.0),
     );
 
     map_flow_field.0 = FlowField::new(width, height, cell_size, origin);
@@ -908,8 +909,8 @@ fn draw_flow_field_gizmos(
         let min_x = cx * CLUSTER_SIZE;
         let min_y = cy * CLUSTER_SIZE;
         
-        let center_x = (min_x as f32 + CLUSTER_SIZE as f32 / 2.0) * CELL_SIZE;
-        let center_y = (min_y as f32 + CLUSTER_SIZE as f32 / 2.0) * CELL_SIZE;
+        let center_x = flow_field.origin.x.to_num::<f32>() + (min_x as f32 + CLUSTER_SIZE as f32 / 2.0) * CELL_SIZE;
+        let center_y = flow_field.origin.y.to_num::<f32>() + (min_y as f32 + CLUSTER_SIZE as f32 / 2.0) * CELL_SIZE;
         
         // Check if cluster is roughly in view
         let dist_sq = (center_x - center_pos.x).powi(2) + (center_y - center_pos.z).powi(2);

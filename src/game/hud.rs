@@ -190,10 +190,7 @@ fn setup_hud(mut commands: Commands) {
 
 fn cleanup_hud(mut commands: Commands, query: Query<Entity, With<HudRoot>>) {
     for entity in &query {
-        commands.entity(entity).despawn(); // Recursive despawn is default for despawn() on entity with children? No, despawn() is recursive in 0.17?
-        // Actually, despawn() is NOT recursive. despawn_recursive() is deprecated.
-        // Wait, in 0.15, despawn() became recursive.
-        // Let's verify.
+        commands.entity(entity).despawn();
     }
 }
 

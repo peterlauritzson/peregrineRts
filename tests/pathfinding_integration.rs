@@ -1,13 +1,16 @@
 use bevy::prelude::*;
+use bevy::state::app::StatesPlugin;
 use peregrine::game::math::{FixedVec2, FixedNum};
 use peregrine::game::simulation::{SimulationPlugin, MapFlowField, SimPosition, SimVelocity, SimAcceleration, Collider, StaticObstacle};
 use peregrine::game::config::GameConfigPlugin;
 use peregrine::game::pathfinding::{PathfindingPlugin, PathRequest, HierarchicalGraph, Path};
+use peregrine::game::GameState;
 
 #[test]
 fn test_pathfinding_around_wall() {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
+    app.add_plugins(StatesPlugin);
     app.add_plugins(bevy::log::LogPlugin::default());
     app.add_plugins(AssetPlugin::default()); 
     app.init_asset::<Mesh>();
@@ -17,6 +20,8 @@ fn test_pathfinding_around_wall() {
     app.add_plugins(GameConfigPlugin);
     app.add_plugins(SimulationPlugin);
     app.add_plugins(PathfindingPlugin);
+    app.init_state::<GameState>();
+    app.world_mut().resource_mut::<NextState<GameState>>().set(GameState::InGame);
 
     // Initialize (runs Startup systems)
     app.update();
@@ -24,6 +29,14 @@ fn test_pathfinding_around_wall() {
     // 1. Setup Map with Wall
     {
         let mut map = app.world_mut().resource_mut::<MapFlowField>();
+        
+        // Force resize to 50x50 for test
+        let width = 50;
+        let height = 50;
+        let cell_size = FixedNum::from_num(1.0);
+        let origin = FixedVec2::new(FixedNum::from_num(-25.0), FixedNum::from_num(-25.0));
+        map.0 = peregrine::game::flow_field::FlowField::new(width, height, cell_size, origin);
+
         // Clear
         map.0.cost_field.fill(1);
         
@@ -131,6 +144,7 @@ fn test_pathfinding_around_wall() {
 fn test_pathfinding_close_target_line_of_sight() {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
+    app.add_plugins(StatesPlugin);
     app.add_plugins(bevy::log::LogPlugin::default());
     app.add_plugins(AssetPlugin::default()); 
     app.init_asset::<Mesh>();
@@ -140,12 +154,22 @@ fn test_pathfinding_close_target_line_of_sight() {
     app.add_plugins(GameConfigPlugin);
     app.add_plugins(SimulationPlugin);
     app.add_plugins(PathfindingPlugin);
+    app.init_state::<GameState>();
+    app.world_mut().resource_mut::<NextState<GameState>>().set(GameState::InGame);
 
     app.update();
 
     // 1. Setup Map (Empty)
     {
         let mut map = app.world_mut().resource_mut::<MapFlowField>();
+        
+        // Force resize to 50x50 for test
+        let width = 50;
+        let height = 50;
+        let cell_size = FixedNum::from_num(1.0);
+        let origin = FixedVec2::new(FixedNum::from_num(-25.0), FixedNum::from_num(-25.0));
+        map.0 = peregrine::game::flow_field::FlowField::new(width, height, cell_size, origin);
+
         map.0.cost_field.fill(1);
     }
 
@@ -218,6 +242,7 @@ fn test_pathfinding_close_target_line_of_sight() {
 fn test_pathfinding_close_target_obstacle() {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
+    app.add_plugins(StatesPlugin);
     app.add_plugins(bevy::log::LogPlugin::default());
     app.add_plugins(AssetPlugin::default()); 
     app.init_asset::<Mesh>();
@@ -227,10 +252,24 @@ fn test_pathfinding_close_target_obstacle() {
     app.add_plugins(GameConfigPlugin);
     app.add_plugins(SimulationPlugin);
     app.add_plugins(PathfindingPlugin);
+    app.init_state::<GameState>();
+    app.world_mut().resource_mut::<NextState<GameState>>().set(GameState::InGame);
 
     app.update();
 
     // 1. Setup Map with Obstacle
+    {
+        let mut map = app.world_mut().resource_mut::<MapFlowField>();
+        
+        // Force resize to 50x50 for test
+        let width = 50;
+        let height = 50;
+        let cell_size = FixedNum::from_num(1.0);
+        let origin = FixedVec2::new(FixedNum::from_num(-25.0), FixedNum::from_num(-25.0));
+        map.0 = peregrine::game::flow_field::FlowField::new(width, height, cell_size, origin);
+        map.0.cost_field.fill(1);
+    }
+
     // Block x=30, y=24..27 (3 cells high)
     // This blocks the direct path and the center of the cluster boundary.
     // Map origin (-25, -25).
