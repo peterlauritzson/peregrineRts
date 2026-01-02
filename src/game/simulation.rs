@@ -53,6 +53,12 @@ pub struct UnitMoveCommand {
 }
 
 #[derive(Event, Message, Debug, Clone)]
+pub struct UnitStopCommand {
+    pub player_id: u8,
+    pub entity: Entity,
+}
+
+#[derive(Event, Message, Debug, Clone)]
 pub struct SpawnUnitCommand {
     pub player_id: u8,
     pub position: FixedVec2,
@@ -196,6 +202,7 @@ impl Plugin for SimulationPlugin {
         app.init_resource::<DebugConfig>();
         // app.register_type::<GlobalFlow>(); // Removed Reflect
         app.add_message::<UnitMoveCommand>();
+        app.add_message::<UnitStopCommand>();
         app.add_message::<SpawnUnitCommand>();
         app.add_message::<CollisionEvent>();
 
@@ -408,6 +415,7 @@ use crate::game::pathfinding::PathRequest;
 fn process_input(
     mut commands: Commands,
     mut move_events: MessageReader<UnitMoveCommand>,
+    mut stop_events: MessageReader<UnitStopCommand>,
     mut spawn_events: MessageReader<SpawnUnitCommand>,
     mut path_requests: MessageWriter<PathRequest>,
     query: Query<&SimPosition>,
@@ -417,6 +425,17 @@ fn process_input(
     // 2. Sort by Player ID (and potentially sequence number if we had one)
     // 3. Execute in order
     
+    // Handle Stop Commands
+    let mut stops: Vec<&UnitStopCommand> = stop_events.read().collect();
+    stops.sort_by_key(|e| e.player_id);
+
+    for event in stops {
+        commands.entity(event.entity).remove::<SimTarget>();
+        commands.entity(event.entity).remove::<Path>();
+        // Also reset velocity?
+        commands.entity(event.entity).insert(SimVelocity(FixedVec2::ZERO));
+    }
+
     // Handle Move Commands
     let mut moves: Vec<&UnitMoveCommand> = move_events.read().collect();
     moves.sort_by_key(|e| e.player_id);

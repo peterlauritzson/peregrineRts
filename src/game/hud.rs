@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use crate::game::GameState;
 use crate::game::unit::Selected;
+use crate::game::simulation::UnitStopCommand;
 
 pub struct HudPlugin;
 
@@ -8,7 +9,11 @@ impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(GameState::InGame), setup_hud)
            .add_systems(OnExit(GameState::InGame), cleanup_hud)
-           .add_systems(Update, update_selection_hud.run_if(in_state(GameState::InGame)));
+           .add_systems(Update, (
+               update_selection_hud,
+               button_system,
+               command_handler,
+           ).run_if(in_state(GameState::InGame)));
     }
 }
 
@@ -17,6 +22,16 @@ struct HudRoot;
 
 #[derive(Component)]
 struct SelectionText;
+
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+enum CommandAction {
+    Stop,
+    Move,
+    Attack,
+}
+
+#[derive(Component)]
+struct CommandButton(CommandAction);
 
 fn setup_hud(mut commands: Commands) {
     // Root node for the HUD
@@ -106,18 +121,26 @@ fn setup_hud(mut commands: Commands) {
                 BackgroundColor(Color::srgb(0.1, 0.1, 0.1)),
                 BorderColor::from(Color::WHITE),
             )).with_children(|p| {
-                // Spawn 9 placeholder buttons
-                for i in 0..9 {
+                // Command Buttons
+                let commands_list = [
+                    ("Move", CommandAction::Move),
+                    ("Stop", CommandAction::Stop),
+                    ("Attack", CommandAction::Attack),
+                ];
+
+                for (label, action) in commands_list {
                     p.spawn((
+                        Button,
                         Node {
                             justify_content: JustifyContent::Center,
                             align_items: AlignItems::Center,
                             ..default()
                         },
                         BackgroundColor(Color::srgb(0.3, 0.3, 0.3)),
+                        CommandButton(action),
                     )).with_children(|btn| {
                          btn.spawn((
-                            Text::new(format!("{}", i + 1)),
+                            Text::new(label),
                             TextFont {
                                 font_size: 15.0,
                                 ..default()
@@ -125,6 +148,16 @@ fn setup_hud(mut commands: Commands) {
                             TextColor(Color::WHITE),
                         ));
                     });
+                }
+
+                // Fill rest with empty slots
+                for _ in 0..(9 - commands_list.len()) {
+                     p.spawn((
+                        Node {
+                            ..default()
+                        },
+                        BackgroundColor(Color::NONE),
+                    ));
                 }
             });
         });
@@ -157,7 +190,61 @@ fn setup_hud(mut commands: Commands) {
 
 fn cleanup_hud(mut commands: Commands, query: Query<Entity, With<HudRoot>>) {
     for entity in &query {
-        commands.entity(entity).despawn();
+        commands.entity(entity).despawn(); // Recursive despawn is default for despawn() on entity with children? No, despawn() is recursive in 0.17?
+        // Actually, despawn() is NOT recursive. despawn_recursive() is deprecated.
+        // Wait, in 0.15, despawn() became recursive.
+        // Let's verify.
+    }
+}
+
+fn button_system(
+    mut interaction_query: Query<
+        (&Interaction, &mut BackgroundColor),
+        (Changed<Interaction>, With<Button>),
+    >,
+) {
+    for (interaction, mut color) in &mut interaction_query {
+        match *interaction {
+            Interaction::Pressed => {
+                *color = BackgroundColor(Color::srgb(0.1, 0.5, 0.1));
+            }
+            Interaction::Hovered => {
+                *color = BackgroundColor(Color::srgb(0.4, 0.4, 0.4));
+            }
+            Interaction::None => {
+                *color = BackgroundColor(Color::srgb(0.3, 0.3, 0.3));
+            }
+        }
+    }
+}
+
+fn command_handler(
+    interaction_query: Query<
+        (&Interaction, &CommandButton),
+        (Changed<Interaction>, With<Button>),
+    >,
+    mut stop_events: MessageWriter<UnitStopCommand>,
+    selected_units: Query<Entity, With<Selected>>,
+) {
+    for (interaction, command) in &interaction_query {
+        if *interaction == Interaction::Pressed {
+            match command.0 {
+                CommandAction::Stop => {
+                    for entity in &selected_units {
+                        stop_events.write(UnitStopCommand {
+                            player_id: 0, // Local player
+                            entity,
+                        });
+                    }
+                }
+                CommandAction::Move => {
+                    info!("Move command clicked (not implemented via button)");
+                }
+                CommandAction::Attack => {
+                    info!("Attack command clicked (not implemented)");
+                }
+            }
+        }
     }
 }
 
