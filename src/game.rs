@@ -12,6 +12,7 @@ pub mod pathfinding;
 pub mod stress_test;
 pub mod map;
 mod menu;
+mod hud;
 
 use camera::RtsCameraPlugin;
 use unit::UnitPlugin;
@@ -21,6 +22,7 @@ use config::GameConfigPlugin;
 use pathfinding::PathfindingPlugin;
 use stress_test::StressTestPlugin;
 use menu::MenuPlugin;
+use hud::HudPlugin;
 
 #[derive(States, Debug, Clone, Copy, Eq, PartialEq, Hash, Default)]
 pub enum GameState {
@@ -48,6 +50,7 @@ impl Plugin for GamePlugin {
             ControlPlugin,
             SimulationPlugin,
             PathfindingPlugin,
+            HudPlugin,
         ));
 
         if self.stress_test {
