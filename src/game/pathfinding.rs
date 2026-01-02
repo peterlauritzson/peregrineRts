@@ -3,8 +3,9 @@ use crate::game::math::{FixedVec2, FixedNum};
 use crate::game::simulation::{MapFlowField, DebugConfig};
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::cmp::Ordering;
+use serde::{Serialize, Deserialize};
 
-pub const CLUSTER_SIZE: usize = 10;
+pub const CLUSTER_SIZE: usize = 25;
 
 #[derive(Event, Message, Debug, Clone)]
 pub struct PathRequest {
@@ -31,7 +32,7 @@ impl Default for Path {
     }
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Serialize, Deserialize)]
 pub struct HierarchicalGraph {
     pub nodes: Vec<Portal>,
     pub edges: HashMap<usize, Vec<(usize, FixedNum)>>, // PortalId -> [(TargetPortalId, Cost)]
@@ -54,7 +55,7 @@ impl HierarchicalGraph {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Cluster {
     pub id: (usize, usize),
     pub portals: Vec<usize>,
@@ -67,14 +68,14 @@ impl Cluster {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LocalFlowField {
     pub width: usize,
     pub height: usize,
     pub vectors: Vec<FixedVec2>, // Row-major, size width * height
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Portal {
     pub id: usize,
     pub node: Node,
@@ -94,7 +95,7 @@ impl Plugin for PathfindingPlugin {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct Node {
     pub x: usize,
     pub y: usize,

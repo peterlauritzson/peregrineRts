@@ -1,11 +1,12 @@
 use crate::game::math::{FixedNum, FixedVec2};
 use bevy::prelude::*;
 use std::collections::VecDeque;
+use serde::{Serialize, Deserialize};
 
 // Use a fixed cell size for the grid
 pub const CELL_SIZE: f32 = 1.0;
 
-#[derive(Resource, Default, Clone)]
+#[derive(Resource, Default, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct FlowField {
     pub width: usize,

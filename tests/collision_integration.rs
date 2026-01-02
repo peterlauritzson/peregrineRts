@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use peregrine::game::math::{FixedVec2, FixedNum};
-use peregrine::game::simulation::{SimulationPlugin, MapFlowField, SimPosition, SimVelocity, Collider};
+use peregrine::game::simulation::{SimulationPlugin, MapFlowField, SimPosition, SimVelocity, SimAcceleration, Collider};
 use peregrine::game::config::GameConfigPlugin;
 use peregrine::game::pathfinding::PathfindingPlugin;
 
@@ -34,12 +34,14 @@ fn test_collision_unit_unit() {
     let u1 = app.world_mut().spawn((
         SimPosition(FixedVec2::new(FixedNum::from_num(-2.0), FixedNum::from_num(0.0))),
         SimVelocity(FixedVec2::new(FixedNum::from_num(1.0), FixedNum::from_num(0.0))),
+        SimAcceleration::default(),
         Collider::default(),
     )).id();
 
     let u2 = app.world_mut().spawn((
         SimPosition(FixedVec2::new(FixedNum::from_num(2.0), FixedNum::from_num(0.0))),
         SimVelocity(FixedVec2::new(FixedNum::from_num(-1.0), FixedNum::from_num(0.0))),
+        SimAcceleration::default(),
         Collider::default(),
     )).id();
 
@@ -108,6 +110,7 @@ fn test_collision_unit_wall() {
     let u1 = app.world_mut().spawn((
         SimPosition(FixedVec2::new(FixedNum::from_num(4.0), FixedNum::from_num(0.0))),
         SimVelocity(FixedVec2::new(FixedNum::from_num(1.0), FixedNum::from_num(0.0))),
+        SimAcceleration::default(),
         Collider::default(),
     )).id();
 
@@ -148,6 +151,7 @@ fn test_collision_crowding() {
         let id = app.world_mut().spawn((
             SimPosition(FixedVec2::new(FixedNum::from_num(0.0), FixedNum::from_num(0.0))),
             SimVelocity(FixedVec2::ZERO),
+            SimAcceleration::default(),
             Collider::default(),
         )).id();
         units.push(id);

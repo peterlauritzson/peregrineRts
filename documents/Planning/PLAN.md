@@ -114,10 +114,15 @@ Once the RTS Foundation (Milestone 0) is complete, we will iterate on the simula
    > **Note:** HPA* implementation is complete (Level 0, 1, 2). Units now use the hierarchical graph for long-distance planning.
 
 10. **The "Million" Unit Stress Test**
-    - Massive unit count.
-    - Full simulation: Borders, Unit Collisions, External Forces, Complex Pathfinding.
-    - Optimization pass (Spatial Partitioning, Multithreading, GPU Compute if needed).
-    - **Goal**: 10M units, 1000 FPS (GPU compute likely required), 100 ticks / second.
+    - [ ] **A. Baseline CPU Stress Test**:
+        - Configure environment: Set logging to `WARN`+ and ensure FPS/TPS counters are active.
+        - Spawn 10k-100k units with current CPU implementation.
+        - Gradually increase map size along with unit count to maintain reasonable density.
+        - Profile performance bottlenecks (collision, pathfinding, rendering).
+    - [ ] **B. Spatial Partitioning Optimization**: Ensure Spatial Hash Grid is fully optimized and cache-friendly. Implement multithreading for simulation steps if not already present.
+    - [ ] **C. GPU Compute Foundation**: Move core simulation logic (movement, collision) to Compute Shaders (WGPU). Verify data roundtrip between CPU and GPU.
+    - [ ] **D. GPU-Based Rendering**: Implement instanced rendering directly from GPU simulation buffers (avoiding CPU readback).
+    - [ ] **E. The 10M Goal**: Scale to 10M units. Tune simulation parameters and grid sizes for maximum throughput. Achieve 1000 FPS / 100 TPS target.
 
 ---
 

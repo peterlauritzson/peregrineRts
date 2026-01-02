@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use crate::game::simulation::{SimPosition, SimPositionPrev, SimVelocity, SimSet, Colliding, SimConfig, SpawnUnitCommand, follow_path};
+use crate::game::simulation::{SimPosition, SimPositionPrev, SimVelocity, SimSet, Colliding, SimConfig, follow_path};
 use crate::game::math::{FixedVec2, FixedNum};
 
 #[derive(Component)]
@@ -18,14 +18,49 @@ pub struct UnitMaterials {
     pub colliding: Handle<StandardMaterial>,
 }
 
+use crate::game::camera::RtsCamera;
+
 pub struct UnitPlugin;
 
 impl Plugin for UnitPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (setup_unit_resources, spawn_test_unit).chain())
+        app.add_systems(Startup, (setup_unit_resources).chain())
            // unit_movement_logic is replaced by follow_flow_field in simulation.rs
            .add_systems(FixedUpdate, (apply_boids_steering).chain().in_set(SimSet::Steering).after(follow_path))
-           .add_systems(Update, (spawn_unit_visuals, update_selection_visuals, sync_visuals));
+           .add_systems(Update, (spawn_unit_visuals, update_selection_visuals, sync_visuals, update_unit_lod));
+    }
+}
+
+fn update_unit_lod(
+    mut query: Query<(&mut Visibility, &Transform), With<Unit>>,
+    q_camera: Query<(&GlobalTransform, &Camera), With<RtsCamera>>,
+    mut gizmos: Gizmos,
+) {
+    let Ok((camera_transform, _camera)) = q_camera.single() else { return };
+    let camera_pos = camera_transform.translation();
+    
+    // Simple LOD: If camera is high up, hide mesh and draw simple gizmo
+    let lod_height_threshold = 50.0;
+    let use_lod = camera_pos.y > lod_height_threshold;
+
+    // Also cull if far away from center of view?
+    // Bevy does frustum culling for meshes, but we can help by disabling visibility if we want to draw icons instead.
+
+    for (mut visibility, transform) in query.iter_mut() {
+        if use_lod {
+            *visibility = Visibility::Hidden;
+            // Draw simple icon (circle)
+            gizmos.circle(
+                Isometry3d::new(
+                    transform.translation,
+                    Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+                ),
+                0.5,
+                Color::srgb(0.8, 0.7, 0.6),
+            );
+        } else {
+            *visibility = Visibility::Visible;
+        }
     }
 }
 
@@ -79,22 +114,6 @@ fn setup_unit_resources(
         selected: selected_mat,
         colliding: colliding_mat,
     });
-}
-
-fn spawn_test_unit(
-    mut spawn_events: MessageWriter<SpawnUnitCommand>,
-) {
-    for x in -2..3 {
-        for z in -2..3 {
-            let pos_x = FixedNum::from_num(x) * FixedNum::from_num(2.0);
-            let pos_z = FixedNum::from_num(z) * FixedNum::from_num(2.0);
-            
-            spawn_events.write(SpawnUnitCommand {
-                player_id: 0,
-                position: FixedVec2::new(pos_x, pos_z),
-            });
-        }
-    }
 }
 
 fn spawn_unit_visuals(

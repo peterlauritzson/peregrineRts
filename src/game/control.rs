@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use crate::game::unit::{Unit, Selected};
-use crate::game::simulation::{UnitMoveCommand, SimPosition, ForceSource, ForceType};
+use crate::game::simulation::{UnitMoveCommand, SimPosition, ForceSource, ForceType, SpawnUnitCommand};
 use crate::game::math::{FixedVec2, FixedNum};
 use crate::game::camera::RtsCamera;
 use crate::game::config::{GameConfig, GameConfigHandle};
@@ -182,13 +182,16 @@ fn handle_debug_spawning(
     q_camera: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     config_handle: Res<GameConfigHandle>,
     game_configs: Res<Assets<GameConfig>>,
+    mut spawn_events: MessageWriter<SpawnUnitCommand>,
 ) {
     let Some((camera, camera_transform)) = q_camera.iter().next() else { return };
     let Some(window) = q_window.iter().next() else { return };
     let Some(cursor_position) = window.cursor_position() else { return };
     let Some(config) = game_configs.get(&config_handle.0) else { return };
 
-    if keys.just_pressed(config.key_spawn_black_hole) || keys.just_pressed(config.key_spawn_wind_spot) {
+    if keys.just_pressed(config.key_spawn_black_hole) || 
+       keys.just_pressed(config.key_spawn_wind_spot) ||
+       keys.just_pressed(config.key_spawn_unit) {
          let Ok(ray) = camera.viewport_to_world(camera_transform, cursor_position) else { return };
         
         // Intersect with ground plane (y=0)
@@ -225,6 +228,12 @@ fn handle_debug_spawning(
                             radius: FixedNum::from_num(config.force_source_radius),
                         }
                     ));
+                } else if keys.just_pressed(config.key_spawn_unit) {
+                    info!("Spawning Unit at {:?}", pos_fixed);
+                    spawn_events.write(SpawnUnitCommand {
+                        player_id: 0,
+                        position: pos_fixed,
+                    });
                 }
             }
         }

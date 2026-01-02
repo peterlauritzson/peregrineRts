@@ -4,9 +4,22 @@ use crate::game::math::{FixedVec2, FixedNum};
 use crate::game::flow_field::{FlowField, CELL_SIZE};
 use crate::game::spatial_hash::SpatialHash;
 use crate::game::pathfinding::{Path, HierarchicalGraph, CLUSTER_SIZE};
+use crate::game::map::{self, MAP_VERSION};
+use std::time::{Instant, Duration};
 // use std::collections::HashMap;
 
 pub struct SimulationPlugin;
+
+#[derive(Resource, Default)]
+pub struct MapStatus {
+    pub loaded: bool,
+}
+
+#[derive(Resource, Default)]
+pub struct SimPerformance {
+    pub start_time: Option<Instant>,
+    pub last_duration: Duration,
+}
 
 #[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone)]
 pub enum SimSet {
@@ -174,9 +187,11 @@ impl Plugin for SimulationPlugin {
         // Using from_seconds(1.0 / 20.0)
         app.insert_resource(Time::<Fixed>::from_seconds(1.0 / 20.0)); 
         app.init_resource::<SimConfig>();
+        app.init_resource::<SimPerformance>();
         app.insert_resource(SpatialHash::new(FixedNum::from_num(100), FixedNum::from_num(100), FixedNum::from_num(2)));
         // app.init_resource::<FlowFieldCache>();
         app.insert_resource(MapFlowField(FlowField::default()));
+        app.init_resource::<MapStatus>();
         app.init_resource::<DebugConfig>();
         // app.register_type::<GlobalFlow>(); // Removed Reflect
         app.add_message::<UnitMoveCommand>();
@@ -193,8 +208,9 @@ impl Plugin for SimulationPlugin {
 
         // Register Systems
         app.add_systems(Startup, init_flow_field);
-        app.add_systems(Update, (update_sim_from_config, toggle_debug, draw_flow_field_gizmos, draw_force_sources, draw_unit_paths));
+        app.add_systems(Update, (update_sim_from_config, apply_new_obstacles, toggle_debug, draw_flow_field_gizmos, draw_force_sources, draw_unit_paths));
         app.add_systems(FixedUpdate, (
+            sim_start.before(SimSet::Input),
             cache_previous_state.in_set(SimSet::Input),
             process_input.in_set(SimSet::Input),
             check_arrival_crowding.in_set(SimSet::Steering).before(follow_path),
@@ -207,6 +223,7 @@ impl Plugin for SimulationPlugin {
             detect_collisions.in_set(SimSet::Physics).before(resolve_collisions),
             resolve_collisions.in_set(SimSet::Physics),
             resolve_obstacle_collisions.in_set(SimSet::Physics),
+            sim_end.after(SimSet::Physics),
         ));
     }
 }
@@ -215,9 +232,16 @@ fn update_sim_from_config(
     mut fixed_time: ResMut<Time<Fixed>>,
     mut sim_config: ResMut<SimConfig>,
     mut spatial_hash: ResMut<SpatialHash>,
+    mut map_flow_field: ResMut<MapFlowField>,
+    mut graph: ResMut<HierarchicalGraph>,
+    mut map_status: ResMut<MapStatus>,
     config_handle: Res<GameConfigHandle>,
     game_configs: Res<Assets<GameConfig>>,
     mut events: MessageReader<AssetEvent<GameConfig>>,
+    obstacles: Query<(Entity, &SimPosition, &StaticObstacle)>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     for event in events.read() {
         info!("Config event: {:?}", event);
@@ -265,6 +289,110 @@ fn update_sim_from_config(
                  // For now, just 2*radius + margin.
                  let cell_size = sim_config.unit_radius * FixedNum::from_num(2.0) * FixedNum::from_num(1.5);
                  spatial_hash.resize(sim_config.map_width, sim_config.map_height, cell_size);
+
+                 let mut loaded_from_file = false;
+                 let map_path = "assets/maps/default.pmap";
+
+                 if !map_status.loaded {
+                     if let Ok(map_data) = map::load_map(map_path) {
+                         if map_data.version == MAP_VERSION && 
+                            map_data.cell_size == FixedNum::from_num(CELL_SIZE) &&
+                            map_data.cluster_size == CLUSTER_SIZE {
+                             
+                             info!("Loading map from {}", map_path);
+                             
+                             // Despawn existing obstacles
+                             for (e, _, _) in obstacles.iter() {
+                                 commands.entity(e).despawn();
+                             }
+
+                             // Spawn obstacles from map
+                             for obs in &map_data.obstacles {
+                                 commands.spawn((
+                                     Mesh3d(meshes.add(Cylinder::new(obs.radius.to_num(), 2.0))),
+                                     MeshMaterial3d(materials.add(Color::srgb(0.5, 0.5, 0.5))),
+                                     Transform::from_xyz(obs.position.x.to_num(), 1.0, obs.position.y.to_num()),
+                                     SimPosition(obs.position),
+                                     StaticObstacle { radius: obs.radius },
+                                     Collider {
+                                         radius: obs.radius,
+                                         layer: layers::OBSTACLE,
+                                         mask: layers::UNIT,
+                                     },
+                                 ));
+                             }
+
+                             // Set FlowField
+                             let width = (map_data.map_width / map_data.cell_size).ceil().to_num::<usize>();
+                             let height = (map_data.map_height / map_data.cell_size).ceil().to_num::<usize>();
+                             let origin = FixedVec2::new(
+                                 -map_data.map_width / FixedNum::from_num(2.0),
+                                 -map_data.map_height / FixedNum::from_num(2.0),
+                             );
+                             
+                             let mut flow_field = FlowField::new(width, height, map_data.cell_size, origin);
+                             flow_field.cost_field = map_data.cost_field;
+                             map_flow_field.0 = flow_field;
+
+                             // Set Graph
+                             *graph = map_data.graph;
+                             graph.initialized = true;
+
+                             loaded_from_file = true;
+                             map_status.loaded = true;
+                         }
+                     }
+                 }
+
+                 if !loaded_from_file {
+                     // Resize MapFlowField
+                     let width = (sim_config.map_width / FixedNum::from_num(CELL_SIZE)).ceil().to_num::<usize>();
+                     let height = (sim_config.map_height / FixedNum::from_num(CELL_SIZE)).ceil().to_num::<usize>();
+                     let origin = FixedVec2::new(
+                         -sim_config.map_width / FixedNum::from_num(2.0),
+                         -sim_config.map_height / FixedNum::from_num(2.0),
+                     );
+                     map_flow_field.0 = FlowField::new(width, height, FixedNum::from_num(CELL_SIZE), origin);
+                     
+                     if !map_status.loaded {
+                         // Despawn existing
+                         for (e, _, _) in obstacles.iter() {
+                             commands.entity(e).despawn();
+                         }
+                         
+                         // Default Obstacle
+                         let obstacle_pos = FixedVec2::from_f32(5.0, 5.0);
+                         let obstacle_radius = FixedNum::from_num(2.0);
+                         
+                         commands.spawn((
+                             Mesh3d(meshes.add(Cylinder::new(obstacle_radius.to_num(), 2.0))),
+                             MeshMaterial3d(materials.add(Color::srgb(0.5, 0.5, 0.5))),
+                             Transform::from_xyz(obstacle_pos.x.to_num(), 1.0, obstacle_pos.y.to_num()),
+                             SimPosition(obstacle_pos),
+                             StaticObstacle { radius: obstacle_radius },
+                             Collider {
+                                 radius: obstacle_radius,
+                                 layer: layers::OBSTACLE,
+                                 mask: layers::UNIT,
+                             },
+                         ));
+
+                         // Apply to flow field
+                         let flow_field = &mut map_flow_field.0;
+                         apply_obstacle_to_flow_field(flow_field, obstacle_pos, obstacle_radius);
+                         
+                         map_status.loaded = true;
+                     } else {
+                         // Re-apply obstacles
+                         let flow_field = &mut map_flow_field.0;
+                         for (_, pos, obs) in obstacles.iter() {
+                             apply_obstacle_to_flow_field(flow_field, pos.0, obs.radius);
+                         }
+                     }
+
+                     // Reset Graph
+                     graph.reset();
+                 }
 
                  info!("Updated tick rate to {}", config.tick_rate);
              }
@@ -621,10 +749,7 @@ fn resolve_obstacle_collisions(
 }
 
 fn init_flow_field(
-    mut commands: Commands, 
     mut map_flow_field: ResMut<MapFlowField>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let width = 50;
     let height = 50;
@@ -635,50 +760,65 @@ fn init_flow_field(
     );
 
     map_flow_field.0 = FlowField::new(width, height, cell_size, origin);
-    let flow_field = &mut map_flow_field.0;
+}
 
-    // Create a maze-like structure
-    // Simple walls
-    for x in 10..40 {
-        flow_field.set_obstacle(x, 25); // Horizontal wall
-    }
-    for y in 10..40 {
-        if y != 25 { // Leave a gap
-             flow_field.set_obstacle(25, y); // Vertical wall
-        }
-    }
+fn apply_obstacle_to_flow_field(flow_field: &mut FlowField, pos: FixedVec2, radius: FixedNum) {
+    // Rasterize circle
+    // Even if center is outside, part of it might be inside.
+    // But world_to_grid returns None if outside.
+    // We should compute bounding box in grid coords.
     
-    // Add some random blocks (deterministic)
-    flow_field.set_obstacle(15, 15);
-    flow_field.set_obstacle(35, 35);
-    flow_field.set_obstacle(15, 35);
-    flow_field.set_obstacle(35, 15);
-
-    let obstacle_radius = cell_size / FixedNum::from_num(2.0);
-    let obstacle_mesh = meshes.add(Cylinder::new(obstacle_radius.to_num::<f32>(), 2.0));
-    let obstacle_mat = materials.add(Color::srgb(0.5, 0.5, 0.5));
+    let min_world = pos - FixedVec2::new(radius, radius);
+    let max_world = pos + FixedVec2::new(radius, radius);
     
-    for y in 0..height {
-        for x in 0..width {
-            if flow_field.cost_field[flow_field.get_index(x, y)] == 255 {
-                let pos = flow_field.grid_to_world(x, y);
-                commands.spawn((
-                    StaticObstacle { radius: obstacle_radius },
-                    FlowFieldObstacle,
-                    SimPosition(pos),
-                    Mesh3d(obstacle_mesh.clone()),
-                    MeshMaterial3d(obstacle_mat.clone()),
-                    Transform::from_xyz(pos.x.to_num(), 1.0, pos.y.to_num()),
-                    Collider {
-                        radius: obstacle_radius,
-                        layer: layers::OBSTACLE,
-                        mask: layers::UNIT | layers::PROJECTILE,
-                    },
-                ));
+    // Convert to grid coords manually to handle out of bounds
+    let cell_size = flow_field.cell_size;
+    let origin = flow_field.origin;
+    
+    let min_local = min_world - origin;
+    let max_local = max_world - origin;
+    
+    let min_x = (min_local.x / cell_size).floor().to_num::<i32>();
+    let min_y = (min_local.y / cell_size).floor().to_num::<i32>();
+    let max_x = (max_local.x / cell_size).ceil().to_num::<i32>();
+    let max_y = (max_local.y / cell_size).ceil().to_num::<i32>();
+    
+    for y in min_y..max_y {
+        for x in min_x..max_x {
+            if x >= 0 && x < flow_field.width as i32 && y >= 0 && y < flow_field.height as i32 {
+                let cell_center = flow_field.grid_to_world(x as usize, y as usize);
+                // Check if cell overlaps with circle.
+                // Simple check: distance from circle center to cell center < radius + cell_radius
+                // Or check if cell center is inside circle?
+                // Or check if circle intersects AABB of cell?
+                
+                // Let's use a conservative check: if cell center is within radius + cell_radius/2
+                // Actually, we want to block cells that are mostly covered?
+                // Or block any cell that touches?
+                // For pathfinding, blocking any touching cell is safer.
+                
+                let cell_radius = cell_size / FixedNum::from_num(2.0);
+                let dist_sq = (cell_center - pos).length_squared();
+                let threshold = radius + cell_radius;
+                
+                if dist_sq < threshold * threshold {
+                    flow_field.set_obstacle(x as usize, y as usize);
+                }
             }
         }
     }
 }
+
+fn apply_new_obstacles(
+    mut map_flow_field: ResMut<MapFlowField>,
+    obstacles: Query<(&SimPosition, &StaticObstacle), Added<StaticObstacle>>,
+) {
+    let flow_field = &mut map_flow_field.0;
+    for (pos, obs) in obstacles.iter() {
+        apply_obstacle_to_flow_field(flow_field, pos.0, obs.radius);
+    }
+}
+
 
 fn toggle_debug(
     keyboard: Res<ButtonInput<KeyCode>>,
@@ -707,21 +847,55 @@ fn draw_flow_field_gizmos(
     map_flow_field: Res<MapFlowField>,
     debug_config: Res<DebugConfig>,
     mut gizmos: Gizmos,
+    q_camera: Query<(&Camera, &GlobalTransform), With<crate::game::camera::RtsCamera>>,
 ) {
     if !debug_config.show_flow_field {
         return;
     }
 
+    let Ok((camera, camera_transform)) = q_camera.single() else { return };
     let flow_field = &map_flow_field.0;
+
+    // Get camera view bounds roughly
+    let camera_pos = camera_transform.translation();
+    // Simple distance check for now. 
+    // A better way would be to project the frustum to the ground plane.
+    // But for debug gizmos, a radius around the camera look-at point is fine.
+    
+    // Raycast to ground to find center of view
+    let center_pos = if let Ok(ray) = camera.viewport_to_world(camera_transform, Vec2::new(640.0, 360.0)) { // Center of screen approx
+         if ray.direction.y.abs() > 0.001 {
+             let t = -ray.origin.y / ray.direction.y;
+             if t >= 0.0 {
+                 ray.origin + ray.direction * t
+             } else {
+                 camera_pos
+             }
+         } else {
+             camera_pos
+         }
+    } else {
+        camera_pos
+    };
+
+    let view_radius = 50.0; // Only draw within 50 units
+    let _view_radius_sq = view_radius * view_radius;
 
     for ((cx, cy), cluster) in &graph.clusters {
         let min_x = cx * CLUSTER_SIZE;
         let min_y = cy * CLUSTER_SIZE;
+        
+        let center_x = (min_x as f32 + CLUSTER_SIZE as f32 / 2.0) * CELL_SIZE;
+        let center_y = (min_y as f32 + CLUSTER_SIZE as f32 / 2.0) * CELL_SIZE;
+        
+        // Check if cluster is roughly in view
+        let dist_sq = (center_x - center_pos.x).powi(2) + (center_y - center_pos.z).powi(2);
+        if dist_sq > (view_radius + CLUSTER_SIZE as f32 * CELL_SIZE).powi(2) {
+            continue;
+        }
 
         // Debug: Draw a box around active clusters with cached fields
         if !cluster.flow_field_cache.is_empty() {
-             let center_x = (min_x as f32 + CLUSTER_SIZE as f32 / 2.0) * CELL_SIZE;
-             let center_y = (min_y as f32 + CLUSTER_SIZE as f32 / 2.0) * CELL_SIZE;
              gizmos.rect(
                  Isometry3d::new(
                      Vec3::new(center_x, 0.6, center_y),
@@ -743,6 +917,9 @@ fn draw_flow_field_gizmos(
                             let gy = min_y + ly;
                             
                             let start = flow_field.grid_to_world(gx, gy).to_vec2();
+                            
+                            // Check individual arrow distance if needed, but cluster check is usually enough
+                            
                             let end = start + vec.to_vec2() * 0.4; // Scale for visibility
 
                             gizmos.arrow(
@@ -807,7 +984,7 @@ pub fn follow_path(
     mut commands: Commands,
     mut query: Query<(Entity, &SimPosition, &SimVelocity, &mut SimAcceleration, &mut Path)>,
     sim_config: Res<SimConfig>,
-    mut graph: ResMut<HierarchicalGraph>,
+    graph: Res<HierarchicalGraph>,
     map_flow_field: Res<MapFlowField>,
 ) {
     let speed = sim_config.unit_speed;
@@ -1101,6 +1278,21 @@ fn draw_unit_paths(
                 );
                 gizmos.sphere(final_pos_vec, 0.2, Color::srgb(0.0, 1.0, 0.0));
             }
+        }
+    }
+}
+
+fn sim_start(mut stats: ResMut<SimPerformance>) {
+    stats.start_time = Some(Instant::now());
+}
+
+fn sim_end(mut stats: ResMut<SimPerformance>) {
+    if let Some(start) = stats.start_time {
+        stats.last_duration = start.elapsed();
+        // Log occasionally? Or just store it.
+        // Let's log if it exceeds a threshold, e.g., 16ms (60fps)
+        if stats.last_duration.as_millis() > 16 {
+            warn!("Sim tick took too long: {:?}", stats.last_duration);
         }
     }
 }

@@ -1,8 +1,8 @@
 (
     tick_rate: 30.0,
     unit_speed: 10.0,
-    map_width: 50.0,
-    map_height: 50.0,
+    map_width: 2048.0,
+    map_height: 2048.0,
     unit_radius: 0.5,
     collision_push_strength: 1.0,
     collision_restitution: 0.5,
@@ -24,6 +24,7 @@
     key_debug_path: KeyH,
     key_spawn_black_hole: KeyB,
     key_spawn_wind_spot: KeyV,
+    key_spawn_unit: Space,
 
     // Camera
     camera_speed: 20.0,
