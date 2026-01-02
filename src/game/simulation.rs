@@ -216,7 +216,7 @@ impl Plugin for SimulationPlugin {
 
         // Register Systems
         app.add_systems(Startup, init_flow_field);
-        app.add_systems(Update, (update_sim_from_config, apply_new_obstacles, toggle_debug, draw_flow_field_gizmos, draw_force_sources, draw_unit_paths).run_if(in_state(GameState::InGame).or(in_state(GameState::Editor))));
+        app.add_systems(Update, (update_sim_from_config, apply_new_obstacles, toggle_debug, draw_flow_field_gizmos, draw_force_sources, draw_unit_paths).run_if(in_state(GameState::InGame).or(in_state(GameState::Editor)).or(in_state(GameState::Loading))));
         app.add_systems(FixedUpdate, (
             sim_start.before(SimSet::Input),
             cache_previous_state.in_set(SimSet::Input),

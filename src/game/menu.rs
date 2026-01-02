@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 use crate::game::GameState;
+use crate::game::loading::TargetGameState;
 
 pub struct MenuPlugin;
 
@@ -133,15 +134,18 @@ fn menu_action(
     >,
     mut next_state: ResMut<NextState<GameState>>,
     mut exit: MessageWriter<AppExit>,
+    mut commands: Commands,
 ) {
     for (interaction, action) in interaction_query.iter() {
         if *interaction == Interaction::Pressed {
             match action {
                 MenuButtonAction::Play => {
-                    next_state.set(GameState::InGame);
+                    commands.insert_resource(TargetGameState(GameState::InGame));
+                    next_state.set(GameState::Loading);
                 }
                 MenuButtonAction::Editor => {
-                    next_state.set(GameState::Editor);
+                    commands.insert_resource(TargetGameState(GameState::Editor));
+                    next_state.set(GameState::Loading);
                 }
                 MenuButtonAction::Settings => {
                     next_state.set(GameState::Settings);

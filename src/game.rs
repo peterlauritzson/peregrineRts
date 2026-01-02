@@ -13,6 +13,7 @@ pub mod stress_test;
 pub mod map;
 mod menu;
 mod hud;
+mod loading;
 
 use camera::RtsCameraPlugin;
 use unit::UnitPlugin;
@@ -23,12 +24,14 @@ use pathfinding::PathfindingPlugin;
 use stress_test::StressTestPlugin;
 use menu::MenuPlugin;
 use hud::HudPlugin;
+use loading::LoadingPlugin;
 
 #[derive(States, Debug, Clone, Copy, Eq, PartialEq, Hash, Default)]
 pub enum GameState {
     #[default]
     MainMenu,
     Settings,
+    Loading,
     InGame,
     Editor,
     Paused,
@@ -51,6 +54,7 @@ impl Plugin for GamePlugin {
             SimulationPlugin,
             PathfindingPlugin,
             HudPlugin,
+            LoadingPlugin,
         ));
 
         if self.stress_test {

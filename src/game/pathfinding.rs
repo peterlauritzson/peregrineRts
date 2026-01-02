@@ -2,11 +2,33 @@ use bevy::prelude::*;
 use crate::game::math::{FixedVec2, FixedNum};
 use crate::game::simulation::{MapFlowField, DebugConfig};
 use crate::game::GameState;
+use crate::game::loading::LoadingProgress;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::cmp::Ordering;
 use serde::{Serialize, Deserialize};
 
 pub const CLUSTER_SIZE: usize = 25;
+
+#[derive(Resource, Default)]
+pub struct GraphBuildState {
+    pub step: GraphBuildStep,
+    pub cx: usize,
+    pub cy: usize,
+    pub cluster_keys: Vec<(usize, usize)>,
+    pub current_cluster_idx: usize,
+}
+
+#[derive(Default, PartialEq, Eq, Debug, Clone, Copy)]
+pub enum GraphBuildStep {
+    #[default]
+    NotStarted,
+    InitializingClusters,
+    FindingVerticalPortals,
+    FindingHorizontalPortals,
+    ConnectingIntraCluster,
+    PrecomputingFlowFields,
+    Done,
+}
 
 #[derive(Event, Message, Debug, Clone)]
 pub struct PathRequest {
@@ -91,8 +113,10 @@ impl Plugin for PathfindingPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<PathRequest>();
         app.init_resource::<HierarchicalGraph>();
+        app.init_resource::<GraphBuildState>();
         app.add_systems(Update, (build_graph, draw_graph_gizmos).run_if(in_state(GameState::InGame).or(in_state(GameState::Editor))));
         app.add_systems(FixedUpdate, process_path_requests.run_if(in_state(GameState::InGame).or(in_state(GameState::Editor))));
+        app.add_systems(Update, incremental_build_graph.run_if(in_state(GameState::Loading)));
     }
 }
 
@@ -756,6 +780,207 @@ fn find_path_astar_local_points(
         }
     }
     None
+}
+
+fn incremental_build_graph(
+    mut graph: ResMut<HierarchicalGraph>,
+    map_flow_field: Res<MapFlowField>,
+    mut build_state: ResMut<GraphBuildState>,
+    mut loading_progress: ResMut<LoadingProgress>,
+) {
+    let flow_field = &map_flow_field.0;
+    if flow_field.width == 0 { return; }
+
+    let width_clusters = (flow_field.width + CLUSTER_SIZE - 1) / CLUSTER_SIZE;
+    let height_clusters = (flow_field.height + CLUSTER_SIZE - 1) / CLUSTER_SIZE;
+
+    match build_state.step {
+        GraphBuildStep::NotStarted => {
+            loading_progress.task = "Initializing Graph...".to_string();
+            loading_progress.progress = 0.0;
+            build_state.step = GraphBuildStep::InitializingClusters;
+        }
+        GraphBuildStep::InitializingClusters => {
+            for cy in 0..height_clusters {
+                for cx in 0..width_clusters {
+                    graph.clusters.insert((cx, cy), Cluster {
+                        id: (cx, cy),
+                        portals: Vec::new(),
+                        flow_field_cache: HashMap::new(),
+                    });
+                }
+            }
+            build_state.cx = 0;
+            build_state.cy = 0;
+            build_state.step = GraphBuildStep::FindingVerticalPortals;
+            loading_progress.progress = 0.1;
+        }
+        GraphBuildStep::FindingVerticalPortals => {
+            loading_progress.task = "Finding Vertical Portals...".to_string();
+            let cx = build_state.cx;
+            if cx < width_clusters - 1 {
+                for cy in 0..height_clusters {
+                    let x1 = (cx + 1) * CLUSTER_SIZE - 1;
+                    let x2 = x1 + 1;
+                    
+                    if x2 >= flow_field.width { continue; }
+
+                    let start_y = cy * CLUSTER_SIZE;
+                    let end_y = ((cy + 1) * CLUSTER_SIZE).min(flow_field.height);
+                    
+                    let mut start_segment = None;
+                    
+                    for y in start_y..end_y {
+                        let idx1 = flow_field.get_index(x1, y);
+                        let idx2 = flow_field.get_index(x2, y);
+                        let walkable = flow_field.cost_field[idx1] != 255 && flow_field.cost_field[idx2] != 255;
+                        
+                        if walkable {
+                            if start_segment.is_none() {
+                                start_segment = Some(y);
+                            }
+                        } else {
+                            if let Some(sy) = start_segment {
+                                create_portal_vertical(&mut graph, x1, x2, sy, y - 1, cx, cy, cx + 1, cy);
+                                start_segment = None;
+                            }
+                        }
+                    }
+                    if let Some(sy) = start_segment {
+                         create_portal_vertical(&mut graph, x1, x2, sy, end_y - 1, cx, cy, cx + 1, cy);
+                    }
+                }
+                build_state.cx += 1;
+                loading_progress.progress = 0.1 + 0.2 * (cx as f32 / width_clusters as f32);
+            } else {
+                build_state.cx = 0;
+                build_state.cy = 0;
+                build_state.step = GraphBuildStep::FindingHorizontalPortals;
+            }
+        }
+        GraphBuildStep::FindingHorizontalPortals => {
+            loading_progress.task = "Finding Horizontal Portals...".to_string();
+            let cx = build_state.cx;
+            if cx < width_clusters {
+                for cy in 0..height_clusters - 1 {
+                    let y1 = (cy + 1) * CLUSTER_SIZE - 1;
+                    let y2 = y1 + 1;
+
+                    if y2 >= flow_field.height { continue; }
+
+                    let start_x = cx * CLUSTER_SIZE;
+                    let end_x = ((cx + 1) * CLUSTER_SIZE).min(flow_field.width);
+
+                    let mut start_segment = None;
+
+                    for x in start_x..end_x {
+                        let idx1 = flow_field.get_index(x, y1);
+                        let idx2 = flow_field.get_index(x, y2);
+                        let walkable = flow_field.cost_field[idx1] != 255 && flow_field.cost_field[idx2] != 255;
+
+                        if walkable {
+                            if start_segment.is_none() {
+                                start_segment = Some(x);
+                            }
+                        } else {
+                            if let Some(sx) = start_segment {
+                                create_portal_horizontal(&mut graph, sx, x - 1, y1, y2, cx, cy, cx, cy + 1);
+                                start_segment = None;
+                            }
+                        }
+                    }
+                    if let Some(sx) = start_segment {
+                        create_portal_horizontal(&mut graph, sx, end_x - 1, y1, y2, cx, cy, cx, cy + 1);
+                    }
+                }
+                build_state.cx += 1;
+                loading_progress.progress = 0.3 + 0.2 * (cx as f32 / width_clusters as f32);
+            } else {
+                build_state.cluster_keys = graph.clusters.keys().cloned().collect();
+                build_state.current_cluster_idx = 0;
+                build_state.step = GraphBuildStep::ConnectingIntraCluster;
+            }
+        }
+        GraphBuildStep::ConnectingIntraCluster => {
+            loading_progress.task = "Connecting Intra-Cluster...".to_string();
+            let batch_size = 5; 
+            for _ in 0..batch_size {
+                if build_state.current_cluster_idx < build_state.cluster_keys.len() {
+                    let key = build_state.cluster_keys[build_state.current_cluster_idx];
+                    connect_intra_cluster(&mut graph, flow_field, key);
+                    build_state.current_cluster_idx += 1;
+                } else {
+                    build_state.current_cluster_idx = 0;
+                    build_state.step = GraphBuildStep::PrecomputingFlowFields;
+                    break;
+                }
+            }
+            loading_progress.progress = 0.5 + 0.25 * (build_state.current_cluster_idx as f32 / build_state.cluster_keys.len() as f32);
+        }
+        GraphBuildStep::PrecomputingFlowFields => {
+            loading_progress.task = "Precomputing Flow Fields...".to_string();
+            let batch_size = 5;
+            for _ in 0..batch_size {
+                if build_state.current_cluster_idx < build_state.cluster_keys.len() {
+                    let key = build_state.cluster_keys[build_state.current_cluster_idx];
+                    precompute_flow_fields_for_cluster(&mut graph, flow_field, key);
+                    build_state.current_cluster_idx += 1;
+                } else {
+                    graph.initialized = true;
+                    build_state.step = GraphBuildStep::Done;
+                    loading_progress.progress = 1.0;
+                    break;
+                }
+            }
+            loading_progress.progress = 0.75 + 0.25 * (build_state.current_cluster_idx as f32 / build_state.cluster_keys.len() as f32);
+        }
+        GraphBuildStep::Done => {}
+    }
+}
+
+fn connect_intra_cluster(
+    graph: &mut HierarchicalGraph,
+    flow_field: &crate::game::flow_field::FlowField,
+    key: (usize, usize),
+) {
+    let portals = graph.clusters[&key].portals.clone();
+    let (cx, cy) = key;
+    
+    let min_x = cx * CLUSTER_SIZE;
+    let max_x = ((cx + 1) * CLUSTER_SIZE).min(flow_field.width) - 1;
+    let min_y = cy * CLUSTER_SIZE;
+    let max_y = ((cy + 1) * CLUSTER_SIZE).min(flow_field.height) - 1;
+
+    for i in 0..portals.len() {
+        for j in i+1..portals.len() {
+            let id1 = portals[i];
+            let id2 = portals[j];
+            let node1 = graph.nodes[id1].node;
+            let node2 = graph.nodes[id2].node;
+
+            if let Some(path) = find_path_astar_local(node1, node2, flow_field, min_x, max_x, min_y, max_y) {
+                let cost = FixedNum::from_num(path.len() as f64);
+                graph.edges.entry(id1).or_default().push((id2, cost));
+                graph.edges.entry(id2).or_default().push((id1, cost));
+            }
+        }
+    }
+}
+
+fn precompute_flow_fields_for_cluster(
+    graph: &mut HierarchicalGraph,
+    flow_field: &crate::game::flow_field::FlowField,
+    key: (usize, usize),
+) {
+    let portals = graph.clusters[&key].portals.clone();
+    for portal_id in portals {
+        if let Some(portal) = graph.nodes.get(portal_id).cloned() {
+            let field = generate_local_flow_field(key, &portal, flow_field);
+            if let Some(cluster) = graph.clusters.get_mut(&key) {
+                cluster.flow_field_cache.insert(portal_id, field);
+            }
+        }
+    }
 }
 
 fn draw_graph_gizmos(
