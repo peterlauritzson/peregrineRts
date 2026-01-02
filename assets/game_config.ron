@@ -1,6 +1,6 @@
 (
     tick_rate: 30.0,
-    unit_speed: 5.0,
+    unit_speed: 10.0,
     map_width: 50.0,
     map_height: 50.0,
     unit_radius: 0.5,

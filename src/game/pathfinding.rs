@@ -246,22 +246,31 @@ fn build_graph(
         }
     }
 
+    // 3. Precompute Flow Fields
+    info!("Precomputing Flow Fields...");
+    let cluster_keys: Vec<(usize, usize)> = graph.clusters.keys().cloned().collect();
+    for key in cluster_keys {
+        let portals = graph.clusters[&key].portals.clone();
+        for portal_id in portals {
+            if let Some(portal) = graph.nodes.get(portal_id).cloned() {
+                let field = generate_local_flow_field(key, &portal, flow_field);
+                if let Some(cluster) = graph.clusters.get_mut(&key) {
+                    cluster.flow_field_cache.insert(portal_id, field);
+                }
+            }
+        }
+    }
+
     graph.initialized = true;
     info!("Hierarchical Graph Built. Nodes: {}, Edges: {}", graph.nodes.len(), graph.edges.values().map(|v| v.len()).sum::<usize>());
 }
 
 impl Cluster {
     pub fn get_flow_field(
-        &mut self,
+        &self,
         portal_id: usize,
-        portal: &Portal,
-        map_flow_field: &crate::game::flow_field::FlowField,
     ) -> &LocalFlowField {
-        if !self.flow_field_cache.contains_key(&portal_id) {
-            let field = generate_local_flow_field(self.id, portal, map_flow_field);
-            self.flow_field_cache.insert(portal_id, field);
-        }
-        self.flow_field_cache.get(&portal_id).unwrap()
+        self.flow_field_cache.get(&portal_id).expect("Flow field not found in cache")
     }
 }
 
@@ -766,6 +775,16 @@ fn draw_graph_gizmos(
         gizmos.sphere(
             Vec3::new(pos.x.to_num(), 1.0, pos.y.to_num()),
             0.3,
+            Color::srgb(0.0, 1.0, 1.0),
+        );
+
+        // Draw portal range
+        let min_pos = flow_field.grid_to_world(portal.range_min.x, portal.range_min.y);
+        let max_pos = flow_field.grid_to_world(portal.range_max.x, portal.range_max.y);
+        
+        gizmos.line(
+            Vec3::new(min_pos.x.to_num(), 1.0, min_pos.y.to_num()),
+            Vec3::new(max_pos.x.to_num(), 1.0, max_pos.y.to_num()),
             Color::srgb(0.0, 1.0, 1.0),
         );
     }

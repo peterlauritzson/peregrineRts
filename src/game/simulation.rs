@@ -886,8 +886,8 @@ pub fn follow_path(
                         let portal = graph.nodes[target_portal_id].clone(); 
                         
                         if current_cluster_id == portal.cluster {
-                             if let Some(cluster) = graph.clusters.get_mut(&current_cluster_id) {
-                                 let local_field = cluster.get_flow_field(target_portal_id, &portal, flow_field);
+                             if let Some(cluster) = graph.clusters.get(&current_cluster_id) {
+                                 let local_field = cluster.get_flow_field(target_portal_id);
                                  
                                  let min_x = cx * CLUSTER_SIZE;
                                  let min_y = cy * CLUSTER_SIZE;
@@ -988,14 +988,15 @@ fn draw_unit_paths(
     }
     
     let flow_field = &map_flow_field.0;
+    let nodes = graph.nodes.clone();
 
     for (transform, path) in query.iter() {
         let mut current_pos = transform.translation;
-        current_pos.y = 0.5;
+        current_pos.y = 0.6;
 
         match path {
             Path::Direct(target) => {
-                let next_pos = Vec3::new(target.x.to_num(), 0.5, target.y.to_num());
+                let next_pos = Vec3::new(target.x.to_num(), 0.6, target.y.to_num());
                 gizmos.line(current_pos, next_pos, Color::srgb(0.0, 1.0, 0.0));
                 gizmos.sphere(next_pos, 0.2, Color::srgb(0.0, 1.0, 0.0));
             },
@@ -1003,34 +1004,102 @@ fn draw_unit_paths(
                 if *current_index >= waypoints.len() { continue; }
                 for i in *current_index..waypoints.len() {
                     let wp = waypoints[i];
-                    let next_pos = Vec3::new(wp.x.to_num(), 0.5, wp.y.to_num());
+                    let next_pos = Vec3::new(wp.x.to_num(), 0.6, wp.y.to_num());
                     gizmos.line(current_pos, next_pos, Color::srgb(0.0, 1.0, 0.0));
                     gizmos.sphere(next_pos, 0.2, Color::srgb(0.0, 1.0, 0.0));
                     current_pos = next_pos;
                 }
             },
             Path::Hierarchical { portals, final_goal, current_index } => {
-                if *current_index >= portals.len() {
-                    let next_pos = Vec3::new(final_goal.x.to_num(), 0.5, final_goal.y.to_num());
-                    gizmos.line(current_pos, next_pos, Color::srgb(0.0, 1.0, 0.0));
-                    gizmos.sphere(next_pos, 0.2, Color::srgb(0.0, 1.0, 0.0));
-                    continue;
-                }
+                let mut trace_pos = FixedVec2::from_f32(current_pos.x, current_pos.z);
                 
                 for i in *current_index..portals.len() {
                     let portal_id = portals[i];
-                    if let Some(portal) = graph.nodes.get(portal_id) {
-                        let wp = flow_field.grid_to_world(portal.node.x, portal.node.y);
-                        let next_pos = Vec3::new(wp.x.to_num(), 0.5, wp.y.to_num());
-                        gizmos.line(current_pos, next_pos, Color::srgb(0.0, 1.0, 0.0));
-                        gizmos.sphere(next_pos, 0.2, Color::srgb(0.0, 1.0, 0.0));
-                        current_pos = next_pos;
+                    if let Some(portal) = nodes.get(portal_id) {
+                        // Handle cluster transition if needed
+                        let grid_pos_opt = flow_field.world_to_grid(trace_pos);
+                        if let Some((gx, gy)) = grid_pos_opt {
+                            let cx = gx / CLUSTER_SIZE;
+                            let cy = gy / CLUSTER_SIZE;
+                            
+                            if (cx, cy) != portal.cluster {
+                                // We are not in the correct cluster. Snap to entry portal if possible.
+                                if i > 0 {
+                                    let prev_id = portals[i-1];
+                                    if let Some(prev_portal) = nodes.get(prev_id) {
+                                        if prev_portal.cluster == portal.cluster {
+                                            let snap_pos = flow_field.grid_to_world(prev_portal.node.x, prev_portal.node.y);
+                                            gizmos.line(
+                                                Vec3::new(trace_pos.x.to_num(), 0.6, trace_pos.y.to_num()),
+                                                Vec3::new(snap_pos.x.to_num(), 0.6, snap_pos.y.to_num()),
+                                                Color::srgb(0.0, 1.0, 0.0)
+                                            );
+                                            trace_pos = snap_pos;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Get flow field for this portal
+                        if let Some(cluster) = graph.clusters.get(&portal.cluster) {
+                            let ff = cluster.get_flow_field(portal_id);
+                            
+                            // Trace
+                            let mut steps = 0;
+                            let max_steps = 200;
+                            let step_size = FixedNum::from_num(0.5);
+                            
+                            while steps < max_steps {
+                                let grid_pos_opt = flow_field.world_to_grid(trace_pos);
+                                if let Some((gx, gy)) = grid_pos_opt {
+                                    let cx = gx / CLUSTER_SIZE;
+                                    let cy = gy / CLUSTER_SIZE;
+                                    
+                                    if (cx, cy) != portal.cluster {
+                                        break;
+                                    }
+                                    
+                                    let min_x = portal.cluster.0 * CLUSTER_SIZE;
+                                    let min_y = portal.cluster.1 * CLUSTER_SIZE;
+                                    let lx = gx - min_x;
+                                    let ly = gy - min_y;
+                                    
+                                    if lx >= ff.width || ly >= ff.height { break; }
+                                    
+                                    let idx = ly * ff.width + lx;
+                                    let dir = ff.vectors[idx];
+                                    
+                                    if dir == FixedVec2::ZERO {
+                                        break;
+                                    }
+                                    
+                                    let next_trace_pos = trace_pos + dir * step_size;
+                                    
+                                    gizmos.line(
+                                        Vec3::new(trace_pos.x.to_num(), 0.6, trace_pos.y.to_num()),
+                                        Vec3::new(next_trace_pos.x.to_num(), 0.6, next_trace_pos.y.to_num()),
+                                        Color::srgb(0.0, 1.0, 0.0)
+                                    );
+                                    
+                                    trace_pos = next_trace_pos;
+                                } else {
+                                    break;
+                                }
+                                steps += 1;
+                            }
+                        }
                     }
                 }
+                
                 // Draw line to final goal
-                let next_pos = Vec3::new(final_goal.x.to_num(), 0.5, final_goal.y.to_num());
-                gizmos.line(current_pos, next_pos, Color::srgb(0.0, 1.0, 0.0));
-                gizmos.sphere(next_pos, 0.2, Color::srgb(0.0, 1.0, 0.0));
+                let final_pos_vec = Vec3::new(final_goal.x.to_num(), 0.6, final_goal.y.to_num());
+                gizmos.line(
+                    Vec3::new(trace_pos.x.to_num(), 0.6, trace_pos.y.to_num()),
+                    final_pos_vec,
+                    Color::srgb(0.0, 1.0, 0.0)
+                );
+                gizmos.sphere(final_pos_vec, 0.2, Color::srgb(0.0, 1.0, 0.0));
             }
         }
     }
