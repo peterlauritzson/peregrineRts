@@ -26,6 +26,7 @@
     key_spawn_wind_spot: KeyV,
     key_spawn_unit: Space,
     key_pause: Escape,
+    key_toggle_health_bars: KeyL,
 
     // Camera
     camera_speed: 20.0,

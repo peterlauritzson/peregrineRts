@@ -466,6 +466,7 @@ fn process_input(
         commands.spawn((
             crate::game::GameEntity,
             crate::game::unit::Unit,
+            crate::game::unit::Health { current: 100.0, max: 100.0 },
             SimPosition(event.position),
             SimPositionPrev(event.position),
             SimVelocity(FixedVec2::ZERO),

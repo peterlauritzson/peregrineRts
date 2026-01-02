@@ -3,20 +3,44 @@ use crate::game::simulation::{SimPosition, SimPositionPrev, SimVelocity, SimSet,
 use crate::game::math::{FixedVec2, FixedNum};
 use crate::game::GameState;
 
+use crate::game::config::{GameConfig, GameConfigHandle};
+
 #[derive(Component)]
 pub struct Unit;
 
 #[derive(Component)]
+pub struct Health {
+    pub current: f32,
+    pub max: f32,
+}
+
+#[derive(Component)]
 pub struct Selected;
 
+#[derive(Component)]
+pub struct SelectionCircle;
+
+#[derive(Component)]
+pub struct HealthBar;
+
+#[derive(Resource, Default)]
+pub struct HealthBarSettings {
+    pub show: bool,
+}
+
 #[derive(Resource)]
-pub struct UnitMesh(pub Handle<Mesh>);
+pub struct UnitMesh {
+    pub unit: Handle<Mesh>,
+    pub circle: Handle<Mesh>,
+    pub quad: Handle<Mesh>,
+}
 
 #[derive(Resource)]
 pub struct UnitMaterials {
     pub normal: Handle<StandardMaterial>,
-    pub selected: Handle<StandardMaterial>,
     pub colliding: Handle<StandardMaterial>,
+    pub selection_circle: Handle<StandardMaterial>,
+    pub health_bar: Handle<StandardMaterial>,
 }
 
 use crate::game::camera::RtsCamera;
@@ -25,10 +49,76 @@ pub struct UnitPlugin;
 
 impl Plugin for UnitPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (setup_unit_resources).chain())
+        app.init_resource::<HealthBarSettings>()
+           .add_systems(Startup, (setup_unit_resources).chain())
            // unit_movement_logic is replaced by follow_flow_field in simulation.rs
            .add_systems(FixedUpdate, (apply_boids_steering).chain().in_set(SimSet::Steering).after(follow_path))
-           .add_systems(Update, (spawn_unit_visuals, update_selection_visuals, sync_visuals, update_unit_lod).run_if(in_state(GameState::InGame).or(in_state(GameState::Editor))));
+           .add_systems(Update, (spawn_unit_visuals, update_selection_visuals, update_selection_circle_visibility, update_health_bars, toggle_health_bars, sync_visuals, update_unit_lod).run_if(in_state(GameState::InGame).or(in_state(GameState::Editor))));
+    }
+}
+
+fn toggle_health_bars(
+    keys: Res<ButtonInput<KeyCode>>,
+    config_handle: Res<GameConfigHandle>,
+    game_configs: Res<Assets<GameConfig>>,
+    mut settings: ResMut<HealthBarSettings>,
+    mut q_bars: Query<&mut Visibility, With<HealthBar>>,
+) {
+    let Some(config) = game_configs.get(&config_handle.0) else { return };
+
+    if keys.just_pressed(config.key_toggle_health_bars) {
+        settings.show = !settings.show;
+        let vis = if settings.show { Visibility::Visible } else { Visibility::Hidden };
+        for mut visibility in q_bars.iter_mut() {
+            *visibility = vis;
+        }
+    }
+}
+
+fn update_health_bars(
+    q_units: Query<(&Children, &Health), Changed<Health>>,
+    mut q_bars: Query<&mut Transform, With<HealthBar>>,
+) {
+    for (children, health) in q_units.iter() {
+        let pct = (health.current / health.max).clamp(0.0, 1.0);
+        for child in children.iter() {
+            if let Ok(mut transform) = q_bars.get_mut(child) {
+                transform.scale.x = pct;
+                // Center is 0.0. Width is 1.0.
+                // If scale is 1.0, left is -0.5, right is 0.5.
+                // If scale is 0.5, left is -0.25, right is 0.25.
+                // We want left to stay at -0.5.
+                // New center = -0.5 + (width * scale / 2.0) = -0.5 + (1.0 * pct / 2.0)
+                transform.translation.x = -0.5 + (pct * 0.5);
+            }
+        }
+    }
+}
+
+fn update_selection_circle_visibility(
+    q_added: Query<&Children, (With<Unit>, Added<Selected>)>,
+    q_children_lookup: Query<&Children>,
+    mut q_vis: Query<&mut Visibility, With<SelectionCircle>>,
+    mut removed_selected: RemovedComponents<Selected>,
+) {
+    // Handle Added Selected
+    for children in q_added.iter() {
+        for child in children.iter() {
+            if let Ok(mut vis) = q_vis.get_mut(child) {
+                *vis = Visibility::Visible;
+            }
+        }
+    }
+
+    // Handle Removed Selected
+    for entity in removed_selected.read() {
+        if let Ok(children) = q_children_lookup.get(entity) {
+            for child in children.iter() {
+                if let Ok(mut vis) = q_vis.get_mut(child) {
+                    *vis = Visibility::Hidden;
+                }
+            }
+        }
     }
 }
 
@@ -80,14 +170,12 @@ fn sync_visuals(
 }
 
 fn update_selection_visuals(
-    mut query: Query<(Option<&Selected>, Option<&Colliding>, &mut MeshMaterial3d<StandardMaterial>), With<Unit>>,
+    mut query: Query<(Option<&Colliding>, &mut MeshMaterial3d<StandardMaterial>), With<Unit>>,
     unit_materials: Res<UnitMaterials>,
 ) {
-    for (selected, colliding, mut mat_handle) in query.iter_mut() {
+    for (colliding, mut mat_handle) in query.iter_mut() {
         let target_mat = if colliding.is_some() {
             &unit_materials.colliding
-        } else if selected.is_some() {
-            &unit_materials.selected
         } else {
             &unit_materials.normal
         };
@@ -104,16 +192,34 @@ fn setup_unit_resources(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let mesh = meshes.add(Capsule3d::default());
-    commands.insert_resource(UnitMesh(mesh));
+    let circle_mesh = meshes.add(Annulus::new(0.6, 0.7)); // Inner radius 0.6, Outer 0.7
+    let quad_mesh = meshes.add(Rectangle::new(1.0, 0.15));
+
+    commands.insert_resource(UnitMesh {
+        unit: mesh,
+        circle: circle_mesh,
+        quad: quad_mesh,
+    });
 
     let normal_mat = materials.add(Color::srgb(0.8, 0.7, 0.6));
-    let selected_mat = materials.add(Color::srgb(0.2, 0.8, 0.2));
     let colliding_mat = materials.add(Color::srgb(0.8, 0.2, 0.2));
+    let circle_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.2, 1.0, 0.2),
+        unlit: true,
+        ..default()
+    });
+    let health_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.0, 1.0, 0.0),
+        unlit: true,
+        cull_mode: None, // Double sided
+        ..default()
+    });
 
     commands.insert_resource(UnitMaterials {
         normal: normal_mat,
-        selected: selected_mat,
         colliding: colliding_mat,
+        selection_circle: circle_mat,
+        health_bar: health_mat,
     });
 }
 
@@ -122,14 +228,32 @@ fn spawn_unit_visuals(
     query: Query<(Entity, &SimPosition), Added<Unit>>,
     unit_mesh: Res<UnitMesh>,
     unit_materials: Res<UnitMaterials>,
+    settings: Res<HealthBarSettings>,
 ) {
     for (entity, pos) in query.iter() {
         let p = pos.0.to_vec2();
         commands.entity(entity).insert((
-            Mesh3d(unit_mesh.0.clone()),
+            Mesh3d(unit_mesh.unit.clone()),
             MeshMaterial3d(unit_materials.normal.clone()),
             Transform::from_xyz(p.x, 1.0, p.y),
-        ));
+        )).with_children(|parent| {
+            parent.spawn((
+                Mesh3d(unit_mesh.circle.clone()),
+                MeshMaterial3d(unit_materials.selection_circle.clone()),
+                Transform::from_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
+                    .with_translation(Vec3::new(0.0, -0.95, 0.0)),
+                Visibility::Hidden,
+                SelectionCircle,
+            ));
+            // Health Bar
+            parent.spawn((
+                Mesh3d(unit_mesh.quad.clone()),
+                MeshMaterial3d(unit_materials.health_bar.clone()),
+                Transform::from_xyz(0.0, 1.5, 0.0),
+                if settings.show { Visibility::Visible } else { Visibility::Hidden },
+                HealthBar,
+            ));
+        });
     }
 }
 

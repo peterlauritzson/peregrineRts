@@ -1,7 +1,10 @@
 use bevy::prelude::*;
 use crate::game::GameState;
-use crate::game::unit::Selected;
+use crate::game::unit::{Selected, Health};
 use crate::game::simulation::UnitStopCommand;
+use crate::game::control::InputMode;
+use crate::game::simulation::SimPosition;
+use crate::game::config::{GameConfig, GameConfigHandle};
 
 pub struct HudPlugin;
 
@@ -13,12 +16,23 @@ impl Plugin for HudPlugin {
                update_selection_hud,
                button_system,
                command_handler,
+               minimap_system,
+               minimap_input_system,
            ).run_if(in_state(GameState::InGame)));
     }
 }
 
 #[derive(Component)]
 struct HudRoot;
+
+#[derive(Component)]
+struct Minimap;
+
+#[derive(Component)]
+struct MinimapDot(Entity);
+
+#[derive(Component)]
+struct UnitMinimapDot;
 
 #[derive(Component)]
 struct SelectionText;
@@ -59,6 +73,7 @@ fn setup_hud(mut commands: Commands) {
                 },
                 BackgroundColor(Color::srgb(0.1, 0.1, 0.1)),
                 BorderColor::from(Color::WHITE),
+                Minimap,
             )).with_children(|p| {
                  p.spawn((
                     Text::new("Minimap"),
@@ -188,9 +203,123 @@ fn setup_hud(mut commands: Commands) {
     });
 }
 
-fn cleanup_hud(mut commands: Commands, query: Query<Entity, With<HudRoot>>) {
+fn minimap_system(
+    mut commands: Commands,
+    q_minimap: Query<(Entity, &Node), (With<Minimap>, Without<MinimapDot>)>,
+    q_units: Query<(Entity, &SimPosition, Option<&Selected>), Without<UnitMinimapDot>>,
+    mut q_dots: Query<(Entity, &MinimapDot, &mut Node, &mut BackgroundColor), Without<Minimap>>,
+    q_units_lookup: Query<(&SimPosition, Option<&Selected>)>,
+    config_handle: Res<GameConfigHandle>,
+    game_configs: Res<Assets<GameConfig>>,
+) {
+    let Ok((minimap_entity, minimap_node)) = q_minimap.single() else { return };
+    let Some(config) = game_configs.get(&config_handle.0) else { return };
+    
+    let map_width = config.map_width;
+    let map_height = config.map_height;
+    let minimap_w = minimap_node.width.resolve(200.0, 200.0, Vec2::ZERO).unwrap_or(200.0);
+    let minimap_h = minimap_node.height.resolve(200.0, 200.0, Vec2::ZERO).unwrap_or(200.0);
+
+    // Spawn new dots
+    for (unit_entity, pos, selected) in q_units.iter() {
+        let x_pct = (pos.0.x.to_num::<f32>() + map_width / 2.0) / map_width;
+        let y_pct = (pos.0.y.to_num::<f32>() + map_height / 2.0) / map_height;
+
+        let x = (x_pct * minimap_w).clamp(0.0, minimap_w);
+        let y = ((1.0 - y_pct) * minimap_h).clamp(0.0, minimap_h);
+
+        let dot = commands.spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(x),
+                top: Val::Px(y),
+                width: Val::Px(4.0),
+                height: Val::Px(4.0),
+                ..default()
+            },
+            BackgroundColor(if selected.is_some() { Color::srgb(0.0, 1.0, 0.0) } else { Color::srgb(1.0, 0.0, 0.0) }),
+            MinimapDot(unit_entity),
+        )).id();
+
+        commands.entity(minimap_entity).add_child(dot);
+        commands.entity(unit_entity).insert(UnitMinimapDot);
+    }
+
+    // Update existing dots
+    for (dot_entity, dot_link, mut node, mut bg_color) in q_dots.iter_mut() {
+        if let Ok((pos, selected)) = q_units_lookup.get(dot_link.0) {
+             let x_pct = (pos.0.x.to_num::<f32>() + map_width / 2.0) / map_width;
+             let y_pct = (pos.0.y.to_num::<f32>() + map_height / 2.0) / map_height;
+             
+             let x = (x_pct * minimap_w).clamp(0.0, minimap_w);
+             let y = ((1.0 - y_pct) * minimap_h).clamp(0.0, minimap_h);
+
+             node.left = Val::Px(x);
+             node.top = Val::Px(y);
+             *bg_color = BackgroundColor(if selected.is_some() { Color::srgb(0.0, 1.0, 0.0) } else { Color::srgb(1.0, 0.0, 0.0) });
+        } else {
+            // Unit dead
+            commands.entity(dot_entity).despawn();
+        }
+    }
+}
+
+use bevy::window::PrimaryWindow;
+use crate::game::camera::RtsCamera;
+
+fn minimap_input_system(
+    mouse_button: Res<ButtonInput<MouseButton>>,
+    q_window: Query<&Window, With<PrimaryWindow>>,
+    q_minimap: Query<(&ComputedNode, &GlobalTransform), With<Minimap>>,
+    mut q_camera: Query<&mut Transform, With<RtsCamera>>,
+    config_handle: Res<GameConfigHandle>,
+    game_configs: Res<Assets<GameConfig>>,
+) {
+    if !mouse_button.pressed(MouseButton::Left) {
+        return;
+    }
+
+    let Some(window) = q_window.iter().next() else { return };
+    let Some(cursor_pos) = window.cursor_position() else { return };
+    let Ok((computed_node, transform)) = q_minimap.single() else { return };
+    let Some(config) = game_configs.get(&config_handle.0) else { return };
+
+    let size = computed_node.size();
+    let pos = transform.translation().truncate();
+    let rect = Rect::from_center_size(pos, size);
+
+    if rect.contains(cursor_pos) {
+        let relative_x = cursor_pos.x - rect.min.x;
+        let relative_y = cursor_pos.y - rect.min.y;
+        
+        let pct_x = relative_x / rect.width();
+        let pct_y = relative_y / rect.height();
+        
+        let map_x = pct_x * config.map_width - config.map_width / 2.0;
+        let map_z = (1.0 - pct_y) * config.map_height - config.map_height / 2.0;
+        
+        for mut cam_transform in q_camera.iter_mut() {
+            // Simple move. Ideally we'd account for camera angle offset.
+            // Assuming camera is looking somewhat down-forward.
+            // We just move the camera rig to the target X/Z.
+            // But wait, if we move the camera to X/Z, and it's angled, it will look at X/Z + offset.
+            // That's fine for now.
+            cam_transform.translation.x = map_x;
+            cam_transform.translation.z = map_z + 50.0; // Offset to see the point
+        }
+    }
+}
+
+fn cleanup_hud(
+    mut commands: Commands,
+    query: Query<Entity, With<HudRoot>>,
+    unit_query: Query<Entity, With<UnitMinimapDot>>,
+) {
     for entity in &query {
         commands.entity(entity).despawn();
+    }
+    for entity in &unit_query {
+        commands.entity(entity).remove::<UnitMinimapDot>();
     }
 }
 
@@ -222,6 +351,7 @@ fn command_handler(
     >,
     mut stop_events: MessageWriter<UnitStopCommand>,
     selected_units: Query<Entity, With<Selected>>,
+    mut input_mode: ResMut<InputMode>,
 ) {
     for (interaction, command) in &interaction_query {
         if *interaction == Interaction::Pressed {
@@ -235,10 +365,10 @@ fn command_handler(
                     }
                 }
                 CommandAction::Move => {
-                    info!("Move command clicked (not implemented via button)");
+                    *input_mode = InputMode::CommandMove;
                 }
                 CommandAction::Attack => {
-                    info!("Attack command clicked (not implemented)");
+                    *input_mode = InputMode::CommandAttack;
                 }
             }
         }
@@ -246,7 +376,7 @@ fn command_handler(
 }
 
 fn update_selection_hud(
-    selected_units: Query<Entity, With<Selected>>,
+    selected_units: Query<(Entity, Option<&Health>), With<Selected>>,
     mut text_query: Query<&mut Text, With<SelectionText>>,
 ) {
     let count = selected_units.iter().count();
@@ -254,8 +384,14 @@ fn update_selection_hud(
         if count == 0 {
             **text = "No Selection".to_string();
         } else if count == 1 {
-            let entity = selected_units.single();
-            **text = format!("Unit ID: {:?}", entity);
+            if let Ok((entity, health)) = selected_units.single() {
+                let health_str = if let Some(h) = health {
+                    format!("HP: {:.0}/{:.0}", h.current, h.max)
+                } else {
+                    "HP: N/A".to_string()
+                };
+                **text = format!("Unit ID: {:?}\n{}", entity, health_str);
+            }
         } else {
             **text = format!("Selected: {} units", count);
         }

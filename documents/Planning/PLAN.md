@@ -168,24 +168,24 @@ Once the RTS Foundation (Milestone 0) is complete, we will iterate on the simula
      - In Multiplayer: Menu opens but simulation continues (future proofing).
 
 5. **Settings & Controls Menu**
-   - [ ] **Keybindings UI**:
+   - [x] **Keybindings UI**:
      - List all active actions (Camera Move, Stop, Attack, etc.).
      - Allow rebinding keys.
      - Persist bindings to `game_config.ron` or `settings.ron`.
-   - [ ] **Video/Audio**: Basic sliders/toggles (Volume, Fullscreen).
+   - [x] **Video/Audio**: Basic sliders/toggles (Volume, Fullscreen).
 
 6. **In-Game HUD (Heads-Up Display)**
-   - [ ] **Selection Panel**: Display details of selected units (Count, Type, Health).
-   - [ ] **Command Card**: Grid of buttons for unit actions (Move, Stop, Attack, Patrol).
-   - [ ] **Minimap**:
+   - [x] **Selection Panel**: Display details of selected units (Count, Type, Health).
+   - [x] **Command Card**: Grid of buttons for unit actions (Move, Stop, Attack, Patrol).
+   - [x] **Minimap**:
      - Render map bounds and units as dots.
      - Camera frustum rectangle.
      - Click to move camera.
 
 7. **Selection Visuals & Interaction**
-   - [ ] **Drag Selection**: Draw a rectangle on screen; select all units inside.
-   - [ ] **Health Bars**: Render health bars above units (toggleable).
-   - [ ] **Selection Circles**: Render rings around selected units.
+   - [x] **Drag Selection**: Draw a rectangle on screen; select all units inside.
+   - [x] **Health Bars**: Render health bars above units (toggleable).
+   - [x] **Selection Circles**: Render rings around selected units.
 
 8. **Map Editor UI & Tools**
    - [ ] **Editor Overlay**:
@@ -207,7 +207,7 @@ Once the RTS Foundation (Milestone 0) is complete, we will iterate on the simula
 # Gameplay: Simple RTS
 
 1. **Combat Basics**
-   - [ ] Units have Health and Damage.
+   - [x] Units have Health and Damage.
    - [ ] Attack range checks.
    - [ ] Projectile simulation (if not hitscan).
 

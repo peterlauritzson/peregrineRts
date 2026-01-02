@@ -1,8 +1,8 @@
 use bevy::prelude::*;
 use bevy_common_assets::ron::RonAssetPlugin;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize, Asset, TypePath, Clone, Debug)]
+#[derive(Deserialize, Serialize, Asset, TypePath, Clone, Debug)]
 pub struct GameConfig {
     pub tick_rate: f64,
     pub unit_speed: f32,
@@ -31,6 +31,7 @@ pub struct GameConfig {
     pub key_spawn_wind_spot: KeyCode,
     pub key_spawn_unit: KeyCode,
     pub key_pause: KeyCode,
+    pub key_toggle_health_bars: KeyCode,
 
     // Camera
     pub camera_speed: f32,
