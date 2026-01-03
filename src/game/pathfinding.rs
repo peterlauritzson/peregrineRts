@@ -96,6 +96,7 @@ pub struct LocalFlowField {
     pub width: usize,
     pub height: usize,
     pub vectors: Vec<FixedVec2>, // Row-major, size width * height
+    pub integration_field: Vec<u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -399,7 +400,7 @@ fn generate_local_flow_field(
         }
     }
     
-    LocalFlowField { width, height, vectors }
+    LocalFlowField { width, height, vectors, integration_field }
 }
 
 fn create_portal_vertical(
@@ -587,16 +588,40 @@ fn find_path_hierarchical(
     if let Some(cluster) = graph.clusters.get(&start_cluster) {
         for &portal_id in &cluster.portals {
             let portal_node = graph.nodes[portal_id].node;
-            let min_x = start_cluster.0 * CLUSTER_SIZE;
-            let max_x = ((start_cluster.0 + 1) * CLUSTER_SIZE).min(flow_field.width) - 1;
-            let min_y = start_cluster.1 * CLUSTER_SIZE;
-            let max_y = ((start_cluster.1 + 1) * CLUSTER_SIZE).min(flow_field.height) - 1;
+            
+            let mut cost = None;
 
-            if let Some(path) = find_path_astar_local(start, portal_node, flow_field, min_x, max_x, min_y, max_y) {
-                let cost = FixedNum::from_num(path.len() as f64); // Approximate cost
-                g_score.insert(portal_id, cost);
+            // Try to use cached flow field
+            if let Some(local_field) = cluster.flow_field_cache.get(&portal_id) {
+                let lx = start.x.wrapping_sub(start_cluster.0 * CLUSTER_SIZE);
+                let ly = start.y.wrapping_sub(start_cluster.1 * CLUSTER_SIZE);
+                
+                if lx < local_field.width && ly < local_field.height {
+                    let idx = ly * local_field.width + lx;
+                    if let Some(&c) = local_field.integration_field.get(idx) {
+                        if c != u32::MAX {
+                            cost = Some(FixedNum::from_num(c));
+                        }
+                    }
+                }
+            }
+
+            // Fallback to A*
+            if cost.is_none() {
+                let min_x = start_cluster.0 * CLUSTER_SIZE;
+                let max_x = ((start_cluster.0 + 1) * CLUSTER_SIZE).min(flow_field.width) - 1;
+                let min_y = start_cluster.1 * CLUSTER_SIZE;
+                let max_y = ((start_cluster.1 + 1) * CLUSTER_SIZE).min(flow_field.height) - 1;
+
+                if let Some(path) = find_path_astar_local(start, portal_node, flow_field, min_x, max_x, min_y, max_y) {
+                    cost = Some(FixedNum::from_num(path.len() as f64));
+                }
+            }
+
+            if let Some(c) = cost {
+                g_score.insert(portal_id, c);
                 let h = heuristic(portal_node.x, portal_node.y, goal.x, goal.y, flow_field.cell_size);
-                open_set.push(GraphState { cost: cost + h, portal_id });
+                open_set.push(GraphState { cost: c + h, portal_id });
                 start_portals.push(portal_id);
             }
         }
