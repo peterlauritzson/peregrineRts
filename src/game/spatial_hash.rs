@@ -1,6 +1,46 @@
 use bevy::prelude::*;
 use crate::game::math::{FixedNum, FixedVec2};
 
+/// Spatial partitioning grid for efficient proximity queries in 2D space.
+///
+/// The spatial hash divides the game world into a uniform grid of cells, allowing
+/// O(1) amortized insertion and efficient proximity queries by only checking
+/// entities in nearby cells.
+///
+/// # Use Cases
+///
+/// - **Collision Detection:** Find entities within collision radius
+/// - **Boids/Flocking:** Query neighbors for separation, alignment, cohesion
+/// - **AI/Aggro:** Find nearby enemies or threats
+/// - **Area Effects:** Find all entities in blast radius
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let mut hash = SpatialHash::new(
+///     FixedNum::from_num(100.0), // map width
+///     FixedNum::from_num(100.0), // map height  
+///     FixedNum::from_num(5.0)    // cell size
+/// );
+///
+/// // Insert entities
+/// hash.insert(entity, pos);
+///
+/// // Query nearby entities within radius (excludes self)
+/// let nearby = hash.query_radius(entity, pos, radius);
+/// ```
+///
+/// # Performance
+///
+/// - **Insert:** O(1) amortized
+/// - **Query:** O(k) where k = entities in nearby cells (typically << N)
+/// - **Clear:** O(1) (reuses allocated vectors)
+///
+/// # Implementation Notes
+///
+/// - Uses fixed-point math for deterministic cross-platform behavior
+/// - Cells use `Vec` instead of `HashSet` for better cache locality
+/// - Origin is at bottom-left corner of map (-width/2, -height/2)
 #[derive(Resource)]
 pub struct SpatialHash {
     cell_size: FixedNum,

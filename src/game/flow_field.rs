@@ -3,9 +3,55 @@ use bevy::prelude::*;
 use std::collections::VecDeque;
 use serde::{Serialize, Deserialize};
 
-// Use a fixed cell size for the grid
+/// Fixed cell size for the flow field grid (1 world unit per cell).
 pub const CELL_SIZE: f32 = 1.0;
 
+/// Flow field navigation grid using Dijkstra-based integration and vector fields.
+///
+/// A flow field guides units to a target by precomputing the optimal direction
+/// for each grid cell. This enables thousands of units to navigate efficiently
+/// without individual pathfinding.
+///
+/// # Algorithm
+///
+/// 1. **Cost Field:** Mark obstacles (255) and walkable cells (1)
+/// 2. **Integration Field:** Dijkstra flood-fill from target, storing distance
+/// 3. **Vector Field:** Gradient descent - each cell points toward lowest neighbor
+///
+/// # Use Cases
+///
+/// - **Large unit groups:** Single flow field can guide unlimited units
+/// - **Static targets:** Precompute once, reuse for all units going to same location
+/// - **Dynamic obstacles:** Regenerate affected areas when obstacles change
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let mut flow_field = FlowField::new(width, height, cell_size, origin);
+///
+/// // Mark obstacles
+/// flow_field.set_obstacle(x, y);
+///
+/// // Generate fields for target
+/// flow_field.generate_integration_field(target_x, target_y);
+/// flow_field.generate_vector_field();
+///
+/// // Query direction at world position
+/// if let Some((gx, gy)) = flow_field.world_to_grid(unit_pos) {
+///     let direction = flow_field.vector_field[flow_field.get_index(gx, gy)];
+/// }
+/// ```
+///
+/// # Performance
+///
+/// - **Generation:** O(width × height) via breadth-first search
+/// - **Query:** O(1) array lookup
+/// - **Memory:** ~20 bytes per cell (cost + integration + vector)
+///
+/// # See Also
+///
+/// - Hierarchical pathfinding uses multiple local flow fields per cluster
+/// - Map-wide flow field in `MapFlowField` resource for obstacle tracking
 #[derive(Resource, Default, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct FlowField {
@@ -66,11 +112,6 @@ impl FlowField {
     pub fn set_obstacle(&mut self, x: usize, y: usize) {
         let idx = self.get_index(x, y);
         self.cost_field[idx] = 255;
-    }
-
-    #[allow(dead_code)]
-    pub fn clear_obstacles(&mut self) {
-        self.cost_field.fill(1);
     }
 
     pub fn generate_integration_field(&mut self, target_x: usize, target_y: usize) {

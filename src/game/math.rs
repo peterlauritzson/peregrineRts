@@ -52,12 +52,11 @@ impl FixedVec2 {
         }
     }
     
-    #[allow(dead_code)]
     pub fn dot(self, other: Self) -> FixedNum {
         self.x * other.x + self.y * other.y
     }
 
-    #[allow(dead_code)]
+
     pub fn cross(self, other: Self) -> FixedNum {
         self.x * other.y - self.y * other.x
     }

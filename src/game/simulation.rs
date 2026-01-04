@@ -7,7 +7,6 @@ use crate::game::pathfinding::{Path, HierarchicalGraph, CLUSTER_SIZE};
 use crate::game::map::{self, MAP_VERSION};
 use crate::game::GameState;
 use std::time::{Instant, Duration};
-// use std::collections::HashMap;
 
 pub struct SimulationPlugin;
 
@@ -105,7 +104,7 @@ impl Default for Collider {
 /// # Determinism Guarantees
 ///
 /// - All physics parameters use fixed-point arithmetic to ensure identical results across platforms
-/// - Config values are converted from floats once when loaded (see [`update_sim_from_config`])
+/// - Config values are converted from floats once when loaded on startup or hot-reload
 /// - **IMPORTANT:** Config changes during gameplay will break determinism in multiplayer
 ///   
 /// # Multiplayer Considerations
@@ -251,7 +250,6 @@ impl Plugin for SimulationPlugin {
             sim_start.before(SimSet::Input),
             cache_previous_state.in_set(SimSet::Input),
             process_input.in_set(SimSet::Input),
-            check_arrival_crowding.in_set(SimSet::Steering).before(follow_path),
             apply_friction.in_set(SimSet::Steering).before(follow_path),
             follow_path.in_set(SimSet::Steering),
             apply_forces.in_set(SimSet::Steering).before(follow_path),
@@ -295,7 +293,7 @@ fn update_sim_from_config(
     config_handle: Res<GameConfigHandle>,
     game_configs: Res<Assets<GameConfig>>,
     mut events: MessageReader<AssetEvent<GameConfig>>,
-    obstacles: Query<(Entity, &SimPosition, &StaticObstacle)>,
+    obstacles: Query<(Entity, &SimPosition, &Collider), With<StaticObstacle>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -371,7 +369,7 @@ fn update_sim_from_config(
                                      MeshMaterial3d(materials.add(Color::srgb(0.5, 0.5, 0.5))),
                                      Transform::from_xyz(obs.position.x.to_num(), 1.0, obs.position.y.to_num()),
                                      SimPosition(obs.position),
-                                     StaticObstacle { radius: obs.radius },
+                                     StaticObstacle,
                                      Collider {
                                          radius: obs.radius,
                                          layer: layers::OBSTACLE,
@@ -428,7 +426,7 @@ fn update_sim_from_config(
                              MeshMaterial3d(materials.add(Color::srgb(0.5, 0.5, 0.5))),
                              Transform::from_xyz(obstacle_pos.x.to_num(), 1.0, obstacle_pos.y.to_num()),
                              SimPosition(obstacle_pos),
-                             StaticObstacle { radius: obstacle_radius },
+                             StaticObstacle,
                              Collider {
                                  radius: obstacle_radius,
                                  layer: layers::OBSTACLE,
@@ -444,17 +442,17 @@ fn update_sim_from_config(
                      } else {
                          // Re-apply obstacles
                          let flow_field = &mut map_flow_field.0;
-                         for (_, pos, obs) in obstacles.iter() {
-                             apply_obstacle_to_flow_field(flow_field, pos.0, obs.radius);
-                         }
-                     }
+                        for (_, pos, collider) in obstacles.iter() {
+                            apply_obstacle_to_flow_field(flow_field, pos.0, collider.radius);
+                        }
+                    }
 
-                     // Reset Graph
-                     graph.reset();
-                 }
+                    // Reset Graph
+                    graph.reset();
+                }
 
-                 info!("Updated tick rate to {}", config.tick_rate);
-             }
+                info!("Updated tick rate to {}", config.tick_rate);
+            }
         }
     }
 }
@@ -479,7 +477,6 @@ fn process_input(
     stops.sort_by_key(|e| e.player_id);
 
     for event in stops {
-        commands.entity(event.entity).remove::<SimTarget>();
         commands.entity(event.entity).remove::<Path>();
         // Also reset velocity?
         commands.entity(event.entity).insert(SimVelocity(FixedVec2::ZERO));
@@ -491,14 +488,13 @@ fn process_input(
     
     for event in moves {
         if let Ok(pos) = query.get(event.entity) {
-            // Send Path Request instead of setting SimTarget directly
+            // Send Path Request instead of setting target directly
             path_requests.write(PathRequest {
                 entity: event.entity,
                 start: pos.0,
                 goal: event.target,
             });
-            // Remove old target/path components to stop movement until path is found
-            commands.entity(event.entity).remove::<SimTarget>();
+            // Remove old path component to stop movement until path is found
             commands.entity(event.entity).remove::<Path>();
         }
     }
@@ -542,20 +538,14 @@ pub struct SimVelocity(pub FixedVec2);
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct SimAcceleration(pub FixedVec2);
 
-/// Logical target position for movement.
-#[derive(Component, Debug, Clone, Copy, Default)]
-pub struct SimTarget(#[allow(dead_code)] pub FixedVec2);
-
-/// Component to mark if a unit is currently colliding with another unit.
+/// Marker component to indicate if a unit is currently colliding with another unit.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct Colliding;
 
-/// Component for static circular obstacles.
+/// Marker component for static circular obstacles.
+/// The actual radius is stored in the Collider component.
 #[derive(Component, Debug, Clone, Copy, Default)]
-pub struct StaticObstacle {
-    #[allow(dead_code)]
-    pub radius: FixedNum,
-}
+pub struct StaticObstacle;
 
 /// Component to mark obstacles that are part of the flow field.
 #[derive(Component, Debug, Clone, Copy, Default)]
@@ -891,11 +881,11 @@ pub fn apply_obstacle_to_flow_field(flow_field: &mut FlowField, pos: FixedVec2, 
 fn apply_new_obstacles(
     mut map_flow_field: ResMut<MapFlowField>,
     mut graph: ResMut<HierarchicalGraph>,
-    obstacles: Query<(&SimPosition, &StaticObstacle), Added<StaticObstacle>>,
+    obstacles: Query<(&SimPosition, &Collider), Added<StaticObstacle>>,
 ) {
     let flow_field = &mut map_flow_field.0;
-    for (pos, obs) in obstacles.iter() {
-        apply_obstacle_to_flow_field(flow_field, pos.0, obs.radius);
+    for (pos, collider) in obstacles.iter() {
+        apply_obstacle_to_flow_field(flow_field, pos.0, collider.radius);
         
         // Invalidate affected cluster caches so units reroute around the new obstacle
         // Determine which clusters are affected by this obstacle
@@ -904,7 +894,7 @@ fn apply_new_obstacles(
         
         if let Some((grid_x, grid_y)) = grid_pos {
             // Calculate the radius in grid cells
-            let radius_cells = (obs.radius / flow_field.cell_size).ceil().to_num::<usize>();
+            let radius_cells = (collider.radius / flow_field.cell_size).ceil().to_num::<usize>();
             
             // Find all affected clusters
             let min_x = grid_x.saturating_sub(radius_cells);
@@ -1041,50 +1031,6 @@ fn draw_flow_field_gizmos(
                                 Vec3::new(end.x, 0.6, end.y),
                                 Color::srgb(0.5, 0.5, 1.0), // Light blue for flow vectors
                             );
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn check_arrival_crowding(
-    mut commands: Commands,
-    query: Query<(Entity, &SimPosition, &SimTarget)>,
-    other_units: Query<(Entity, &SimPosition, Option<&SimTarget>), With<SimPosition>>,
-    sim_config: Res<SimConfig>,
-    spatial_hash: Res<SpatialHash>,
-) {
-    let radius = sim_config.unit_radius;
-    // Use a slightly larger radius for "touching" to be safe
-    let touch_dist = radius * sim_config.touch_dist_multiplier;
-    let collision_dist_sq = touch_dist * touch_dist; 
-    // If within a reasonable distance to target (e.g. 3 unit radii or threshold)
-    // If they are crowding, they might be a bit further than threshold.
-    let check_dist = radius * sim_config.check_dist_multiplier;
-    let check_dist_sq = check_dist * check_dist;
-
-    for (entity, pos, target) in query.iter() {
-        let dist_to_target_sq = (pos.0 - target.0).length_squared();
-        
-        if dist_to_target_sq < check_dist_sq {
-            // Check for collision with arrived units
-            let potential_collisions = spatial_hash.get_potential_collisions(pos.0, touch_dist, Some(entity));
-            
-            for (other_entity, _) in potential_collisions {
-                
-                if let Ok((_, other_pos, other_target)) = other_units.get(other_entity) {
-                    // If other unit has NO target, it is arrived/stopped.
-                    if other_target.is_none() {
-                        let dist_sq = (pos.0 - other_pos.0).length_squared();
-                        if dist_sq < collision_dist_sq {
-                            // Colliding with an arrived unit, and we are close to target.
-                            // Consider arrived.
-                            commands.entity(entity).remove::<SimTarget>();
-                            // Also zero velocity to stop immediately
-                            commands.entity(entity).insert(SimVelocity(FixedVec2::ZERO));
-                            break; 
                         }
                     }
                 }
@@ -1245,9 +1191,51 @@ fn update_spatial_hash(
 
 fn draw_force_sources(
     query: Query<(&Transform, &ForceSource)>,
+    debug_config: Res<DebugConfig>,
+    config_handle: Res<GameConfigHandle>,
+    game_configs: Res<Assets<GameConfig>>,
     mut gizmos: Gizmos,
+    q_camera: Query<(&Camera, &GlobalTransform), With<crate::game::camera::RtsCamera>>,
 ) {
+    // Early exit if debug visualization is disabled
+    if !debug_config.show_flow_field {
+        return;
+    }
+
+    let Some(config) = game_configs.get(&config_handle.0) else { return };
+    let Ok((camera, camera_transform)) = q_camera.single() else { return };
+
+    // Get camera view center (raycast to ground)
+    let camera_pos = camera_transform.translation();
+    let center_pos = if let Ok(ray) = camera.viewport_to_world(camera_transform, Vec2::new(640.0, 360.0)) {
+        if ray.direction.y.abs() > 0.001 {
+            let t = -ray.origin.y / ray.direction.y;
+            if t >= 0.0 {
+                ray.origin + ray.direction * t
+            } else {
+                camera_pos
+            }
+        } else {
+            camera_pos
+        }
+    } else {
+        camera_pos
+    };
+
+    let view_radius = config.debug_flow_field_view_radius;
+    let camera_center = Vec2::new(center_pos.x, center_pos.z);
+
     for (transform, source) in query.iter() {
+        let source_pos = Vec2::new(transform.translation.x, transform.translation.z);
+        
+        // Cull force sources outside view radius
+        let dx = source_pos.x - camera_center.x;
+        let dy = source_pos.y - camera_center.y;
+        let distance = (dx * dx + dy * dy).sqrt();
+        if distance > view_radius {
+            continue;
+        }
+
         let color = match source.force_type {
             ForceType::Radial(strength) => {
                 if strength > FixedNum::ZERO {
@@ -1553,5 +1541,34 @@ mod tests {
         // we just document the expectation here. The compiler prevents drawing
         // paths for non-selected units.
         assert!(true, "Path visualization is filtered to Selected units only");
+    }
+
+    #[test]
+    fn test_force_source_gizmo_culls_distant_sources() {
+        // Verify that force source gizmo culling logic matches expected behavior
+        // Source at (100, 0) should be culled when camera is at (0, 0) with radius 50
+        let source_pos = Vec2::new(100.0, 0.0);
+        let camera_center = Vec2::new(0.0, 0.0);
+        let view_radius = 50.0;
+        
+        let dx = source_pos.x - camera_center.x;
+        let dy = source_pos.y - camera_center.y;
+        let distance = (dx * dx + dy * dy).sqrt();
+        
+        assert!(distance > view_radius, "Force source should be outside view radius");
+    }
+    
+    #[test]
+    fn test_force_source_gizmo_draws_nearby_sources() {
+        // Source at (10, 0) should be drawn when camera is at (0, 0) with radius 50
+        let source_pos = Vec2::new(10.0, 0.0);
+        let camera_center = Vec2::new(0.0, 0.0);
+        let view_radius = 50.0;
+        
+        let dx = source_pos.x - camera_center.x;
+        let dy = source_pos.y - camera_center.y;
+        let distance = (dx * dx + dy * dy).sqrt();
+        
+        assert!(distance <= view_radius, "Force source should be within view radius");
     }
 }

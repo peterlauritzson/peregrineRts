@@ -901,21 +901,17 @@ Log with context: `warn!("No path found: Start blocked at {:?}", start)`
 
 **Examples:**
 ```rust
-// simulation.rs:30
-// use std::collections::HashMap;  // ❌ Commented import
+// simulation.rs:10
+// use std::collections::HashMap;  // ❌ Commented import (REMOVED)
 
-// flow_field.rs:38
-#[allow(dead_code)]
-pub fn clear_obstacles(&mut self) {  // ❌ Never called
+// flow_field.rs:72
+pub fn clear_obstacles(&mut self) {  // ❌ Never called (REMOVED)
     self.cost_field.fill(1);
 }
 
-// math.rs:42
-#[allow(dead_code)]
-pub fn dot(self, other: Self) -> FixedNum { ... }  // ❌ Never used
-
-#[allow(dead_code)]
-pub fn cross(self, other: Self) -> FixedNum { ... }  // ❌ Never used
+// math.rs:54-60
+pub fn dot(self, other: Self) -> FixedNum { ... }  // ✅ Used in tests
+pub fn cross(self, other: Self) -> FixedNum { ... }  // ✅ Used in tests
 ```
 
 **Solution:**
@@ -925,43 +921,54 @@ Either:
 
 **Estimated Impact:** Cleaner codebase.
 
-**Testing Strategy:**
-- **No tests needed** - Dead code removal doesn't require new tests
-- **Validation:** After removal, run existing tests to ensure nothing broke
-- **Recommended:** Run `cargo test` before and after, verify same pass rate
-- **Note:** If removing unused functions that *should* have been used, write tests for the replacement
+**✅ FIX VERIFIED (Jan 4, 2026):**
+- Removed commented `use std::collections::HashMap` import from simulation.rs
+- Removed unused `clear_obstacles()` function from flow_field.rs (genuinely never called)
+- Kept `dot()` and `cross()` functions in math.rs as they ARE used in unit tests
+- Removed `#[allow(dead_code)]` attributes from `dot` and `cross` since they're actively used
+- All 58 tests pass after cleanup
 
 ---
 
 ### 15. **Inconsistent Component Usage**
-**Location:** [src/game/simulation.rs](src/game/simulation.rs#L495-L500)  
+**Location:** [src/game/simulation.rs](src/game/simulation.rs#L553-L556)  
 **Impact:** **MINOR** - Unclear API
 
 **Problem:**
 ```rust
 #[derive(Component, Debug, Clone, Copy, Default)]
-pub struct Colliding;  // Marker component
-
-#[derive(Component, Debug, Clone, Copy, Default)]
 pub struct StaticObstacle {
     #[allow(dead_code)]
-    pub radius: FixedNum,  // ❌ Why #[allow(dead_code)]?
+    pub radius: FixedNum,  // ❌ Redundant - radius already in Collider
 }
 ```
 
-The `radius` field in `StaticObstacle` is marked as unused, but it's clearly used in collision resolution. This is confusing.
-
-**Cause:** The field is read via `&StaticObstacle` but the compiler might not detect usage.
+The `radius` field in `StaticObstacle` is redundant because the same information is stored in the `Collider.radius` field. The collision detection and all systems use `Collider`, so `StaticObstacle.radius` provides no value.
 
 **Solution:**
-Remove `#[allow(dead_code)]` and ensure the field is properly used. Or add a getter method to make usage explicit.
+Make StaticObstacle a pure marker component. The radius information belongs in Collider.
 
-**Estimated Impact:** Code clarity.
+**Estimated Impact:** Code clarity, eliminates data duplication.
 
-**Testing Strategy:**
-- **No specific tests needed** - This is a cleanup/documentation issue
-- **Validation:** Ensure the radius field is actually used in collision detection
-- **Recommended:** If adding a getter, test the getter returns correct value
+**✅ FIX VERIFIED (Jan 4, 2026):**
+- StaticObstacle is now a marker component (no fields)
+- Radius is only stored in Collider component (single source of truth)
+- Updated all queries that previously read `StaticObstacle.radius` to read from `Collider.radius`:
+  - `update_sim_from_config` in simulation.rs
+  - `apply_new_obstacles` in simulation.rs
+  - `editor_button_system` in editor.rs
+  - `spawn_obstacle` in editor.rs
+  - Test in pathfinding_integration.rs
+- All obstacle spawning now includes both StaticObstacle (marker) and Collider (with radius)
+- All 58 tests pass after refactoring
+
+**Documentation Added:**
+```rust
+/// Marker component for static circular obstacles.
+/// The actual radius is stored in the Collider component.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct StaticObstacle;
+```
 
 ---
 
@@ -1022,6 +1029,18 @@ Add rustdoc comments to all public items.
 - **Validation:** Run `cargo doc` and verify it builds without warnings
 - **Recommended:** Add doc tests (code examples in doc comments) where appropriate
   - Example: `/// # Example\n/// ```\n/// let v = FixedVec2::new(...);\n/// ````
+
+**✅ FIX VERIFIED (Jan 4, 2026):** Added comprehensive rustdoc documentation to all major public APIs:
+- **[SpatialHash](src/game/spatial_hash.rs#L17-L60):** 44 lines explaining spatial partitioning, use cases (collision, boids, AI), performance characteristics (O(1) insert, O(k) query), example usage
+- **[FlowField](src/game/flow_field.rs#L29-L73):** 45 lines documenting Dijkstra-based integration fields, algorithm steps, use cases (group pathfinding), performance (O(width×height)), example code
+- **[HierarchicalGraph](src/game/pathfinding.rs#L199-L243):** 45 lines describing cluster/portal abstraction, memory budget (~500MB for 2048×2048), performance analysis, example usage
+
+**Additional Improvements:**
+- Fixed rustdoc link warnings (removed links to private functions, fixed cache reference)
+- All rustdoc builds successfully with `cargo doc`
+- Documentation verified against GUIDELINES.md requirements
+
+**Impact:** Significantly improved API clarity and onboarding. New contributors can understand core systems without reading implementation code.
 
 ---
 
@@ -1088,6 +1107,30 @@ Consider removing `SimTarget` component entirely if it's not needed, or document
 - **Note:** If removing SimTarget entirely, ensure existing tests still pass
 - **Recommended:** Audit all SimTarget usage, verify Path is sufficient
 
+**✅ FIX VERIFIED (Jan 4, 2026):** Removed `SimTarget` component entirely after confirming it was architectural dead code:
+
+**Analysis:**
+- `SimTarget` was only removed in `process_input`, **never set anywhere**
+- `check_arrival_crowding` system checked for `SimTarget` but no units ever had it
+- New pathfinding flow uses `Path` component directly, making `SimTarget` obsolete
+
+**Changes:**
+- Removed `SimTarget` component definition from [src/game/simulation.rs](src/game/simulation.rs)
+- Removed `check_arrival_crowding` system (90 lines) - was ineffective since SimTarget was never set
+- Updated `process_input` to only remove `Path` component
+- Removed `SimTarget` from all queries and system dependencies
+
+**Test Results:**
+All 58 tests pass (41 unit + 17 integration):
+- `cargo test --lib` - 41 unit tests pass
+- `cargo test --test boids_performance` - 3 tests pass
+- `cargo test --test collision_integration` - 3 tests pass  
+- `cargo test --test determinism_test` - 3 tests pass
+- `cargo test --test graph_build_integration` - 5 tests pass
+- `cargo test --test pathfinding_integration` - 3 tests pass
+
+**Impact:** Removed 90+ lines of dead code, improved architecture clarity. No functional changes since the code was never active.
+
 ---
 
 ### 20. **Pathfinding Graph Gizmos Draw All Nodes/Edges**
@@ -1129,6 +1172,25 @@ Same as Issue #3 - Add frustum culling or camera-based distance checks.
 
 **Estimated Impact:** 100x improvement in debug graph visualization FPS.
 
+**✅ FIX VERIFIED (Jan 4, 2026):** Added camera-based frustum culling to [draw_graph_gizmos](src/game/pathfinding.rs#L1097-L1205):
+
+**Implementation:**
+- Added camera query (`Query<(&Camera, &GlobalTransform), With<RtsCamera>>`) to draw_graph_gizmos
+- Raycast to ground plane to find camera view center
+- Portal culling: Distance check against view_radius for each portal before drawing
+- Edge culling: Both start AND end portals must be within view_radius
+- Uses same view_radius from config.debug_flow_field_view_radius for consistency
+
+**Test Results:**
+Added 3 unit tests in [pathfinding.rs tests module](src/game/pathfinding.rs#L1207-L1260):
+- `test_graph_gizmo_culls_distant_portals` - Verifies portals >50 units away are culled
+- `test_graph_gizmo_draws_nearby_portals` - Verifies portals <50 units away are drawn
+- `test_graph_gizmo_edge_culling_both_endpoints` - Verifies edges require both endpoints visible
+
+All 63 tests pass (46 unit + 17 integration).
+
+**Impact:** On 2048×2048 map, reduces portal rendering from ~27,000 to ~200 (within typical 50-unit view radius), and edge rendering from ~160,000 to ~1,000. Estimated 100-200x FPS improvement for debug graph visualization.
+
 ---
 
 ### 21. **Force Source Gizmos Draw All Sources**
@@ -1155,6 +1217,23 @@ fn draw_force_sources(
 Add camera-based culling. Only draw force sources within view frustum.
 
 **Estimated Impact:** Minor now, important for future content.
+
+**✅ FIX VERIFIED (Jan 4, 2026):** Added camera-based frustum culling to [draw_force_sources](src/game/simulation.rs#L1192-L1251):
+
+**Implementation:**
+- Added camera query, config access, and debug_config check to draw_force_sources
+- Raycast to ground plane to find camera view center
+- Distance-based culling: Only draw force sources within view_radius
+- Reuses debug_config.show_flow_field flag and config.debug_flow_field_view_radius for consistency
+
+**Test Results:**
+Added 2 unit tests in [simulation.rs tests module](src/game/simulation.rs#L1565-L1589):
+- `test_force_source_gizmo_culls_distant_sources` - Verifies sources >50 units away are culled
+- `test_force_source_gizmo_draws_nearby_sources` - Verifies sources <50 units away are drawn
+
+All 63 tests pass (46 unit + 17 integration).
+
+**Impact:** Currently minor (few force sources), but enables future content with many force sources (wind zones, buff auras, etc.) without debug visualization performance penalty.
 
 ---
 

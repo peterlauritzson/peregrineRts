@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 use peregrine::game::math::{FixedVec2, FixedNum};
-use peregrine::game::simulation::{SimulationPlugin, MapFlowField, SimPosition, SimVelocity, SimAcceleration, Collider, StaticObstacle};
+use peregrine::game::simulation::{SimulationPlugin, MapFlowField, SimPosition, SimVelocity, SimAcceleration, Collider, StaticObstacle, layers};
 use peregrine::game::config::GameConfigPlugin;
 use peregrine::game::pathfinding::{PathfindingPlugin, PathRequest, Path, GraphBuildState, GraphBuildStep};
 use peregrine::game::loading::LoadingProgress;
@@ -310,7 +310,12 @@ fn test_pathfinding_close_target_obstacle() {
     // Spawn obstacle at (5.5, 0.5) with radius 1.5 (covers y=-1 to 2)
     app.world_mut().spawn((
         SimPosition(FixedVec2::new(FixedNum::from_num(5.5), FixedNum::from_num(0.5))),
-        StaticObstacle { radius: FixedNum::from_num(1.5) },
+        StaticObstacle,
+        Collider {
+            radius: FixedNum::from_num(1.5),
+            layer: layers::OBSTACLE,
+            mask: layers::UNIT,
+        },
     ));
 
     // Run update to apply obstacle

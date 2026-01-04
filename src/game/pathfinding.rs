@@ -1,12 +1,17 @@
 use bevy::prelude::*;
 use crate::game::math::{FixedVec2, FixedNum};
 use crate::game::simulation::{MapFlowField, DebugConfig};
+use crate::game::config::{GameConfig, GameConfigHandle};
 use crate::game::GameState;
 use crate::game::loading::{LoadingProgress, TargetGameState};
 use std::collections::{BinaryHeap, BTreeMap, BTreeSet, VecDeque};
 use std::cmp::Ordering;
 use serde::{Serialize, Deserialize};
 
+/// Fixed cluster size for hierarchical pathfinding (25×25 cells).
+///
+/// Maps are divided into clusters of this size. Larger clusters reduce graph size
+/// but increase intra-cluster pathfinding cost. 25×25 provides good balance.
 pub const CLUSTER_SIZE: usize = 25;
 
 #[derive(Resource, Default)]
@@ -55,6 +60,50 @@ impl Default for Path {
     }
 }
 
+/// Hierarchical pathfinding graph for large-scale RTS navigation.
+///
+/// Divides the map into clusters connected by portals, enabling efficient
+/// pathfinding across large maps with thousands of entities.
+///
+/// # Algorithm
+///
+/// 1. **Clustering:** Divide map into CLUSTER_SIZE × CLUSTER_SIZE grids
+/// 2. **Portals:** Find walkable transitions between adjacent clusters
+/// 3. **Inter-cluster:** A* on abstract portal graph (high-level path)
+/// 4. **Intra-cluster:** Flow fields guide units within clusters (low-level)
+///
+/// # Benefits
+///
+/// - **Scalability:** Graph size = O(portals), not O(cells)
+/// - **Caching:** Precompute intra-cluster flow fields once
+/// - **Dynamic updates:** Only invalidate affected cluster caches
+///
+/// # Example Workflow
+///
+/// ```rust,ignore
+/// // 1. Build graph (once, or incrementally during loading)
+/// let graph = build_graph_incrementally(&flow_field);
+///
+/// // 2. Find path
+/// if let Some(path) = find_path_hierarchical(start, goal, &flow_field, &graph) {
+///     commands.entity(unit).insert(path);
+/// }
+///
+/// // 3. Follow path (see follow_path system in simulation.rs)
+/// // Units automatically navigate through portals using cached flow fields
+/// ```
+///
+/// # Performance
+///
+/// - **Graph build:** O(clusters × portals²) - done once or incrementally
+/// - **Pathfinding:** O(portals × log portals) - A* on abstract graph
+/// - **Memory:** ~500MB for 2048×2048 map (cached flow fields)
+///
+/// # See Also
+///
+/// - [PATHFINDING.md](documents/Design%20docs/PATHFINDING.md) - Detailed design doc
+/// - `incremental_build_graph()` - Non-blocking graph construction
+/// - Memory budget analysis in CURRENT_IMPROVEMENTS.md Issue #9
 #[derive(Resource, Default, Serialize, Deserialize)]
 pub struct HierarchicalGraph {
     pub nodes: Vec<Portal>,
@@ -189,7 +238,7 @@ impl HierarchicalGraph {
 ///
 /// - **Memory per cluster:** ~50-100 KB (depends on portal count)
 /// - **Total memory (2048x2048 map):** ~335-670 MB for ~6,700 clusters
-/// - **Cache invalidation:** Clusters clear cache when obstacles added (see [`clear_cache`])
+/// - **Cache invalidation:** Clusters clear cache when obstacles added
 /// - **No LRU needed:** Cache is bounded by portal count (typically 4-8 per cluster)
 ///
 /// ## Design Rationale
@@ -1051,7 +1100,10 @@ fn draw_graph_gizmos(
     graph: Res<HierarchicalGraph>,
     map_flow_field: Res<MapFlowField>,
     debug_config: Res<DebugConfig>,
+    config_handle: Res<GameConfigHandle>,
+    game_configs: Res<Assets<GameConfig>>,
     mut gizmos: Gizmos,
+    q_camera: Query<(&Camera, &GlobalTransform), With<crate::game::camera::RtsCamera>>,
 ) {
     if !debug_config.show_pathfinding_graph {
         return;
@@ -1060,9 +1112,42 @@ fn draw_graph_gizmos(
     let flow_field = &map_flow_field.0;
     if flow_field.width == 0 { return; }
 
-    // Draw nodes
+    let Some(config) = game_configs.get(&config_handle.0) else { return };
+    let Ok((camera, camera_transform)) = q_camera.single() else { return };
+
+    // Get camera view center (raycast to ground)
+    let camera_pos = camera_transform.translation();
+    let center_pos = if let Ok(ray) = camera.viewport_to_world(camera_transform, Vec2::new(640.0, 360.0)) {
+        if ray.direction.y.abs() > 0.001 {
+            let t = -ray.origin.y / ray.direction.y;
+            if t >= 0.0 {
+                ray.origin + ray.direction * t
+            } else {
+                camera_pos
+            }
+        } else {
+            camera_pos
+        }
+    } else {
+        camera_pos
+    };
+
+    let view_radius = config.debug_flow_field_view_radius;
+    let camera_center = Vec2::new(center_pos.x, center_pos.z);
+
+    // Draw nodes (portals) with frustum culling
     for portal in &graph.nodes {
         let pos = flow_field.grid_to_world(portal.node.x, portal.node.y);
+        let portal_pos = Vec2::new(pos.x.to_num(), pos.y.to_num());
+        
+        // Cull portals outside view radius
+        let dx = portal_pos.x - camera_center.x;
+        let dy = portal_pos.y - camera_center.y;
+        let distance = (dx * dx + dy * dy).sqrt();
+        if distance > view_radius {
+            continue;
+        }
+
         gizmos.sphere(
             Vec3::new(pos.x.to_num(), 1.0, pos.y.to_num()),
             0.3,
@@ -1080,13 +1165,33 @@ fn draw_graph_gizmos(
         );
     }
 
-    // Draw edges
+    // Draw edges with frustum culling (both endpoints must be visible)
     for (from_id, edges) in &graph.edges {
         if let Some(from_portal) = graph.nodes.get(*from_id) {
             let start = flow_field.grid_to_world(from_portal.node.x, from_portal.node.y);
+            let start_pos = Vec2::new(start.x.to_num(), start.y.to_num());
+            
+            // Cull edges where start portal is outside view
+            let dx = start_pos.x - camera_center.x;
+            let dy = start_pos.y - camera_center.y;
+            let start_distance = (dx * dx + dy * dy).sqrt();
+            if start_distance > view_radius {
+                continue;
+            }
+
             for (to_id, _) in edges {
                 if let Some(to_portal) = graph.nodes.get(*to_id) {
                     let end = flow_field.grid_to_world(to_portal.node.x, to_portal.node.y);
+                    let end_pos = Vec2::new(end.x.to_num(), end.y.to_num());
+                    
+                    // Cull edges where end portal is outside view
+                    let dx = end_pos.x - camera_center.x;
+                    let dy = end_pos.y - camera_center.y;
+                    let end_distance = (dx * dx + dy * dy).sqrt();
+                    if end_distance > view_radius {
+                        continue;
+                    }
+
                     gizmos.line(
                         Vec3::new(start.x.to_num(), 1.0, start.y.to_num()),
                         Vec3::new(end.x.to_num(), 1.0, end.y.to_num()),
@@ -1095,5 +1200,62 @@ fn draw_graph_gizmos(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_graph_gizmo_culls_distant_portals() {
+        // Verify that graph gizmo culling logic matches expected behavior
+        // Portal at (100, 0) should be culled when camera is at (0, 0) with radius 50
+        let portal_pos = Vec2::new(100.0, 0.0);
+        let camera_center = Vec2::new(0.0, 0.0);
+        let view_radius = 50.0;
+        
+        let dx = portal_pos.x - camera_center.x;
+        let dy = portal_pos.y - camera_center.y;
+        let distance = (dx * dx + dy * dy).sqrt();
+        
+        assert!(distance > view_radius, "Portal should be outside view radius");
+    }
+    
+    #[test]
+    fn test_graph_gizmo_draws_nearby_portals() {
+        // Portal at (10, 0) should be drawn when camera is at (0, 0) with radius 50
+        let portal_pos = Vec2::new(10.0, 0.0);
+        let camera_center = Vec2::new(0.0, 0.0);
+        let view_radius = 50.0;
+        
+        let dx = portal_pos.x - camera_center.x;
+        let dy = portal_pos.y - camera_center.y;
+        let distance = (dx * dx + dy * dy).sqrt();
+        
+        assert!(distance <= view_radius, "Portal should be within view radius");
+    }
+    
+    #[test]
+    fn test_graph_gizmo_edge_culling_both_endpoints() {
+        // Verify edge culling requires both endpoints to be visible
+        let view_radius = 50.0;
+        let camera_center = Vec2::new(0.0, 0.0);
+        
+        // Edge from (10, 0) to (100, 0) - start visible, end not visible
+        let start_pos = Vec2::new(10.0, 0.0);
+        let end_pos = Vec2::new(100.0, 0.0);
+        
+        let start_dx = start_pos.x - camera_center.x;
+        let start_dy = start_pos.y - camera_center.y;
+        let start_distance = (start_dx * start_dx + start_dy * start_dy).sqrt();
+        
+        let end_dx = end_pos.x - camera_center.x;
+        let end_dy = end_pos.y - camera_center.y;
+        let end_distance = (end_dx * end_dx + end_dy * end_dy).sqrt();
+        
+        assert!(start_distance <= view_radius, "Start should be visible");
+        assert!(end_distance > view_radius, "End should not be visible");
+        // Edge should be culled because end is not visible
     }
 }

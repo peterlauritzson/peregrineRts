@@ -270,7 +270,7 @@ fn editor_button_system(
     mut commands: Commands,
     mut editor_state: ResMut<EditorState>,
     obstacle_query: Query<Entity, With<StaticObstacle>>,
-    all_obstacles_query: Query<(&SimPosition, &StaticObstacle)>,
+    all_obstacles_query: Query<(&SimPosition, &Collider), With<StaticObstacle>>,
     _editor_resources: Res<EditorResources>,
     mut map_flow_field: ResMut<MapFlowField>,
     config_handle: Res<GameConfigHandle>,
@@ -343,8 +343,8 @@ fn editor_button_system(
                         use crate::game::simulation::apply_obstacle_to_flow_field;
                         let flow_field = &mut map_flow_field.0;
                         flow_field.cost_field.fill(1);
-                        for (pos, obs) in all_obstacles_query.iter() {
-                            apply_obstacle_to_flow_field(flow_field, pos.0, obs.radius);
+                        for (pos, collider) in all_obstacles_query.iter() {
+                            apply_obstacle_to_flow_field(flow_field, pos.0, collider.radius);
                         }
                         
                         // Reset Graph Build State to trigger incremental build
@@ -353,10 +353,10 @@ fn editor_button_system(
                     }
                     EditorButtonAction::SaveMap => {
                         let mut obstacles = Vec::new();
-                        for (pos, obs) in all_obstacles_query.iter() {
+                        for (pos, collider) in all_obstacles_query.iter() {
                             obstacles.push(MapObstacle {
                                 position: pos.0,
-                                radius: obs.radius,
+                                radius: collider.radius,
                             });
                         }
                         
@@ -524,7 +524,7 @@ fn handle_editor_input(
 
 fn spawn_obstacle(commands: &mut Commands, position: FixedVec2, radius: FixedNum, resources: &EditorResources) {
     commands.spawn((
-        StaticObstacle { radius },
+        StaticObstacle,
         SimPosition(position),
         Collider {
             radius,
