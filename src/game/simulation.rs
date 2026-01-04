@@ -216,7 +216,8 @@ impl Plugin for SimulationPlugin {
 
         // Register Systems
         app.add_systems(Startup, init_flow_field);
-        app.add_systems(Update, (update_sim_from_config, apply_new_obstacles, toggle_debug, draw_flow_field_gizmos, draw_force_sources, draw_unit_paths).run_if(in_state(GameState::InGame).or(in_state(GameState::Editor)).or(in_state(GameState::Loading))));
+        app.add_systems(Update, (update_sim_from_config, toggle_debug, draw_flow_field_gizmos, draw_force_sources, draw_unit_paths).run_if(in_state(GameState::InGame).or(in_state(GameState::Editor)).or(in_state(GameState::Loading))));
+        app.add_systems(Update, apply_new_obstacles.run_if(in_state(GameState::InGame).or(in_state(GameState::Loading))));
         app.add_systems(FixedUpdate, (
             sim_start.before(SimSet::Input),
             cache_previous_state.in_set(SimSet::Input),
@@ -787,7 +788,7 @@ fn init_flow_field(
     map_flow_field.0 = FlowField::new(width, height, cell_size, origin);
 }
 
-fn apply_obstacle_to_flow_field(flow_field: &mut FlowField, pos: FixedVec2, radius: FixedNum) {
+pub fn apply_obstacle_to_flow_field(flow_field: &mut FlowField, pos: FixedVec2, radius: FixedNum) {
     // Rasterize circle
     // Even if center is outside, part of it might be inside.
     // But world_to_grid returns None if outside.

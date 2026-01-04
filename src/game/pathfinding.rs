@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use crate::game::math::{FixedVec2, FixedNum};
 use crate::game::simulation::{MapFlowField, DebugConfig};
 use crate::game::GameState;
-use crate::game::loading::LoadingProgress;
+use crate::game::loading::{LoadingProgress, TargetGameState};
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::cmp::Ordering;
 use serde::{Serialize, Deserialize};
@@ -21,13 +21,13 @@ pub struct GraphBuildState {
 #[derive(Default, PartialEq, Eq, Debug, Clone, Copy)]
 pub enum GraphBuildStep {
     #[default]
+    Done,
     NotStarted,
     InitializingClusters,
     FindingVerticalPortals,
     FindingHorizontalPortals,
     ConnectingIntraCluster,
     PrecomputingFlowFields,
-    Done,
 }
 
 #[derive(Event, Message, Debug, Clone)]
@@ -115,9 +115,34 @@ impl Plugin for PathfindingPlugin {
         app.add_message::<PathRequest>();
         app.init_resource::<HierarchicalGraph>();
         app.init_resource::<GraphBuildState>();
-        app.add_systems(Update, (build_graph, draw_graph_gizmos).run_if(in_state(GameState::InGame).or(in_state(GameState::Editor))));
+        app.add_systems(Update, (build_graph, draw_graph_gizmos).run_if(in_state(GameState::InGame)));
         app.add_systems(FixedUpdate, process_path_requests.run_if(in_state(GameState::InGame).or(in_state(GameState::Editor))));
-        app.add_systems(Update, incremental_build_graph.run_if(in_state(GameState::Loading)));
+        app.add_systems(Update, incremental_build_graph.run_if(in_state(GameState::Loading).or(in_state(GameState::Editor))));
+        app.add_systems(OnEnter(GameState::Loading), start_graph_build);
+    }
+}
+
+fn start_graph_build(
+    mut build_state: ResMut<GraphBuildState>,
+    graph: Res<HierarchicalGraph>,
+    mut loading_progress: ResMut<LoadingProgress>,
+    target_state: Option<Res<TargetGameState>>,
+) {
+    // If we are going to the editor, don't build the graph automatically
+    if let Some(target) = target_state {
+        if target.0 == GameState::Editor {
+            loading_progress.progress = 1.0;
+            loading_progress.task = "Done".to_string();
+            build_state.step = GraphBuildStep::Done;
+            return;
+        }
+    }
+
+    if !graph.initialized {
+        build_state.step = GraphBuildStep::NotStarted;
+    } else {
+        loading_progress.progress = 1.0;
+        loading_progress.task = "Done".to_string();
     }
 }
 
@@ -713,6 +738,10 @@ fn process_path_requests(
     map_flow_field: Res<MapFlowField>,
     graph: Res<HierarchicalGraph>,
 ) {
+    if path_requests.is_empty() {
+        return;
+    }
+
     let flow_field = &map_flow_field.0;
     if flow_field.width == 0 {
         warn!("Flow field empty");

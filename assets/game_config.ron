@@ -55,4 +55,12 @@
     cohesion_weight: 1.0,
     neighbor_radius: 5.0,
     separation_radius: 1.5,
+
+    // Editor
+    editor_num_obstacles: 50,
+    editor_obstacle_min_radius: 10.0,
+    editor_obstacle_max_radius: 50.0,
+    editor_default_obstacle_radius: 20.0,
+    editor_map_size_x: 2048.0,
+    editor_map_size_y: 2048.0,
 )

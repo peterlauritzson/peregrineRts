@@ -61,6 +61,14 @@ pub struct GameConfig {
     pub cohesion_weight: f32,
     pub neighbor_radius: f32,
     pub separation_radius: f32,
+
+    // Editor
+    pub editor_num_obstacles: usize,
+    pub editor_obstacle_min_radius: f32,
+    pub editor_obstacle_max_radius: f32,
+    pub editor_default_obstacle_radius: f32,
+    pub editor_map_size_x: f32,
+    pub editor_map_size_y: f32,
 }
 
 #[derive(Resource)]
