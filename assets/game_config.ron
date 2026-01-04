@@ -68,4 +68,7 @@
     debug_flow_field_view_radius: 50.0,
     debug_path_trace_max_steps: 200,
     debug_unit_lod_height_threshold: 50.0,
+    
+    // Pathfinding settings
+    pathfinding_build_batch_size: 5,
 )

@@ -729,6 +729,25 @@ Add these to `GameConfig`:
 - **Smoke Test:** Load game, verify all features still work with values from config
 - **Recommended:** Add config validation on load to catch typos/invalid values early
 
+**✅ FIX VERIFIED (Jan 4, 2026):** All hardcoded magic numbers have been moved to configuration.
+
+**Changes Made:**
+1. **pathfinding_build_batch_size** added to GameConfig ([src/game/config.rs](src/game/config.rs#L79))
+   - Default value: 5 (in [assets/game_config.ron](assets/game_config.ron#L71))
+   - Used in [src/game/pathfinding.rs](src/game/pathfinding.rs#L969, src/game/pathfinding.rs#L983)
+   - Controls how many clusters are processed per frame during incremental graph build
+
+**Already Using Config:**
+- `debug_flow_field_view_radius` - Used in draw_flow_field_gizmos
+- `debug_path_trace_max_steps` - Used in draw_unit_paths
+- `debug_unit_lod_height_threshold` - Used in unit rendering
+
+**Remaining Hardcoded Values (Acceptable):**
+- Test constants (view_radius = 50.0 in unit tests) - These are test fixtures, not production code
+- Stress test values (map_size, spread) - Deliberate test scenario parameters
+
+**Impact:** All tunable gameplay and debug visualization values are now in game_config.ron. Developers and players can modify these without recompiling. Adheres to architecture guidelines.
+
 ---
 
 ### 12. **Missing Unit Tests**
@@ -809,6 +828,20 @@ This issue IS about adding tests. Here's the comprehensive test plan:
 - `test_boids_alignment_force()`
 - `test_boids_cohesion_force()`
 - `test_boids_neighbor_filtering()`
+
+**✅ PARTIALLY ADDRESSED (Jan 4, 2026):** Comprehensive unit tests added for foundational math module.
+
+**Tests Added (18 tests):**
+- **math.rs** ([src/game/math.rs](src/game/math.rs#L100-L256)): 18 comprehensive tests for FixedVec2
+  - All arithmetic operations (add, sub, mul, div, neg)
+  - Vector operations (length, length_squared, normalize)
+  - Geometric operations (dot product, cross product)
+  - Conversion operations (from_f32, to_vec2)
+  - Edge cases (zero vector, normalization, perpendicular/parallel vectors)
+
+**Impact:** Math foundation is now thoroughly tested. Remaining modules (flow_field, etc.) have tests in their respective integration test files but lack dedicated unit test modules. The most critical operations now have test coverage.
+
+**Note:** While full coverage as described in the original issue is not complete, the addition of 18 math tests brings total test count to 58 (40 integration + 18 unit). Further unit test expansion should be prioritized based on actual bugs encountered rather than theoretical coverage.
 
 ---
 
@@ -1015,6 +1048,8 @@ edition = "2021"
 - **No tests needed** - Build system configuration
 - **Validation:** Run `cargo build` after fix, verify it compiles
 - **Note:** This should be the FIRST fix as it might block other work
+
+**✅ FIX VERIFIED (Jan 4, 2026):** [Cargo.toml](Cargo.toml#L4) edition changed from "2024" to "2021". Build verified with `cargo build` - compiles successfully with no errors. All 58 tests continue to pass after this fix.
 
 ---
 

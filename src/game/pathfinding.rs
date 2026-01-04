@@ -848,7 +848,10 @@ fn incremental_build_graph(
     map_flow_field: Res<MapFlowField>,
     mut build_state: ResMut<GraphBuildState>,
     mut loading_progress: ResMut<LoadingProgress>,
+    config_handle: Res<crate::game::config::GameConfigHandle>,
+    game_configs: Res<Assets<crate::game::config::GameConfig>>,
 ) {
+    let Some(config) = game_configs.get(&config_handle.0) else { return; };
     let flow_field = &map_flow_field.0;
     if flow_field.width == 0 { return; }
 
@@ -964,7 +967,7 @@ fn incremental_build_graph(
         }
         GraphBuildStep::ConnectingIntraCluster => {
             loading_progress.task = "Connecting Intra-Cluster...".to_string();
-            let batch_size = 5; 
+            let batch_size = config.pathfinding_build_batch_size;
             for _ in 0..batch_size {
                 if build_state.current_cluster_idx < build_state.cluster_keys.len() {
                     let key = build_state.cluster_keys[build_state.current_cluster_idx];
@@ -980,7 +983,7 @@ fn incremental_build_graph(
         }
         GraphBuildStep::PrecomputingFlowFields => {
             loading_progress.task = "Precomputing Flow Fields...".to_string();
-            let batch_size = 5;
+            let batch_size = config.pathfinding_build_batch_size;
             for _ in 0..batch_size {
                 if build_state.current_cluster_idx < build_state.cluster_keys.len() {
                     let key = build_state.cluster_keys[build_state.current_cluster_idx];

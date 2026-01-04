@@ -74,6 +74,9 @@ pub struct GameConfig {
     pub debug_flow_field_view_radius: f32,
     pub debug_path_trace_max_steps: usize,
     pub debug_unit_lod_height_threshold: f32,
+    
+    // Pathfinding settings
+    pub pathfinding_build_batch_size: usize,
 }
 
 #[derive(Resource)]
