@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 mod camera;
-mod unit;
+pub mod unit;  // Made public for test access to Unit component
 mod control;
 pub mod simulation;
 pub mod config;
@@ -13,7 +13,7 @@ pub mod stress_test;
 pub mod map;
 mod menu;
 mod hud;
-mod loading;
+pub mod loading;  // Made public for test access to LoadingProgress
 mod editor;
 
 use camera::RtsCameraPlugin;

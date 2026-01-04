@@ -69,6 +69,11 @@ pub struct GameConfig {
     pub editor_default_obstacle_radius: f32,
     pub editor_map_size_x: f32,
     pub editor_map_size_y: f32,
+    
+    // Debug visualization settings
+    pub debug_flow_field_view_radius: f32,
+    pub debug_path_trace_max_steps: usize,
+    pub debug_unit_lod_height_threshold: f32,
 }
 
 #[derive(Resource)]

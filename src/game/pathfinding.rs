@@ -3,7 +3,7 @@ use crate::game::math::{FixedVec2, FixedNum};
 use crate::game::simulation::{MapFlowField, DebugConfig};
 use crate::game::GameState;
 use crate::game::loading::{LoadingProgress, TargetGameState};
-use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+use std::collections::{BinaryHeap, BTreeMap, BTreeSet, VecDeque};
 use std::cmp::Ordering;
 use serde::{Serialize, Deserialize};
 
@@ -58,8 +58,8 @@ impl Default for Path {
 #[derive(Resource, Default, Serialize, Deserialize)]
 pub struct HierarchicalGraph {
     pub nodes: Vec<Portal>,
-    pub edges: HashMap<usize, Vec<(usize, FixedNum)>>, // PortalId -> [(TargetPortalId, Cost)]
-    pub clusters: HashMap<(usize, usize), Cluster>,
+    pub edges: BTreeMap<usize, Vec<(usize, FixedNum)>>, // PortalId -> [(TargetPortalId, Cost)]
+    pub clusters: BTreeMap<(usize, usize), Cluster>,
     pub initialized: bool,
 }
 
@@ -76,13 +76,161 @@ impl HierarchicalGraph {
             cluster.clear_cache();
         }
     }
+
+    /// Synchronous graph build for testing. In production, use the incremental build system.
+    pub fn build_graph_sync(&mut self, flow_field: &crate::game::flow_field::FlowField) {
+        self.reset();
+        
+        if flow_field.width == 0 || flow_field.height == 0 {
+            return;
+        }
+
+        let width_clusters = (flow_field.width + CLUSTER_SIZE - 1) / CLUSTER_SIZE;
+        let height_clusters = (flow_field.height + CLUSTER_SIZE - 1) / CLUSTER_SIZE;
+
+        // Create clusters
+        for cy in 0..height_clusters {
+            for cx in 0..width_clusters {
+                self.clusters.insert((cx, cy), Cluster {
+                    id: (cx, cy),
+                    portals: Vec::new(),
+                    flow_field_cache: BTreeMap::new(),
+                });
+            }
+        }
+
+        // Vertical portals
+        for cy in 0..height_clusters {
+            for cx in 0..width_clusters.saturating_sub(1) {
+                let min_y = cy * CLUSTER_SIZE;
+                let max_y = ((cy + 1) * CLUSTER_SIZE).min(flow_field.height);
+                let x1 = (cx + 1) * CLUSTER_SIZE - 1;
+                let x2 = (cx + 1) * CLUSTER_SIZE;
+                
+                if x2 >= flow_field.width { continue; }
+                
+                let mut start_segment = None;
+                for y in min_y..max_y {
+                    let idx1 = flow_field.get_index(x1, y);
+                    let idx2 = flow_field.get_index(x2, y);
+                    let walkable = flow_field.cost_field[idx1] != 255 && flow_field.cost_field[idx2] != 255;
+
+                    if walkable {
+                        if start_segment.is_none() {
+                            start_segment = Some(y);
+                        }
+                    } else {
+                        if let Some(sy) = start_segment {
+                            create_portal_vertical(self, x1, x2, sy, y - 1, cx, cy, cx + 1, cy);
+                            start_segment = None;
+                        }
+                    }
+                }
+                if let Some(sy) = start_segment {
+                    create_portal_vertical(self, x1, x2, sy, max_y - 1, cx, cy, cx + 1, cy);
+                }
+            }
+        }
+
+        // Horizontal portals
+        for cx in 0..width_clusters {
+            for cy in 0..height_clusters.saturating_sub(1) {
+                let min_x = cx * CLUSTER_SIZE;
+                let max_x = ((cx + 1) * CLUSTER_SIZE).min(flow_field.width);
+                let y1 = (cy + 1) * CLUSTER_SIZE - 1;
+                let y2 = (cy + 1) * CLUSTER_SIZE;
+                
+                if y2 >= flow_field.height { continue; }
+                
+                let mut start_segment = None;
+                for x in min_x..max_x {
+                    let idx1 = flow_field.get_index(x, y1);
+                    let idx2 = flow_field.get_index(x, y2);
+                    let walkable = flow_field.cost_field[idx1] != 255 && flow_field.cost_field[idx2] != 255;
+
+                    if walkable {
+                        if start_segment.is_none() {
+                            start_segment = Some(x);
+                        }
+                    } else {
+                        if let Some(sx) = start_segment {
+                            create_portal_horizontal(self, sx, x - 1, y1, y2, cx, cy, cx, cy + 1);
+                            start_segment = None;
+                        }
+                    }
+                }
+                if let Some(sx) = start_segment {
+                    create_portal_horizontal(self, sx, max_x - 1, y1, y2, cx, cy, cx, cy + 1);
+                }
+            }
+        }
+
+        // Connect intra-cluster
+        let cluster_keys: Vec<_> = self.clusters.keys().cloned().collect();
+        for key in &cluster_keys {
+            connect_intra_cluster(self, flow_field, *key);
+        }
+
+        // Precompute flow fields
+        for key in &cluster_keys {
+            precompute_flow_fields_for_cluster(self, flow_field, *key);
+        }
+
+        self.initialized = true;
+    }
 }
 
+/// Represents a spatial cluster in the hierarchical pathfinding graph.
+///
+/// # Flow Field Cache Memory Budget
+///
+/// Each cluster precomputes and caches flow fields for ALL its portals during graph build.
+/// This is a **bounded, eager-caching** strategy:
+///
+/// - **Memory per cluster:** ~50-100 KB (depends on portal count)
+/// - **Total memory (2048x2048 map):** ~335-670 MB for ~6,700 clusters
+/// - **Cache invalidation:** Clusters clear cache when obstacles added (see [`clear_cache`])
+/// - **No LRU needed:** Cache is bounded by portal count (typically 4-8 per cluster)
+///
+/// ## Design Rationale
+///
+/// **Why precompute everything?**
+/// - Flow field generation is expensive (A* + integration field construction)
+/// - Portals are fixed after graph build (don't change during gameplay)
+/// - Cache hit rate would be ~100% for typical RTS gameplay
+/// - Avoids runtime cache misses and LRU overhead
+///
+/// **When does memory grow?**
+/// - Only during graph build (one-time cost)
+/// - Never grows during gameplay (portal count is fixed)
+/// - Cleared and rebuilt when obstacles added (see Issue #10)
+///
+/// **Alternative considered:** LRU cache with capacity limit
+/// - **Rejected because:** Would add complexity without benefit
+/// - Flow fields are needed repeatedly (units path through same clusters)
+/// - Cache eviction would cause expensive regeneration mid-game
+/// - Memory budget is acceptable for target hardware (< 1 GB total)
+///
+/// ## Memory Breakdown
+///
+/// For a 2048x2048 map with 25x25 cluster size:
+/// - Clusters: 82 × 82 = 6,724
+/// - Portals per cluster: ~4-8 (average ~6)
+/// - Flow field size: 625 vectors (16 bytes) + 625 u32s (4 bytes) = 12.5 KB
+/// - Memory per cluster: 6 portals × 12.5 KB = 75 KB
+/// - **Total cache memory: 6,724 × 75 KB ≈ 504 MB**
+///
+/// This is acceptable given:
+/// - Modern systems have 8+ GB RAM
+/// - Game targets large-scale RTS (10M units)
+/// - Memory budget prioritizes performance over minimal footprint
+///
+/// See also: [PATHFINDING.md](documents/Design%20docs/PATHFINDING.md) - Hierarchical pathfinding design
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Cluster {
     pub id: (usize, usize),
     pub portals: Vec<usize>,
-    pub flow_field_cache: HashMap<usize, LocalFlowField>,
+    pub flow_field_cache: BTreeMap<usize, LocalFlowField>,
 }
 
 impl Cluster {
@@ -115,7 +263,8 @@ impl Plugin for PathfindingPlugin {
         app.add_message::<PathRequest>();
         app.init_resource::<HierarchicalGraph>();
         app.init_resource::<GraphBuildState>();
-        app.add_systems(Update, (build_graph, draw_graph_gizmos).run_if(in_state(GameState::InGame)));
+        // Removed synchronous build_graph system that froze the game for 10+ seconds on large maps
+        app.add_systems(Update, (draw_graph_gizmos).run_if(in_state(GameState::InGame)));
         app.add_systems(FixedUpdate, process_path_requests.run_if(in_state(GameState::InGame).or(in_state(GameState::Editor))));
         app.add_systems(Update, incremental_build_graph.run_if(in_state(GameState::Loading).or(in_state(GameState::Editor))));
         app.add_systems(OnEnter(GameState::Loading), start_graph_build);
@@ -146,7 +295,7 @@ fn start_graph_build(
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct Node {
     pub x: usize,
     pub y: usize,
@@ -172,150 +321,8 @@ impl PartialOrd for State {
     }
 }
 
-fn build_graph(
-    mut graph: ResMut<HierarchicalGraph>,
-    map_flow_field: Res<MapFlowField>,
-) {
-    if graph.initialized {
-        return;
-    }
-    let flow_field = &map_flow_field.0;
-    if flow_field.width == 0 { return; }
-
-    info!("Building Hierarchical Graph...");
-    
-    let width_clusters = (flow_field.width + CLUSTER_SIZE - 1) / CLUSTER_SIZE;
-    let height_clusters = (flow_field.height + CLUSTER_SIZE - 1) / CLUSTER_SIZE;
-
-    // Initialize clusters
-    for cy in 0..height_clusters {
-        for cx in 0..width_clusters {
-            graph.clusters.insert((cx, cy), Cluster {
-                id: (cx, cy),
-                portals: Vec::new(),
-                flow_field_cache: HashMap::new(),
-            });
-        }
-    }
-
-    // 1. Find Portals (Inter-cluster edges)
-    
-    // Vertical edges (Right neighbors)
-    for cx in 0..width_clusters - 1 {
-        for cy in 0..height_clusters {
-            let x1 = (cx + 1) * CLUSTER_SIZE - 1;
-            let x2 = x1 + 1;
-            
-            if x2 >= flow_field.width { continue; }
-
-            let start_y = cy * CLUSTER_SIZE;
-            let end_y = ((cy + 1) * CLUSTER_SIZE).min(flow_field.height);
-            
-            let mut start_segment = None;
-            
-            for y in start_y..end_y {
-                let idx1 = flow_field.get_index(x1, y);
-                let idx2 = flow_field.get_index(x2, y);
-                let walkable = flow_field.cost_field[idx1] != 255 && flow_field.cost_field[idx2] != 255;
-                
-                if walkable {
-                    if start_segment.is_none() {
-                        start_segment = Some(y);
-                    }
-                } else {
-                    if let Some(sy) = start_segment {
-                        create_portal_vertical(&mut graph, x1, x2, sy, y - 1, cx, cy, cx + 1, cy);
-                        start_segment = None;
-                    }
-                }
-            }
-            if let Some(sy) = start_segment {
-                 create_portal_vertical(&mut graph, x1, x2, sy, end_y - 1, cx, cy, cx + 1, cy);
-            }
-        }
-    }
-
-    // Horizontal edges (Down neighbors)
-    for cx in 0..width_clusters {
-        for cy in 0..height_clusters - 1 {
-            let y1 = (cy + 1) * CLUSTER_SIZE - 1;
-            let y2 = y1 + 1;
-
-            if y2 >= flow_field.height { continue; }
-
-            let start_x = cx * CLUSTER_SIZE;
-            let end_x = ((cx + 1) * CLUSTER_SIZE).min(flow_field.width);
-
-            let mut start_segment = None;
-
-            for x in start_x..end_x {
-                let idx1 = flow_field.get_index(x, y1);
-                let idx2 = flow_field.get_index(x, y2);
-                let walkable = flow_field.cost_field[idx1] != 255 && flow_field.cost_field[idx2] != 255;
-
-                if walkable {
-                    if start_segment.is_none() {
-                        start_segment = Some(x);
-                    }
-                } else {
-                    if let Some(sx) = start_segment {
-                        create_portal_horizontal(&mut graph, sx, x - 1, y1, y2, cx, cy, cx, cy + 1);
-                        start_segment = None;
-                    }
-                }
-            }
-            if let Some(sx) = start_segment {
-                create_portal_horizontal(&mut graph, sx, end_x - 1, y1, y2, cx, cy, cx, cy + 1);
-            }
-        }
-    }
-
-    // 2. Intra-Cluster Edges
-    let cluster_keys: Vec<(usize, usize)> = graph.clusters.keys().cloned().collect();
-
-    for key in cluster_keys {
-        let portals = graph.clusters[&key].portals.clone();
-        let (cx, cy) = key;
-        
-        let min_x = cx * CLUSTER_SIZE;
-        let max_x = ((cx + 1) * CLUSTER_SIZE).min(flow_field.width) - 1;
-        let min_y = cy * CLUSTER_SIZE;
-        let max_y = ((cy + 1) * CLUSTER_SIZE).min(flow_field.height) - 1;
-
-        for i in 0..portals.len() {
-            for j in i+1..portals.len() {
-                let id1 = portals[i];
-                let id2 = portals[j];
-                let node1 = graph.nodes[id1].node;
-                let node2 = graph.nodes[id2].node;
-
-                if let Some(path) = find_path_astar_local(node1, node2, flow_field, min_x, max_x, min_y, max_y) {
-                    let cost = FixedNum::from_num(path.len() as f64);
-                    graph.edges.entry(id1).or_default().push((id2, cost));
-                    graph.edges.entry(id2).or_default().push((id1, cost));
-                }
-            }
-        }
-    }
-
-    // 3. Precompute Flow Fields
-    info!("Precomputing Flow Fields...");
-    let cluster_keys: Vec<(usize, usize)> = graph.clusters.keys().cloned().collect();
-    for key in cluster_keys {
-        let portals = graph.clusters[&key].portals.clone();
-        for portal_id in portals {
-            if let Some(portal) = graph.nodes.get(portal_id).cloned() {
-                let field = generate_local_flow_field(key, &portal, flow_field);
-                if let Some(cluster) = graph.clusters.get_mut(&key) {
-                    cluster.flow_field_cache.insert(portal_id, field);
-                }
-            }
-        }
-    }
-
-    graph.initialized = true;
-    info!("Hierarchical Graph Built. Nodes: {}, Edges: {}", graph.nodes.len(), graph.edges.values().map(|v| v.len()).sum::<usize>());
-}
+// Synchronous build_graph function removed - use incremental_build_graph instead
+// The old build_graph would freeze the game for 10+ seconds on large maps
 
 impl Cluster {
     pub fn get_flow_field(
@@ -604,8 +611,8 @@ fn find_path_hierarchical(
     }
 
     let mut open_set = BinaryHeap::new();
-    let mut came_from: HashMap<usize, usize> = HashMap::new();
-    let mut g_score: HashMap<usize, FixedNum> = HashMap::new();
+    let mut came_from: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut g_score: BTreeMap<usize, FixedNum> = BTreeMap::new();
 
     // Add start node connections to graph
     // Find portals in start cluster
@@ -652,7 +659,7 @@ fn find_path_hierarchical(
         }
     }
 
-    let mut goal_portals = HashSet::new();
+    let mut goal_portals = BTreeSet::new();
     if let Some(cluster) = graph.clusters.get(&goal_cluster) {
         for &portal_id in &cluster.portals {
             goal_portals.insert(portal_id);
@@ -719,7 +726,7 @@ fn heuristic(x1: usize, y1: usize, x2: usize, y2: usize, cell_size: FixedNum) ->
     FixedNum::from_num(dx + dy) * cell_size
 }
 
-fn reconstruct_path(came_from: HashMap<Node, Node>, mut current: Node, flow_field: &crate::game::flow_field::FlowField) -> Vec<FixedVec2> {
+fn reconstruct_path(came_from: BTreeMap<Node, Node>, mut current: Node, flow_field: &crate::game::flow_field::FlowField) -> Vec<FixedVec2> {
     let mut path = Vec::new();
     path.push(flow_field.grid_to_world(current.x, current.y));
     
@@ -796,8 +803,8 @@ fn find_path_astar_local_points(
     let mut open_set = BinaryHeap::new();
     open_set.push(State { cost: FixedNum::ZERO, node: start });
 
-    let mut came_from: HashMap<Node, Node> = HashMap::new();
-    let mut g_score: HashMap<Node, FixedNum> = HashMap::new();
+    let mut came_from: BTreeMap<Node, Node> = BTreeMap::new();
+    let mut g_score: BTreeMap<Node, FixedNum> = BTreeMap::new();
     g_score.insert(start, FixedNum::ZERO);
 
     while let Some(State { cost: _, node: current }) = open_set.pop() {
@@ -860,7 +867,7 @@ fn incremental_build_graph(
                     graph.clusters.insert((cx, cy), Cluster {
                         id: (cx, cy),
                         portals: Vec::new(),
-                        flow_field_cache: HashMap::new(),
+                        flow_field_cache: BTreeMap::new(),
                     });
                 }
             }

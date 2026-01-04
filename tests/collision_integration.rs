@@ -133,6 +133,7 @@ fn test_collision_unit_wall() {
 fn test_collision_crowding() {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
+    app.add_plugins(bevy::state::app::StatesPlugin);
     app.add_plugins(bevy::log::LogPlugin::default());
     app.add_plugins(AssetPlugin::default()); 
     app.init_asset::<Mesh>();
@@ -142,6 +143,8 @@ fn test_collision_crowding() {
     app.add_plugins(GameConfigPlugin);
     app.add_plugins(SimulationPlugin);
     app.add_plugins(PathfindingPlugin);
+    app.init_state::<peregrine::game::GameState>();
+    app.world_mut().resource_mut::<NextState<peregrine::game::GameState>>().set(peregrine::game::GameState::InGame);
 
     app.update();
 

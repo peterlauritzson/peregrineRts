@@ -63,4 +63,9 @@
     editor_default_obstacle_radius: 20.0,
     editor_map_size_x: 2048.0,
     editor_map_size_y: 2048.0,
+    
+    // Debug visualization settings
+    debug_flow_field_view_radius: 50.0,
+    debug_path_trace_max_steps: 200,
+    debug_unit_lod_height_threshold: 50.0,
 )

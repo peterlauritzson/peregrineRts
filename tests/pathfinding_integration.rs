@@ -3,8 +3,41 @@ use bevy::state::app::StatesPlugin;
 use peregrine::game::math::{FixedVec2, FixedNum};
 use peregrine::game::simulation::{SimulationPlugin, MapFlowField, SimPosition, SimVelocity, SimAcceleration, Collider, StaticObstacle};
 use peregrine::game::config::GameConfigPlugin;
-use peregrine::game::pathfinding::{PathfindingPlugin, PathRequest, HierarchicalGraph, Path};
+use peregrine::game::pathfinding::{PathfindingPlugin, PathRequest, Path, GraphBuildState, GraphBuildStep};
+use peregrine::game::loading::LoadingProgress;
 use peregrine::game::GameState;
+
+/// Helper function to run incremental graph build to completion in tests
+fn build_graph_incremental(app: &mut App) {
+    // Insert LoadingProgress resource if not already present
+    if !app.world().contains_resource::<LoadingProgress>() {
+        app.world_mut().insert_resource(LoadingProgress::default());
+    }
+    
+    // Reset build state to start fresh
+    app.world_mut().resource_mut::<GraphBuildState>().step = GraphBuildStep::NotStarted;
+    
+    // Set state to Loading to enable incremental build system
+    app.world_mut().resource_mut::<NextState<GameState>>().set(GameState::Loading);
+    app.update(); // Apply state change - this triggers OnEnter(Loading) which needs LoadingProgress
+    
+    // Run incremental build until done (max 1000 iterations to prevent infinite loop)
+    for _i in 0..1000 {
+        app.world_mut().run_schedule(Update);
+        
+        let step = app.world().resource::<GraphBuildState>().step;
+        if step == GraphBuildStep::Done {
+            break;
+        }
+    }
+    
+    let step = app.world().resource::<GraphBuildState>().step;
+    assert_eq!(step, GraphBuildStep::Done, "Graph build should complete");
+    
+    // Return to InGame state
+    app.world_mut().resource_mut::<NextState<GameState>>().set(GameState::InGame);
+    app.update(); // Apply state change
+}
 
 #[test]
 fn test_pathfinding_around_wall() {
@@ -61,9 +94,8 @@ fn test_pathfinding_around_wall() {
         app.world_mut().despawn(entity);
     }
 
-    // 2. Reset Graph to force rebuild
-    app.world_mut().resource_mut::<HierarchicalGraph>().reset();
-    app.update(); // Rebuilds graph in Update schedule
+    // 2. Build Graph incrementally
+    build_graph_incremental(&mut app);
 
     // 3. Spawn Unit
     // Map is 50x50, Origin at (-25, -25).
@@ -185,8 +217,8 @@ fn test_pathfinding_close_target_line_of_sight() {
         app.world_mut().despawn(entity);
     }
 
-    app.world_mut().resource_mut::<HierarchicalGraph>().reset();
-    app.update();
+    // Build Graph incrementally
+    build_graph_incremental(&mut app);
 
     // Map origin is (-25, -25). Cell size 1.
     // Cluster size 10.
@@ -284,8 +316,8 @@ fn test_pathfinding_close_target_obstacle() {
     // Run update to apply obstacle
     app.update();
 
-    app.world_mut().resource_mut::<HierarchicalGraph>().reset();
-    app.update();
+    // Build Graph incrementally
+    build_graph_incremental(&mut app);
 
     // Start at Grid (25, 25). World: 0.5
     // Goal at Grid (35, 25). World: 10.5
