@@ -86,7 +86,7 @@ impl Default for Path {
 /// let graph = build_graph_incrementally(&flow_field);
 ///
 /// // 2. Find path
-/// if let Some(path) = find_path_hierarchical(start, goal, &flow_field, &graph) {
+/// if let Some(path) = find_path_hierarchical(start, goal, &flow_field, &graph, &components) {
 ///     commands.entity(unit).insert(path);
 /// }
 ///
@@ -110,6 +110,42 @@ pub struct HierarchicalGraph {
     pub nodes: Vec<Portal>,
     pub edges: BTreeMap<usize, Vec<(usize, FixedNum)>>, // PortalId -> [(TargetPortalId, Cost)]
     pub clusters: BTreeMap<(usize, usize), Cluster>,
+    pub initialized: bool,
+}
+
+/// Tracks connected components in the pathfinding graph to detect unreachable regions.
+///
+/// Solves the problem where pathfinding tries to find paths to unreachable targets
+/// (e.g., islands cut off by obstacles, or targets inside obstacles). Without this,
+/// A* can loop forever trying to reach impossible destinations.
+///
+/// # Algorithm
+///
+/// 1. **Build:** After graph construction, use BFS/DFS to find connected components
+/// 2. **Check:** Before pathfinding, verify start and goal are in same component
+/// 3. **Fallback:** If unreachable, redirect to closest portal in same component
+/// 4. **Update:** Rebuild components when obstacles added/removed
+///
+/// # Design Decisions
+///
+/// - **Granularity:** Components at cluster level (not cell level) for efficiency
+/// - **Fallback strategy:** Find closest reachable point, don't fail silently
+/// - **Memory:** O(clusters) - negligible compared to flow field cache
+/// - **Update cost:** O(portals) - acceptable for infrequent obstacle changes
+#[derive(Resource, Default, Clone)]
+pub struct ConnectedComponents {
+    /// Maps each cluster to its component ID
+    pub cluster_to_component: BTreeMap<(usize, usize), usize>,
+    
+    /// For each component, stores representative portal IDs
+    /// Used to pick fallback targets when pathfinding to unreachable regions
+    pub component_portals: BTreeMap<usize, Vec<usize>>,
+    
+    /// For each component pair (from, to), stores closest portal IDs in 'from' component
+    /// that are physically near the 'to' component (even though not connected)
+    /// Used for "get as close as possible" behavior
+    pub closest_cross_component: BTreeMap<(usize, usize), Vec<usize>>,
+    
     pub initialized: bool,
 }
 
@@ -289,6 +325,161 @@ impl Cluster {
     }
 }
 
+impl ConnectedComponents {
+    /// Build connected components from the hierarchical graph using BFS.
+    /// Groups clusters into connectivity sets where all clusters in a set can reach each other.
+    pub fn build_from_graph(&mut self, graph: &HierarchicalGraph) {
+        self.cluster_to_component.clear();
+        self.component_portals.clear();
+        self.closest_cross_component.clear();
+        
+        if graph.clusters.is_empty() {
+            self.initialized = false;
+            return;
+        }
+        
+        let mut component_id = 0;
+        let all_clusters: Vec<_> = graph.clusters.keys().cloned().collect();
+        
+        // Build portal_to_cluster lookup for efficient component traversal
+        let mut portal_to_cluster: BTreeMap<usize, (usize, usize)> = BTreeMap::new();
+        for (cluster_id, cluster) in &graph.clusters {
+            for &portal_id in &cluster.portals {
+                portal_to_cluster.insert(portal_id, *cluster_id);
+            }
+        }
+        
+        // BFS to find connected components
+        for &start_cluster in &all_clusters {
+            if self.cluster_to_component.contains_key(&start_cluster) {
+                continue; // Already visited
+            }
+            
+            // Start new component
+            let mut queue = VecDeque::new();
+            queue.push_back(start_cluster);
+            self.cluster_to_component.insert(start_cluster, component_id);
+            
+            let mut component_portal_set = BTreeSet::new();
+            
+            while let Some(current_cluster) = queue.pop_front() {
+                if let Some(cluster) = graph.clusters.get(&current_cluster) {
+                    // Add all portals from this cluster to the component
+                    for &portal_id in &cluster.portals {
+                        component_portal_set.insert(portal_id);
+                        
+                        // Follow edges to find neighboring portals and their clusters
+                        if let Some(edges) = graph.edges.get(&portal_id) {
+                            for &(neighbor_portal_id, _cost) in edges {
+                                if let Some(&neighbor_cluster) = portal_to_cluster.get(&neighbor_portal_id) {
+                                    if !self.cluster_to_component.contains_key(&neighbor_cluster) {
+                                        self.cluster_to_component.insert(neighbor_cluster, component_id);
+                                        queue.push_back(neighbor_cluster);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Store portals for this component
+            self.component_portals.insert(component_id, component_portal_set.into_iter().collect());
+            component_id += 1;
+        }
+        
+        // Precompute closest cross-component portals (for fallback behavior)
+        self.compute_closest_cross_component(graph);
+        
+        self.initialized = true;
+        
+        info!("[CONNECTIVITY] Built {} connected components covering {} clusters", 
+              component_id, all_clusters.len());
+    }
+    
+    /// For each component pair, find portals in the 'from' component that are physically
+    /// closest to any portal in the 'to' component (even though not path-connected).
+    /// This enables "get as close as possible" behavior when targets are unreachable.
+    fn compute_closest_cross_component(&mut self, graph: &HierarchicalGraph) {
+        let component_ids: Vec<_> = self.component_portals.keys().cloned().collect();
+        
+        for &from_comp in &component_ids {
+            for &to_comp in &component_ids {
+                if from_comp == to_comp {
+                    continue; // Same component = already reachable
+                }
+                
+                let from_portals = self.component_portals.get(&from_comp).unwrap();
+                let to_portals = self.component_portals.get(&to_comp).unwrap();
+                
+                // Find closest portal in from_comp to any portal in to_comp
+                let mut best_portals: Vec<(usize, FixedNum)> = Vec::new();
+                
+                for &from_portal_id in from_portals {
+                    if let Some(from_portal) = graph.nodes.get(from_portal_id) {
+                        let from_pos = FixedVec2::new(
+                            FixedNum::from_num(from_portal.node.x as i32),
+                            FixedNum::from_num(from_portal.node.y as i32)
+                        );
+                        
+                        let mut min_dist = FixedNum::MAX;
+                        for &to_portal_id in to_portals {
+                            if let Some(to_portal) = graph.nodes.get(to_portal_id) {
+                                let to_pos = FixedVec2::new(
+                                    FixedNum::from_num(to_portal.node.x as i32),
+                                    FixedNum::from_num(to_portal.node.y as i32)
+                                );
+                                let dist = (from_pos - to_pos).length_squared();
+                                if dist < min_dist {
+                                    min_dist = dist;
+                                }
+                            }
+                        }
+                        
+                        best_portals.push((from_portal_id, min_dist));
+                    }
+                }
+                
+                // Sort by distance and keep top 3 closest portals
+                best_portals.sort_by(|a, b| a.1.cmp(&b.1));
+                let closest: Vec<usize> = best_portals.iter().take(3).map(|(id, _)| *id).collect();
+                
+                if !closest.is_empty() {
+                    self.closest_cross_component.insert((from_comp, to_comp), closest);
+                }
+            }
+        }
+    }
+    
+    /// Get the component ID for a given cluster
+    pub fn get_component(&self, cluster: (usize, usize)) -> Option<usize> {
+        self.cluster_to_component.get(&cluster).copied()
+    }
+    
+    /// Check if two clusters are in the same connected component
+    pub fn are_connected(&self, cluster_a: (usize, usize), cluster_b: (usize, usize)) -> bool {
+        if let (Some(comp_a), Some(comp_b)) = (self.get_component(cluster_a), self.get_component(cluster_b)) {
+            comp_a == comp_b
+        } else {
+            false
+        }
+    }
+    
+    /// Get fallback portals when trying to path from cluster_a to unreachable cluster_b.
+    /// Returns portals in cluster_a's component that are closest to cluster_b's component.
+    pub fn get_fallback_portals(&self, cluster_a: (usize, usize), cluster_b: (usize, usize)) -> Option<&Vec<usize>> {
+        let comp_a = self.get_component(cluster_a)?;
+        let comp_b = self.get_component(cluster_b)?;
+        
+        if comp_a == comp_b {
+            return None; // Already connected
+        }
+        
+        self.closest_cross_component.get(&(comp_a, comp_b))
+    }
+}
+
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LocalFlowField {
     pub width: usize,
@@ -312,6 +503,7 @@ impl Plugin for PathfindingPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<PathRequest>();
         app.init_resource::<HierarchicalGraph>();
+        app.init_resource::<ConnectedComponents>();
         app.init_resource::<GraphBuildState>();
         // Removed synchronous build_graph system that froze the game for 10+ seconds on large maps
         app.add_systems(Update, (draw_graph_gizmos).run_if(in_state(GameState::InGame).or(in_state(GameState::Editor))));
@@ -642,13 +834,82 @@ fn has_line_of_sight(
     true
 }
 
+/// Find the nearest walkable cell to a target node using BFS
+fn find_nearest_walkable(
+    target: Node,
+    flow_field: &crate::game::flow_field::FlowField
+) -> Option<Node> {
+    const MAX_SEARCH_RADIUS: usize = 50; // Search up to 50 cells away
+    
+    let mut visited = BTreeSet::new();
+    let mut queue = VecDeque::new();
+    queue.push_back((target, 0));
+    visited.insert((target.x, target.y));
+    
+    while let Some((node, distance)) = queue.pop_front() {
+        // Stop if we've searched too far
+        if distance > MAX_SEARCH_RADIUS {
+            break;
+        }
+        
+        // Check if this node is walkable
+        let idx = flow_field.get_index(node.x, node.y);
+        if flow_field.cost_field[idx] != 255 {
+            return Some(node);
+        }
+        
+        // Explore 8-directional neighbors
+        for dx in -1isize..=1 {
+            for dy in -1isize..=1 {
+                if dx == 0 && dy == 0 {
+                    continue;
+                }
+                
+                let nx = node.x as isize + dx;
+                let ny = node.y as isize + dy;
+                
+                if nx < 0 || nx >= flow_field.width as isize || ny < 0 || ny >= flow_field.height as isize {
+                    continue;
+                }
+                
+                let nx = nx as usize;
+                let ny = ny as usize;
+                
+                if visited.contains(&(nx, ny)) {
+                    continue;
+                }
+                
+                visited.insert((nx, ny));
+                queue.push_back((Node { x: nx, y: ny }, distance + 1));
+            }
+        }
+    }
+    
+    None
+}
+
 fn find_path_hierarchical(
     start: Node,
     goal: Node,
     flow_field: &crate::game::flow_field::FlowField,
-    graph: &HierarchicalGraph
+    graph: &HierarchicalGraph,
+    components: &ConnectedComponents,
 ) -> Option<Path> {
-    // 1. Check Line of Sight
+    // 1. Check if goal is inside an obstacle (unwalkable)
+    let goal_idx = flow_field.get_index(goal.x, goal.y);
+    if flow_field.cost_field[goal_idx] == 255 {
+        warn!("[PATHFINDING] Goal {:?} is inside an obstacle (unwalkable)! Finding nearest walkable cell...", goal);
+        // Find nearest walkable cell to the goal
+        if let Some(walkable_goal) = find_nearest_walkable(goal, flow_field) {
+            warn!("[PATHFINDING] Redirecting to nearest walkable cell: {:?}", walkable_goal);
+            return find_path_hierarchical(start, walkable_goal, flow_field, graph, components);
+        } else {
+            warn!("[PATHFINDING] No walkable cells found near goal! Pathfinding failed.");
+            return None;
+        }
+    }
+
+    // 2. Check Line of Sight
     if has_line_of_sight(start, goal, flow_field) {
         return Some(Path::Direct(flow_field.grid_to_world(goal.x, goal.y)));
     }
@@ -656,34 +917,68 @@ fn find_path_hierarchical(
     let start_cluster = (start.x / CLUSTER_SIZE, start.y / CLUSTER_SIZE);
     let goal_cluster = (goal.x / CLUSTER_SIZE, goal.y / CLUSTER_SIZE);
 
+    // Check connectivity: if start and goal are in different components, redirect to closest reachable point
+    let actual_goal = if components.initialized && !components.are_connected(start_cluster, goal_cluster) {
+        // Target is unreachable! Find closest reachable portal instead
+        if let Some(fallback_portals) = components.get_fallback_portals(start_cluster, goal_cluster) {
+            if let Some(&fallback_portal_id) = fallback_portals.first() {
+                // Redirect to the closest reachable portal
+                let fallback_portal = &graph.nodes[fallback_portal_id];
+                warn!("[CONNECTIVITY] Target cluster {:?} unreachable from {:?}. Redirecting to closest reachable portal at {:?}", 
+                      goal_cluster, start_cluster, fallback_portal.node);
+                fallback_portal.node
+            } else {
+                warn!("[CONNECTIVITY] No fallback portal found for unreachable target. Using original goal.");
+                goal
+            }
+        } else {
+            goal
+        }
+    } else if components.initialized {
+        // Clusters ARE connected according to component analysis
+        // But let's verify there's actually a path
+        let start_comp = components.get_component(start_cluster);
+        let goal_comp = components.get_component(goal_cluster);
+        if start_comp != goal_comp {
+            warn!("[CONNECTIVITY BUG] Clusters {:?} (comp {:?}) and {:?} (comp {:?}) reported as connected but have different component IDs!", 
+                  start_cluster, start_comp, goal_cluster, goal_comp);
+        }
+        goal
+    } else {
+        goal
+    };
+
+    // Recalculate cluster in case actual_goal was redirected
+    let actual_goal_cluster = (actual_goal.x / CLUSTER_SIZE, actual_goal.y / CLUSTER_SIZE);
+
     // If in same cluster, use local A*
-    if start_cluster == goal_cluster {
+    if start_cluster == actual_goal_cluster {
         let min_x = start_cluster.0 * CLUSTER_SIZE;
         let max_x = ((start_cluster.0 + 1) * CLUSTER_SIZE).min(flow_field.width) - 1;
         let min_y = start_cluster.1 * CLUSTER_SIZE;
         let max_y = ((start_cluster.1 + 1) * CLUSTER_SIZE).min(flow_field.height) - 1;
         
-        if let Some(points) = find_path_astar_local_points(start, goal, flow_field, min_x, max_x, min_y, max_y) {
+        if let Some(points) = find_path_astar_local_points(start, actual_goal, flow_field, min_x, max_x, min_y, max_y) {
             return Some(Path::LocalAStar { waypoints: points, current_index: 0 });
         }
     }
 
     // 2. Check if close enough for local A* even if different clusters
-    let dist_sq = (start.x as i32 - goal.x as i32).pow(2) + (start.y as i32 - goal.y as i32).pow(2);
+    let dist_sq = (start.x as i32 - actual_goal.x as i32).pow(2) + (start.y as i32 - actual_goal.y as i32).pow(2);
     let threshold = (CLUSTER_SIZE as i32 * 2).pow(2); 
 
     if dist_sq < threshold {
-         let min_x = start.x.min(goal.x).saturating_sub(CLUSTER_SIZE);
-         let max_x = start.x.max(goal.x) + CLUSTER_SIZE;
-         let min_y = start.y.min(goal.y).saturating_sub(CLUSTER_SIZE);
-         let max_y = start.y.max(goal.y) + CLUSTER_SIZE;
+         let min_x = start.x.min(actual_goal.x).saturating_sub(CLUSTER_SIZE);
+         let max_x = start.x.max(actual_goal.x) + CLUSTER_SIZE;
+         let min_y = start.y.min(actual_goal.y).saturating_sub(CLUSTER_SIZE);
+         let max_y = start.y.max(actual_goal.y) + CLUSTER_SIZE;
          
          let min_x = min_x.max(0);
          let max_x = max_x.min(flow_field.width - 1);
          let min_y = min_y.max(0);
          let max_y = max_y.min(flow_field.height - 1);
 
-         if let Some(points) = find_path_astar_local_points(start, goal, flow_field, min_x, max_x, min_y, max_y) {
+         if let Some(points) = find_path_astar_local_points(start, actual_goal, flow_field, min_x, max_x, min_y, max_y) {
              return Some(Path::LocalAStar { waypoints: points, current_index: 0 });
          }
     }
@@ -691,6 +986,7 @@ fn find_path_hierarchical(
     let mut open_set = BinaryHeap::new();
     let mut came_from: BTreeMap<usize, usize> = BTreeMap::new();
     let mut g_score: BTreeMap<usize, FixedNum> = BTreeMap::new();
+    let mut closed_set: BTreeSet<usize> = BTreeSet::new(); // Track visited portals to prevent cycles
     
     const MAX_PORTAL_ITERATIONS: usize = 1000; // Safety limit for portal graph A*
     let mut iterations = 0;
@@ -733,7 +1029,7 @@ fn find_path_hierarchical(
 
             if let Some(c) = cost {
                 g_score.insert(portal_id, c);
-                let h = heuristic(portal_node.x, portal_node.y, goal.x, goal.y, flow_field.cell_size);
+                let h = heuristic(portal_node.x, portal_node.y, actual_goal.x, actual_goal.y, flow_field.cell_size);
                 open_set.push(GraphState { cost: c + h, portal_id });
                 start_portals.push(portal_id);
             }
@@ -741,7 +1037,7 @@ fn find_path_hierarchical(
     }
 
     let mut goal_portals = BTreeSet::new();
-    if let Some(cluster) = graph.clusters.get(&goal_cluster) {
+    if let Some(cluster) = graph.clusters.get(&actual_goal_cluster) {
         for &portal_id in &cluster.portals {
             goal_portals.insert(portal_id);
         }
@@ -759,14 +1055,20 @@ fn find_path_hierarchical(
             return None;
         }
         
+        // CRITICAL FIX: Skip if already visited (prevents cycles and re-processing)
+        if closed_set.contains(&current_id) {
+            continue;
+        }
+        closed_set.insert(current_id);
+        
         if goal_portals.contains(&current_id) {
             let portal_node = graph.nodes[current_id].node;
-            let min_x = goal_cluster.0 * CLUSTER_SIZE;
-            let max_x = ((goal_cluster.0 + 1) * CLUSTER_SIZE).min(flow_field.width) - 1;
-            let min_y = goal_cluster.1 * CLUSTER_SIZE;
-            let max_y = ((goal_cluster.1 + 1) * CLUSTER_SIZE).min(flow_field.height) - 1;
+            let min_x = actual_goal_cluster.0 * CLUSTER_SIZE;
+            let max_x = ((actual_goal_cluster.0 + 1) * CLUSTER_SIZE).min(flow_field.width) - 1;
+            let min_y = actual_goal_cluster.1 * CLUSTER_SIZE;
+            let max_y = ((actual_goal_cluster.1 + 1) * CLUSTER_SIZE).min(flow_field.height) - 1;
 
-            if let Some(_) = find_path_astar_local(portal_node, goal, flow_field, min_x, max_x, min_y, max_y) {
+            if let Some(_) = find_path_astar_local(portal_node, actual_goal, flow_field, min_x, max_x, min_y, max_y) {
                 final_portal = Some(current_id);
                 break;
             }
@@ -774,13 +1076,18 @@ fn find_path_hierarchical(
 
         if let Some(neighbors) = graph.edges.get(&current_id) {
             for &(neighbor_id, edge_cost) in neighbors {
+                // Skip if already visited
+                if closed_set.contains(&neighbor_id) {
+                    continue;
+                }
+                
                 let tentative_g = g_score[&current_id] + edge_cost;
                 if tentative_g < *g_score.get(&neighbor_id).unwrap_or(&FixedNum::MAX) {
                     g_score.insert(neighbor_id, tentative_g);
                     came_from.insert(neighbor_id, current_id);
                     
                     let neighbor_node = graph.nodes[neighbor_id].node;
-                    let h = heuristic(neighbor_node.x, neighbor_node.y, goal.x, goal.y, flow_field.cell_size);
+                    let h = heuristic(neighbor_node.x, neighbor_node.y, actual_goal.x, actual_goal.y, flow_field.cell_size);
                     open_set.push(GraphState { cost: tentative_g + h, portal_id: neighbor_id });
                 }
             }
@@ -800,7 +1107,7 @@ fn find_path_hierarchical(
         
         return Some(Path::Hierarchical {
             portals,
-            final_goal: flow_field.grid_to_world(goal.x, goal.y),
+            final_goal: flow_field.grid_to_world(actual_goal.x, actual_goal.y),
             current_index: 0,
         });
     }
@@ -834,6 +1141,7 @@ fn process_path_requests(
     mut commands: Commands,
     map_flow_field: Res<MapFlowField>,
     graph: Res<HierarchicalGraph>,
+    components: Res<ConnectedComponents>,
 ) {
     if path_requests.is_empty() {
         return;
@@ -869,7 +1177,8 @@ fn process_path_requests(
                 Node { x: start_node.0, y: start_node.1 },
                 Node { x: goal_node.0, y: goal_node.1 },
                 flow_field,
-                &graph
+                &graph,
+                &components,
             ) {
                 let req_duration = req_start.elapsed();
                 info!("Path found in {:?}: {:?}", req_duration, path);
@@ -985,6 +1294,7 @@ fn incremental_build_graph(
     config_handle: Res<crate::game::config::GameConfigHandle>,
     game_configs: Res<Assets<crate::game::config::GameConfig>>,
     initial_config: Res<InitialConfig>,
+    mut components: ResMut<ConnectedComponents>,
 ) {
     let Some(_config) = game_configs.get(&config_handle.0) else { return; };
     let flow_field = &map_flow_field.0;
@@ -1159,6 +1469,13 @@ fn incremental_build_graph(
                     build_state.current_cluster_idx += 1;
                 } else {
                     graph.initialized = true;
+                    
+                    // Build connected components to detect unreachable regions
+                    info!("Building connected components...");
+                    let conn_start = std::time::Instant::now();
+                    components.build_from_graph(&graph);
+                    info!("Connected components built in {:?}", conn_start.elapsed());
+                    
                     build_state.step = GraphBuildStep::Done;
                     loading_progress.progress = 1.0;
                     let total_cached = graph.clusters.values().map(|c| c.flow_field_cache.len()).sum::<usize>();
