@@ -756,6 +756,19 @@ fn handle_generation(
         info!("Updated ground plane mesh to {}x{}", map_width, map_height);
     }
 
+    // CRITICAL: Build hierarchical graph BEFORE spawning obstacles
+    // This ensures clusters and portals are valid for the new map size
+    // before apply_new_obstacles tries to regenerate cluster flow fields
+    info!("Building hierarchical graph for new map...");
+    let graph_start = std::time::Instant::now();
+    graph.build_graph_sync(&map_flow_field.0);
+    graph.initialized = true;
+    info!("Graph built in {:?} - {} clusters, {} portals", 
+        graph_start.elapsed(), 
+        graph.clusters.len(), 
+        graph.nodes.len()
+    );
+
     // Spawn obstacles (if any)
     let num_obstacles = params.num_obstacles;
     if num_obstacles > 0 {

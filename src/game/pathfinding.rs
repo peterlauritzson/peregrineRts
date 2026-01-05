@@ -459,6 +459,12 @@ fn generate_local_flow_field(
             let gx = min_x + nx;
             let gy = min_y + ny;
             
+            // Bounds check: Ensure coordinates are within flow field bounds
+            // This prevents crashes when portals reference coordinates from old map sizes
+            if gx >= map_flow_field.width || gy >= map_flow_field.height {
+                continue; // Portal extends beyond current map bounds - skip this cell
+            }
+            
             // Check global obstacle
             if map_flow_field.cost_field[map_flow_field.get_index(gx, gy)] == 255 {
                 continue;

@@ -114,15 +114,24 @@ Once the RTS Foundation (Milestone 0) is complete, we will iterate on the simula
    > **Note:** HPA* implementation is complete (Level 0, 1, 2). Units now use the hierarchical graph for long-distance planning.
 
 10. **The "Million" Unit Stress Test**
-    - [ ] **A. Baseline CPU Stress Test**:
+    - [x] **A. Initial Stress Testing (Jan 5, 2026)**:
+        - Tested map resizing (300x300 → 450x450)
+        - **CRITICAL BUG FOUND:** Map resize causes panic in pathfinding.rs:463
+        - **Root Cause:** HierarchicalGraph not rebuilt after map resize, leading to stale portal coordinates accessing out-of-bounds flow field indices
+        - **Next:** Fix initialization order (see STRESS_TEST_FINDINGS.md)
+    - [ ] **B. Fix Map Resize Bug**:
+        - Rebuild HierarchicalGraph BEFORE adding obstacles during map generation
+        - Add bounds checking in generate_local_flow_field to prevent OOB access
+        - Test with various map sizes (100x100 to 1000x1000)
+    - [ ] **C. Baseline CPU Stress Test**:
         - Configure environment: Set logging to `WARN`+ and ensure FPS/TPS counters are active.
         - Spawn 10k-100k units with current CPU implementation.
         - Gradually increase map size along with unit count to maintain reasonable density.
         - Profile performance bottlenecks (collision, pathfinding, rendering).
-    - [ ] **B. Spatial Partitioning Optimization**: Ensure Spatial Hash Grid is fully optimized and cache-friendly. Implement multithreading for simulation steps if not already present.
-    - [ ] **C. GPU Compute Foundation**: Move core simulation logic (movement, collision) to Compute Shaders (WGPU). Verify data roundtrip between CPU and GPU.
-    - [ ] **D. GPU-Based Rendering**: Implement instanced rendering directly from GPU simulation buffers (avoiding CPU readback).
-    - [ ] **E. The 10M Goal**: Scale to 10M units. Tune simulation parameters and grid sizes for maximum throughput. Achieve 1000 FPS / 100 TPS target.
+    - [ ] **D. Spatial Partitioning Optimization**: Ensure Spatial Hash Grid is fully optimized and cache-friendly. Implement multithreading for simulation steps if not already present.
+    - [ ] **E. GPU Compute Foundation**: Move core simulation logic (movement, collision) to Compute Shaders (WGPU). Verify data roundtrip between CPU and GPU.
+    - [ ] **F. GPU-Based Rendering**: Implement instanced rendering directly from GPU simulation buffers (avoiding CPU readback).
+    - [ ] **G. The 10M Goal**: Scale to 10M units. Tune simulation parameters and grid sizes for maximum throughput. Achieve 1000 FPS / 100 TPS target.
 
 ---
 
