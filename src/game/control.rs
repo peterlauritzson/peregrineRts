@@ -4,7 +4,7 @@ use crate::game::unit::{Unit, Selected};
 use crate::game::simulation::{UnitMoveCommand, SimPosition, ForceSource, ForceType, SpawnUnitCommand};
 use crate::game::math::{FixedVec2, FixedNum};
 use crate::game::camera::RtsCamera;
-use crate::game::config::{GameConfig, GameConfigHandle};
+use crate::game::config::{GameConfig, GameConfigHandle, InitialConfig};
 use crate::game::GameState;
 
 pub struct ControlPlugin;
@@ -213,6 +213,7 @@ fn handle_debug_spawning(
     q_camera: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     config_handle: Res<GameConfigHandle>,
     game_configs: Res<Assets<GameConfig>>,
+    initial_config: Res<InitialConfig>,
     mut spawn_events: MessageWriter<SpawnUnitCommand>,
 ) {
     let Some((camera, camera_transform)) = q_camera.iter().next() else { return };
@@ -244,8 +245,8 @@ fn handle_debug_spawning(
                         GlobalTransform::default(),
                         SimPosition(pos_fixed),
                         ForceSource {
-                            force_type: ForceType::Radial(FixedNum::from_num(config.black_hole_strength)), // Positive = Attract
-                            radius: FixedNum::from_num(config.force_source_radius),
+                            force_type: ForceType::Radial(FixedNum::from_num(initial_config.black_hole_strength)), // Positive = Attract
+                            radius: FixedNum::from_num(initial_config.force_source_radius),
                         }
                     ));
                 } else if keys.just_pressed(config.key_spawn_wind_spot) {
@@ -257,8 +258,8 @@ fn handle_debug_spawning(
                         GlobalTransform::default(),
                         SimPosition(pos_fixed),
                         ForceSource {
-                            force_type: ForceType::Radial(FixedNum::from_num(config.wind_spot_strength)), // Negative = Repel
-                            radius: FixedNum::from_num(config.force_source_radius),
+                            force_type: ForceType::Radial(FixedNum::from_num(initial_config.wind_spot_strength)), // Negative = Repel
+                            radius: FixedNum::from_num(initial_config.force_source_radius),
                         }
                     ));
                 } else if keys.just_pressed(config.key_spawn_unit) {

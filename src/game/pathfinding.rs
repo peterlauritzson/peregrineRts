@@ -1,9 +1,10 @@
 use bevy::prelude::*;
 use crate::game::math::{FixedVec2, FixedNum};
 use crate::game::simulation::{MapFlowField, DebugConfig};
-use crate::game::config::{GameConfig, GameConfigHandle};
+use crate::game::config::{GameConfig, GameConfigHandle, InitialConfig};
 use crate::game::GameState;
 use crate::game::loading::{LoadingProgress, TargetGameState};
+use crate::game::flow_field::CELL_SIZE;
 use std::collections::{BinaryHeap, BTreeMap, BTreeSet, VecDeque};
 use std::cmp::Ordering;
 use serde::{Serialize, Deserialize};
@@ -313,7 +314,7 @@ impl Plugin for PathfindingPlugin {
         app.init_resource::<HierarchicalGraph>();
         app.init_resource::<GraphBuildState>();
         // Removed synchronous build_graph system that froze the game for 10+ seconds on large maps
-        app.add_systems(Update, (draw_graph_gizmos).run_if(in_state(GameState::InGame)));
+        app.add_systems(Update, (draw_graph_gizmos).run_if(in_state(GameState::InGame).or(in_state(GameState::Editor))));
         app.add_systems(FixedUpdate, process_path_requests.run_if(in_state(GameState::InGame).or(in_state(GameState::Editor))));
         app.add_systems(Update, incremental_build_graph.run_if(in_state(GameState::Loading).or(in_state(GameState::Editor))));
         app.add_systems(OnEnter(GameState::Loading), start_graph_build);
@@ -662,6 +663,9 @@ fn find_path_hierarchical(
     let mut open_set = BinaryHeap::new();
     let mut came_from: BTreeMap<usize, usize> = BTreeMap::new();
     let mut g_score: BTreeMap<usize, FixedNum> = BTreeMap::new();
+    
+    const MAX_PORTAL_ITERATIONS: usize = 1000; // Safety limit for portal graph A*
+    let mut iterations = 0;
 
     // Add start node connections to graph
     // Find portals in start cluster
@@ -718,6 +722,15 @@ fn find_path_hierarchical(
     let mut final_portal = None;
 
     while let Some(GraphState { cost: _, portal_id: current_id }) = open_set.pop() {
+        iterations += 1;
+        
+        // Safety check
+        if iterations > MAX_PORTAL_ITERATIONS {
+            error!("[PATHFINDING] Portal graph A* exceeded max iterations ({}) - possible infinite loop!", MAX_PORTAL_ITERATIONS);
+            error!("  Start cluster: {:?}, Goal cluster: {:?}, Total portals: {}", start_cluster, goal_cluster, graph.nodes.len());
+            return None;
+        }
+        
         if goal_portals.contains(&current_id) {
             let portal_node = graph.nodes[current_id].node;
             let min_x = goal_cluster.0 * CLUSTER_SIZE;
@@ -798,6 +811,14 @@ fn process_path_requests(
         return;
     }
 
+    let start_time = std::time::Instant::now();
+    let request_count = path_requests.len();
+    
+    // Warn if too many pending requests (possible accumulation)
+    if request_count > 10 {
+        warn!("[PATHFINDING] High path request count: {} pending requests!", request_count);
+    }
+
     let flow_field = &map_flow_field.0;
     if flow_field.width == 0 {
         warn!("Flow field empty");
@@ -808,8 +829,9 @@ fn process_path_requests(
         return;
     }
 
-    for request in path_requests.read() {
-        info!("Processing path request from {:?} to {:?}", request.start, request.goal);
+    for (i, request) in path_requests.read().enumerate() {
+        let req_start = std::time::Instant::now();
+        info!("Processing path request {}/{} from {:?} to {:?}", i + 1, request_count, request.start, request.goal);
         let start_node_opt = flow_field.world_to_grid(request.start);
         let goal_node_opt = flow_field.world_to_grid(request.goal);
 
@@ -821,14 +843,34 @@ fn process_path_requests(
                 flow_field,
                 &graph
             ) {
-                info!("Path found: {:?}", path);
+                let req_duration = req_start.elapsed();
+                info!("Path found in {:?}: {:?}", req_duration, path);
+                if req_duration.as_millis() > 50 {
+                    warn!("[PATHFINDING] Slow path request: {:?}", req_duration);
+                }
                 commands.entity(request.entity).insert(path);
             } else {
-                warn!("No path found");
+                warn!("No path found (took {:?})", req_start.elapsed());
             }
         } else {
-            warn!("Start or goal out of bounds");
+            if start_node_opt.is_none() {
+                warn!("Start position {:?} is OUT OF BOUNDS! Map bounds: {:?} to {:?}", 
+                      request.start, flow_field.origin, 
+                      FixedVec2::new(flow_field.origin.x + FixedNum::from_num(flow_field.width as f32 * CELL_SIZE),
+                                     flow_field.origin.y + FixedNum::from_num(flow_field.height as f32 * CELL_SIZE)));
+            }
+            if goal_node_opt.is_none() {
+                warn!("Goal position {:?} is OUT OF BOUNDS! Map bounds: {:?} to {:?}", 
+                      request.goal, flow_field.origin,
+                      FixedVec2::new(flow_field.origin.x + FixedNum::from_num(flow_field.width as f32 * CELL_SIZE),
+                                     flow_field.origin.y + FixedNum::from_num(flow_field.height as f32 * CELL_SIZE)));
+            }
         }
+    }
+    
+    let total_duration = start_time.elapsed();
+    if total_duration.as_millis() > 100 {
+        warn!("[PATHFINDING] Slow batch processing: {:?} for {} requests", total_duration, request_count);
     }
 }
 
@@ -849,6 +891,9 @@ fn find_path_astar_local_points(
     min_x: usize, max_x: usize,
     min_y: usize, max_y: usize,
 ) -> Option<Vec<FixedVec2>> {
+    const MAX_ITERATIONS: usize = 10000; // Safety limit to prevent infinite loops
+    let mut iterations = 0;
+    
     let mut open_set = BinaryHeap::new();
     open_set.push(State { cost: FixedNum::ZERO, node: start });
 
@@ -857,7 +902,19 @@ fn find_path_astar_local_points(
     g_score.insert(start, FixedNum::ZERO);
 
     while let Some(State { cost: _, node: current }) = open_set.pop() {
+        iterations += 1;
+        
+        // Safety check for infinite loops
+        if iterations > MAX_ITERATIONS {
+            error!("[PATHFINDING] A* exceeded max iterations ({}) - possible infinite loop! Start: {:?}, Goal: {:?}, Bounds: ({},{}) to ({},{})",
+                   MAX_ITERATIONS, start, goal, min_x, min_y, max_x, max_y);
+            return None;
+        }
+        
         if current == goal {
+            if iterations > 1000 {
+                warn!("[PATHFINDING] A* used {} iterations (high!)", iterations);
+            }
             return Some(reconstruct_path(came_from, current, flow_field));
         }
 
@@ -899,8 +956,9 @@ fn incremental_build_graph(
     mut loading_progress: ResMut<LoadingProgress>,
     config_handle: Res<crate::game::config::GameConfigHandle>,
     game_configs: Res<Assets<crate::game::config::GameConfig>>,
+    initial_config: Res<InitialConfig>,
 ) {
-    let Some(config) = game_configs.get(&config_handle.0) else { return; };
+    let Some(_config) = game_configs.get(&config_handle.0) else { return; };
     let flow_field = &map_flow_field.0;
     if flow_field.width == 0 { return; }
 
@@ -909,11 +967,19 @@ fn incremental_build_graph(
 
     match build_state.step {
         GraphBuildStep::NotStarted => {
+            let flow_field = &map_flow_field.0;
+            let total_cells = flow_field.width * flow_field.height;
+            let total_clusters = width_clusters * height_clusters;
+            info!("=== GRAPH BUILD START ===");
+            info!("incremental_build_graph: Starting graph build");
+            info!("  Map: {} x {} cells ({} total)", flow_field.width, flow_field.height, total_cells);
+            info!("  Clusters: {} x {} ({} total, {}x{} cells each)", width_clusters, height_clusters, total_clusters, CLUSTER_SIZE, CLUSTER_SIZE);
             loading_progress.task = "Initializing Graph...".to_string();
             loading_progress.progress = 0.0;
             build_state.step = GraphBuildStep::InitializingClusters;
         }
         GraphBuildStep::InitializingClusters => {
+            let init_start = std::time::Instant::now();
             for cy in 0..height_clusters {
                 for cx in 0..width_clusters {
                     graph.clusters.insert((cx, cy), Cluster {
@@ -923,6 +989,7 @@ fn incremental_build_graph(
                     });
                 }
             }
+            info!("Initialized {} clusters in {:?}", width_clusters * height_clusters, init_start.elapsed());
             build_state.cx = 0;
             build_state.cy = 0;
             build_state.step = GraphBuildStep::FindingVerticalPortals;
@@ -931,6 +998,9 @@ fn incremental_build_graph(
         GraphBuildStep::FindingVerticalPortals => {
             loading_progress.task = "Finding Vertical Portals...".to_string();
             let cx = build_state.cx;
+            if cx == 0 {
+                info!("Finding vertical portals...");
+            }
             if cx < width_clusters - 1 {
                 for cy in 0..height_clusters {
                     let x1 = (cx + 1) * CLUSTER_SIZE - 1;
@@ -966,6 +1036,7 @@ fn incremental_build_graph(
                 build_state.cx += 1;
                 loading_progress.progress = 0.1 + 0.2 * (cx as f32 / width_clusters as f32);
             } else {
+                info!("Found {} total portals (vertical phase complete)", graph.nodes.len());
                 build_state.cx = 0;
                 build_state.cy = 0;
                 build_state.step = GraphBuildStep::FindingHorizontalPortals;
@@ -1009,6 +1080,8 @@ fn incremental_build_graph(
                 build_state.cx += 1;
                 loading_progress.progress = 0.3 + 0.2 * (cx as f32 / width_clusters as f32);
             } else {
+                let total_portals = graph.nodes.len();
+                info!("Found {} total portals (horizontal phase complete)", total_portals);
                 build_state.cluster_keys = graph.clusters.keys().cloned().collect();
                 build_state.current_cluster_idx = 0;
                 build_state.step = GraphBuildStep::ConnectingIntraCluster;
@@ -1016,23 +1089,41 @@ fn incremental_build_graph(
         }
         GraphBuildStep::ConnectingIntraCluster => {
             loading_progress.task = "Connecting Intra-Cluster...".to_string();
-            let batch_size = config.pathfinding_build_batch_size;
+            let batch_size = initial_config.pathfinding_build_batch_size;
+            let start_idx = build_state.current_cluster_idx;
+            if start_idx == 0 {
+                info!("Connecting intra-cluster portals (batch size: {})...", batch_size);
+            }
+            let batch_start = std::time::Instant::now();
             for _ in 0..batch_size {
                 if build_state.current_cluster_idx < build_state.cluster_keys.len() {
                     let key = build_state.cluster_keys[build_state.current_cluster_idx];
                     connect_intra_cluster(&mut graph, flow_field, key);
                     build_state.current_cluster_idx += 1;
                 } else {
+                    let total_edges = graph.edges.values().map(|v| v.len()).sum::<usize>();
+                    info!("incremental_build_graph: Finished intra-cluster connections ({} total edges)", total_edges);
                     build_state.current_cluster_idx = 0;
                     build_state.step = GraphBuildStep::PrecomputingFlowFields;
                     break;
                 }
             }
+            let end_idx = build_state.current_cluster_idx;
+            let batch_duration = batch_start.elapsed();
+            if end_idx > start_idx && end_idx % 50 == 0 {
+                info!("  Connected {}/{} clusters - batch of {} took {:?}", 
+                      end_idx, build_state.cluster_keys.len(), end_idx - start_idx, batch_duration);
+            }
             loading_progress.progress = 0.5 + 0.25 * (build_state.current_cluster_idx as f32 / build_state.cluster_keys.len() as f32);
         }
         GraphBuildStep::PrecomputingFlowFields => {
             loading_progress.task = "Precomputing Flow Fields...".to_string();
-            let batch_size = config.pathfinding_build_batch_size;
+            let batch_size = initial_config.pathfinding_build_batch_size;
+            let start_idx = build_state.current_cluster_idx;
+            if start_idx == 0 {
+                info!("Precomputing flow fields (batch size: {})...", batch_size);
+            }
+            let batch_start = std::time::Instant::now();
             for _ in 0..batch_size {
                 if build_state.current_cluster_idx < build_state.cluster_keys.len() {
                     let key = build_state.cluster_keys[build_state.current_cluster_idx];
@@ -1042,8 +1133,17 @@ fn incremental_build_graph(
                     graph.initialized = true;
                     build_state.step = GraphBuildStep::Done;
                     loading_progress.progress = 1.0;
+                    let total_cached = graph.clusters.values().map(|c| c.flow_field_cache.len()).sum::<usize>();
+                    info!("=== GRAPH BUILD COMPLETE ===");
+                    info!("incremental_build_graph: Graph build COMPLETE! ({} cached flow fields)", total_cached);
                     break;
                 }
+            }
+            let end_idx = build_state.current_cluster_idx;
+            let batch_duration = batch_start.elapsed();
+            if end_idx > start_idx && end_idx % 50 == 0 {
+                info!("  Precomputed flow fields for {}/{} clusters - batch of {} took {:?}", 
+                      end_idx, build_state.cluster_keys.len(), end_idx - start_idx, batch_duration);
             }
             loading_progress.progress = 0.75 + 0.25 * (build_state.current_cluster_idx as f32 / build_state.cluster_keys.len() as f32);
         }

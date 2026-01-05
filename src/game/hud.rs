@@ -1,10 +1,9 @@
 use bevy::prelude::*;
 use crate::game::GameState;
 use crate::game::unit::{Selected, Health};
-use crate::game::simulation::UnitStopCommand;
+use crate::game::simulation::{UnitStopCommand, SimConfig};
 use crate::game::control::InputMode;
 use crate::game::simulation::SimPosition;
-use crate::game::config::{GameConfig, GameConfigHandle};
 use crate::game::camera::RtsCamera;
 
 pub struct HudPlugin;
@@ -214,14 +213,12 @@ fn minimap_system(
     q_units_lookup: Query<(&SimPosition, Option<&Selected>)>,
     q_camera: Query<&Transform, With<RtsCamera>>,
     mut q_camera_frame: Query<&mut Node, (With<MinimapCameraFrame>, Without<MinimapDot>, Without<Minimap>)>,
-    config_handle: Res<GameConfigHandle>,
-    game_configs: Res<Assets<GameConfig>>,
+    sim_config: Res<SimConfig>,
 ) {
     let Ok((minimap_entity, minimap_node)) = q_minimap.single() else { return };
-    let Some(config) = game_configs.get(&config_handle.0) else { return };
     
-    let map_width = config.map_width;
-    let map_height = config.map_height;
+    let map_width = sim_config.map_width.to_num::<f32>();
+    let map_height = sim_config.map_height.to_num::<f32>();
     let minimap_w = minimap_node.size().x;
     let minimap_h = minimap_node.size().y;
 
@@ -291,8 +288,7 @@ fn minimap_input_system(
     q_window: Query<&Window, With<PrimaryWindow>>,
     q_minimap: Query<(&ComputedNode, &GlobalTransform), With<Minimap>>,
     mut q_camera: Query<&mut Transform, With<RtsCamera>>,
-    config_handle: Res<GameConfigHandle>,
-    game_configs: Res<Assets<GameConfig>>,
+    sim_config: Res<SimConfig>,
 ) {
     if !mouse_button.pressed(MouseButton::Left) {
         return;
@@ -301,7 +297,6 @@ fn minimap_input_system(
     let Some(window) = q_window.iter().next() else { return };
     let Some(cursor_pos) = window.cursor_position() else { return };
     let Ok((computed_node, transform)) = q_minimap.single() else { return };
-    let Some(config) = game_configs.get(&config_handle.0) else { return };
 
     let size = computed_node.size();
     let pos = transform.translation().truncate();
@@ -314,8 +309,10 @@ fn minimap_input_system(
         let pct_x = relative_x / rect.width();
         let pct_y = relative_y / rect.height();
         
-        let map_x = pct_x * config.map_width - config.map_width / 2.0;
-        let map_z = pct_y * config.map_height - config.map_height / 2.0;
+        let map_width = sim_config.map_width.to_num::<f32>();
+        let map_height = sim_config.map_height.to_num::<f32>();
+        let map_x = pct_x * map_width - map_width / 2.0;
+        let map_z = pct_y * map_height - map_height / 2.0;
         
         for mut cam_transform in q_camera.iter_mut() {
             // Simple move. Ideally we'd account for camera angle offset.

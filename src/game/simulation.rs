@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use crate::game::config::{GameConfig, GameConfigHandle};
+use crate::game::config::{GameConfig, GameConfigHandle, InitialConfig};
 use crate::game::math::{FixedVec2, FixedNum};
 use crate::game::flow_field::{FlowField, CELL_SIZE};
 use crate::game::spatial_hash::SpatialHash;
@@ -15,10 +15,19 @@ pub struct MapStatus {
     pub loaded: bool,
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct SimPerformance {
     pub start_time: Option<Instant>,
     pub last_duration: Duration,
+}
+
+impl Default for SimPerformance {
+    fn default() -> Self {
+        Self {
+            start_time: None,
+            last_duration: Duration::from_secs(0),
+        }
+    }
 }
 
 #[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone)]
@@ -243,9 +252,9 @@ impl Plugin for SimulationPlugin {
         ).chain().run_if(in_state(GameState::InGame).or(in_state(GameState::Editor))));
 
         // Register Systems
-        app.add_systems(Startup, init_flow_field);
-        app.add_systems(Update, (update_sim_from_config, toggle_debug, draw_flow_field_gizmos, draw_force_sources, draw_unit_paths).run_if(in_state(GameState::InGame).or(in_state(GameState::Editor)).or(in_state(GameState::Loading))));
-        app.add_systems(Update, apply_new_obstacles.run_if(in_state(GameState::InGame).or(in_state(GameState::Loading))));
+        app.add_systems(Startup, (init_flow_field, init_sim_from_initial_config).chain());
+        app.add_systems(Update, (update_sim_from_runtime_config, toggle_debug, draw_flow_field_gizmos, draw_force_sources, draw_unit_paths).run_if(in_state(GameState::InGame).or(in_state(GameState::Editor)).or(in_state(GameState::Loading))));
+        app.add_systems(Update, apply_new_obstacles.run_if(in_state(GameState::InGame).or(in_state(GameState::Editor)).or(in_state(GameState::Loading))));
         app.add_systems(FixedUpdate, (
             sim_start.before(SimSet::Input),
             cache_previous_state.in_set(SimSet::Input),
@@ -264,194 +273,158 @@ impl Plugin for SimulationPlugin {
     }
 }
 
-/// Converts loaded [`GameConfig`] (f32/f64) to runtime [`SimConfig`] (fixed-point).
-///
-/// This system runs when the GameConfig asset is loaded or modified, converting
-/// all float-based parameters to deterministic fixed-point values.
-///
-/// # Determinism Warning
-///
-/// **DO NOT reload config during active multiplayer matches!**
-/// - Float → FixedNum conversion may produce different results on different platforms
-/// - Changing tick_rate mid-game breaks physics state
-/// - This will cause immediate desync in lockstep multiplayer
-///
-/// # When This Runs
-///
-/// - On game startup (config loaded from assets/game_config.ron)
-/// - When config file is hot-reloaded in editor (development only)
-/// - When GameConfig asset receives AssetEvent::Modified
-///
-/// The conversion ensures simulation uses only fixed-point math from this point forward.
-fn update_sim_from_config(
+/// Initialize SimConfig from InitialConfig at startup.
+/// This runs once and sets up all the deterministic simulation parameters.
+fn init_sim_from_initial_config(
     mut fixed_time: ResMut<Time<Fixed>>,
     mut sim_config: ResMut<SimConfig>,
     mut spatial_hash: ResMut<SpatialHash>,
     mut map_flow_field: ResMut<MapFlowField>,
-    mut graph: ResMut<HierarchicalGraph>,
+    mut graph: Option<ResMut<HierarchicalGraph>>,
     mut map_status: ResMut<MapStatus>,
-    config_handle: Res<GameConfigHandle>,
-    game_configs: Res<Assets<GameConfig>>,
-    mut events: MessageReader<AssetEvent<GameConfig>>,
+    initial_config: Option<Res<InitialConfig>>,
     obstacles: Query<(Entity, &SimPosition, &Collider), With<StaticObstacle>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    for event in events.read() {
-        info!("Config event: {:?}", event);
-        if event.is_modified(config_handle.0.id()) || event.is_loaded_with_dependencies(config_handle.0.id()) {
-             if let Some(config) = game_configs.get(&config_handle.0) {
-                 // fixed_time.set_timestep_hz(config.tick_rate);
-                 fixed_time.set_timestep_seconds(1.0 / config.tick_rate);
-                 
-                 sim_config.tick_rate = config.tick_rate;
-                 sim_config.unit_speed = FixedNum::from_num(config.unit_speed);
-                 sim_config.map_width = FixedNum::from_num(config.map_width);
-                 sim_config.map_height = FixedNum::from_num(config.map_height);
-                 sim_config.unit_radius = FixedNum::from_num(config.unit_radius);
-                 sim_config.collision_push_strength = FixedNum::from_num(config.collision_push_strength);
-                 sim_config.collision_restitution = FixedNum::from_num(config.collision_restitution);
-                 sim_config.collision_drag = FixedNum::from_num(config.collision_drag);
-                 sim_config.collision_iterations = config.collision_iterations;
-                 sim_config.collision_search_radius_multiplier = FixedNum::from_num(config.collision_search_radius_multiplier);
-                 sim_config.obstacle_search_range = config.obstacle_search_range;
-                 sim_config.epsilon = FixedNum::from_num(config.epsilon);
-                 sim_config.obstacle_push_strength = FixedNum::from_num(config.obstacle_push_strength);
-                 sim_config.friction = FixedNum::from_num(config.friction);
-                 sim_config.min_velocity = FixedNum::from_num(config.min_velocity);
-                 sim_config.braking_force = FixedNum::from_num(config.braking_force);
-                 sim_config.touch_dist_multiplier = FixedNum::from_num(config.touch_dist_multiplier);
-                 sim_config.check_dist_multiplier = FixedNum::from_num(config.check_dist_multiplier);
-                 sim_config.arrival_threshold = FixedNum::from_num(config.arrival_threshold);
-                 sim_config.max_force = FixedNum::from_num(config.max_force);
-                 sim_config.steering_force = FixedNum::from_num(config.steering_force);
-                 sim_config.repulsion_force = FixedNum::from_num(config.repulsion_force);
-                 sim_config.repulsion_decay = FixedNum::from_num(config.repulsion_decay);
-                 sim_config.separation_weight = FixedNum::from_num(config.separation_weight);
-                 sim_config.alignment_weight = FixedNum::from_num(config.alignment_weight);
-                 sim_config.cohesion_weight = FixedNum::from_num(config.cohesion_weight);
-                 sim_config.neighbor_radius = FixedNum::from_num(config.neighbor_radius);
-                 sim_config.separation_radius = FixedNum::from_num(config.separation_radius);
-                 sim_config.black_hole_strength = FixedNum::from_num(config.black_hole_strength);
-                 sim_config.wind_spot_strength = FixedNum::from_num(config.wind_spot_strength);
-                 sim_config.force_source_radius = FixedNum::from_num(config.force_source_radius);
+    info!("Initializing SimConfig from InitialConfig");
+    
+    // Get config or use defaults
+    let config = match initial_config {
+        Some(cfg) => cfg.clone(),
+        None => {
+            warn!("InitialConfig not found, using defaults");
+            InitialConfig::default()
+        }
+    };
+    
+    // Set fixed timestep
+    fixed_time.set_timestep_seconds(1.0 / config.tick_rate);
+    
+    // Copy all values from InitialConfig to SimConfig
+    sim_config.tick_rate = config.tick_rate;
+    sim_config.unit_speed = FixedNum::from_num(config.unit_speed);
+    sim_config.map_width = FixedNum::from_num(config.map_width);
+    sim_config.map_height = FixedNum::from_num(config.map_height);
+    sim_config.unit_radius = FixedNum::from_num(config.unit_radius);
+    sim_config.collision_push_strength = FixedNum::from_num(config.collision_push_strength);
+    sim_config.collision_restitution = FixedNum::from_num(config.collision_restitution);
+    sim_config.collision_drag = FixedNum::from_num(config.collision_drag);
+    sim_config.collision_iterations = config.collision_iterations;
+    sim_config.collision_search_radius_multiplier = FixedNum::from_num(config.collision_search_radius_multiplier);
+    sim_config.obstacle_search_range = config.obstacle_search_range;
+    sim_config.epsilon = FixedNum::from_num(config.epsilon);
+    sim_config.obstacle_push_strength = FixedNum::from_num(config.obstacle_push_strength);
+    sim_config.friction = FixedNum::from_num(config.friction);
+    sim_config.min_velocity = FixedNum::from_num(config.min_velocity);
+    sim_config.braking_force = FixedNum::from_num(config.braking_force);
+    sim_config.touch_dist_multiplier = FixedNum::from_num(config.touch_dist_multiplier);
+    sim_config.check_dist_multiplier = FixedNum::from_num(config.check_dist_multiplier);
+    sim_config.arrival_threshold = FixedNum::from_num(config.arrival_threshold);
+    sim_config.max_force = FixedNum::from_num(config.max_force);
+    sim_config.steering_force = FixedNum::from_num(config.steering_force);
+    sim_config.repulsion_force = FixedNum::from_num(config.repulsion_force);
+    sim_config.repulsion_decay = FixedNum::from_num(config.repulsion_decay);
+    sim_config.separation_weight = FixedNum::from_num(config.separation_weight);
+    sim_config.alignment_weight = FixedNum::from_num(config.alignment_weight);
+    sim_config.cohesion_weight = FixedNum::from_num(config.cohesion_weight);
+    sim_config.neighbor_radius = FixedNum::from_num(config.neighbor_radius);
+    sim_config.separation_radius = FixedNum::from_num(config.separation_radius);
+    sim_config.black_hole_strength = FixedNum::from_num(config.black_hole_strength);
+    sim_config.wind_spot_strength = FixedNum::from_num(config.wind_spot_strength);
+    sim_config.force_source_radius = FixedNum::from_num(config.force_source_radius);
 
-                 // Resize spatial hash. Cell size should be at least diameter of unit (2 * radius)
-                 // Using neighbor_radius might be better if we use it for boids too.
-                 // But for collision, 2*radius is enough.
-                 // Let's use max(2*radius, neighbor_radius) to support both if we want to use it for boids later.
-                 // For now, just 2*radius + margin.
-                 let cell_size = sim_config.unit_radius * FixedNum::from_num(2.0) * FixedNum::from_num(1.5);
-                 spatial_hash.resize(sim_config.map_width, sim_config.map_height, cell_size);
+    // Resize spatial hash
+    let cell_size = sim_config.unit_radius * FixedNum::from_num(2.0) * FixedNum::from_num(1.5);
+    spatial_hash.resize(sim_config.map_width, sim_config.map_height, cell_size);
 
-                 let mut loaded_from_file = false;
-                 let map_path = "assets/maps/default.pmap";
+    // Try to load map from file
+    let mut loaded_from_file = false;
+    let map_path = "assets/maps/default.pmap";
 
-                 if !map_status.loaded {
-                     if let Ok(map_data) = map::load_map(map_path) {
-                         if map_data.version == MAP_VERSION && 
-                            map_data.cell_size == FixedNum::from_num(CELL_SIZE) &&
-                            map_data.cluster_size == CLUSTER_SIZE {
-                             
-                             info!("Loading map from {}", map_path);
-                             
-                             // Despawn existing obstacles
-                             for (e, _, _) in obstacles.iter() {
-                                 commands.entity(e).despawn();
-                             }
-
-                             // Spawn obstacles from map
-                             for obs in &map_data.obstacles {
-                                 commands.spawn((
-                                     crate::game::GameEntity,
-                                     Mesh3d(meshes.add(Cylinder::new(obs.radius.to_num(), 2.0))),
-                                     MeshMaterial3d(materials.add(Color::srgb(0.5, 0.5, 0.5))),
-                                     Transform::from_xyz(obs.position.x.to_num(), 1.0, obs.position.y.to_num()),
-                                     SimPosition(obs.position),
-                                     StaticObstacle,
-                                     Collider {
-                                         radius: obs.radius,
-                                         layer: layers::OBSTACLE,
-                                         mask: layers::UNIT,
-                                     },
-                                 ));
-                             }
-
-                             // Set FlowField
-                             let width = (map_data.map_width / map_data.cell_size).ceil().to_num::<usize>();
-                             let height = (map_data.map_height / map_data.cell_size).ceil().to_num::<usize>();
-                             let origin = FixedVec2::new(
-                                 -map_data.map_width / FixedNum::from_num(2.0),
-                                 -map_data.map_height / FixedNum::from_num(2.0),
-                             );
-                             
-                             let mut flow_field = FlowField::new(width, height, map_data.cell_size, origin);
-                             flow_field.cost_field = map_data.cost_field;
-                             map_flow_field.0 = flow_field;
-
-                             // Set Graph
-                             *graph = map_data.graph;
-                             graph.initialized = true;
-
-                             loaded_from_file = true;
-                             map_status.loaded = true;
-                         }
-                     }
-                 }
-
-                 if !loaded_from_file {
-                     // Resize MapFlowField
-                     let width = (sim_config.map_width / FixedNum::from_num(CELL_SIZE)).ceil().to_num::<usize>();
-                     let height = (sim_config.map_height / FixedNum::from_num(CELL_SIZE)).ceil().to_num::<usize>();
-                     let origin = FixedVec2::new(
-                         -sim_config.map_width / FixedNum::from_num(2.0),
-                         -sim_config.map_height / FixedNum::from_num(2.0),
-                     );
-                     map_flow_field.0 = FlowField::new(width, height, FixedNum::from_num(CELL_SIZE), origin);
-                     
-                     if !map_status.loaded {
-                         // Despawn existing
-                         for (e, _, _) in obstacles.iter() {
-                             commands.entity(e).despawn();
-                         }
-                         
-                         // Default Obstacle
-                         let obstacle_pos = FixedVec2::from_f32(5.0, 5.0);
-                         let obstacle_radius = FixedNum::from_num(2.0);
-                         
-                         commands.spawn((
-                             crate::game::GameEntity,
-                             Mesh3d(meshes.add(Cylinder::new(obstacle_radius.to_num(), 2.0))),
-                             MeshMaterial3d(materials.add(Color::srgb(0.5, 0.5, 0.5))),
-                             Transform::from_xyz(obstacle_pos.x.to_num(), 1.0, obstacle_pos.y.to_num()),
-                             SimPosition(obstacle_pos),
-                             StaticObstacle,
-                             Collider {
-                                 radius: obstacle_radius,
-                                 layer: layers::OBSTACLE,
-                                 mask: layers::UNIT,
-                             },
-                         ));
-
-                         // Apply to flow field
-                         let flow_field = &mut map_flow_field.0;
-                         apply_obstacle_to_flow_field(flow_field, obstacle_pos, obstacle_radius);
-                         
-                         map_status.loaded = true;
-                     } else {
-                         // Re-apply obstacles
-                         let flow_field = &mut map_flow_field.0;
-                        for (_, pos, collider) in obstacles.iter() {
-                            apply_obstacle_to_flow_field(flow_field, pos.0, collider.radius);
-                        }
-                    }
-
-                    // Reset Graph
-                    graph.reset();
+    if !map_status.loaded {
+        if let Ok(map_data) = map::load_map(map_path) {
+            if map_data.version == MAP_VERSION && 
+               map_data.cell_size == FixedNum::from_num(CELL_SIZE) &&
+               map_data.cluster_size == CLUSTER_SIZE {
+                
+                info!("Loading map from {}", map_path);
+                
+                // Despawn existing obstacles
+                for (e, _, _) in obstacles.iter() {
+                    commands.entity(e).despawn();
                 }
 
-                info!("Updated tick rate to {}", config.tick_rate);
+                // Spawn obstacles from map
+                for obs in &map_data.obstacles {
+                    commands.spawn((
+                        crate::game::GameEntity,
+                        Mesh3d(meshes.add(Cylinder::new(obs.radius.to_num(), 2.0))),
+                        MeshMaterial3d(materials.add(Color::srgb(0.5, 0.5, 0.5))),
+                        Transform::from_xyz(obs.position.x.to_num(), 1.0, obs.position.y.to_num()),
+                        SimPosition(obs.position),
+                        StaticObstacle,
+                        Collider {
+                            radius: obs.radius,
+                            layer: layers::OBSTACLE,
+                            mask: layers::UNIT,
+                        },
+                    ));
+                }
+
+                // Set FlowField
+                let width = (map_data.map_width / map_data.cell_size).ceil().to_num::<usize>();
+                let height = (map_data.map_height / map_data.cell_size).ceil().to_num::<usize>();
+                let origin = FixedVec2::new(
+                    -map_data.map_width / FixedNum::from_num(2.0),
+                    -map_data.map_height / FixedNum::from_num(2.0),
+                );
+                
+                let mut flow_field = FlowField::new(width, height, map_data.cell_size, origin);
+                flow_field.cost_field = map_data.cost_field;
+                map_flow_field.0 = flow_field;
+
+                // Set Graph (if available)
+                if let Some(ref mut graph) = graph {
+                    **graph = map_data.graph;
+                    graph.initialized = true;
+                }
+
+                loaded_from_file = true;
+                map_status.loaded = true;
+            }
+        }
+    }
+
+    if !loaded_from_file {
+        // Resize MapFlowField based on initial config
+        let width = (sim_config.map_width / FixedNum::from_num(CELL_SIZE)).ceil().to_num::<usize>();
+        let height = (sim_config.map_height / FixedNum::from_num(CELL_SIZE)).ceil().to_num::<usize>();
+        let origin = FixedVec2::new(
+            -sim_config.map_width / FixedNum::from_num(2.0),
+            -sim_config.map_height / FixedNum::from_num(2.0),
+        );
+        
+        map_flow_field.0 = FlowField::new(width, height, FixedNum::from_num(CELL_SIZE), origin);
+        info!("Initialized FlowField from InitialConfig: {}x{} cells", width, height);
+    }
+}
+
+/// Handle hot-reloadable runtime configuration (controls, camera, debug settings).
+/// This system watches for changes to game_config.ron and updates non-deterministic
+/// settings that can safely change during gameplay.
+fn update_sim_from_runtime_config(
+    config_handle: Res<GameConfigHandle>,
+    game_configs: Res<Assets<GameConfig>>,
+    mut events: MessageReader<AssetEvent<GameConfig>>,
+) {
+    for event in events.read() {
+        if event.is_modified(config_handle.0.id()) || event.is_loaded_with_dependencies(config_handle.0.id()) {
+            if let Some(_config) = game_configs.get(&config_handle.0) {
+                info!("Runtime config loaded/updated (controls, camera, debug settings)");
+                // The config is stored in the asset and accessed when needed by other systems
+                // No need to copy values here since systems read from GameConfig directly
             }
         }
     }
@@ -583,24 +556,41 @@ fn apply_velocity(
 }
 
 fn constrain_to_map_bounds(
-    mut query: Query<(&mut SimPosition, &mut SimVelocity)>,
+    mut query: Query<(Entity, &mut SimPosition, &mut SimVelocity)>,
     sim_config: Res<SimConfig>,
 ) {
     let half_w = sim_config.map_width / FixedNum::from_num(2.0);
     let half_h = sim_config.map_height / FixedNum::from_num(2.0);
+    
+    let mut escaped_count = 0;
 
-    for (mut pos, mut vel) in query.iter_mut() {
+    for (entity, mut pos, mut vel) in query.iter_mut() {
+        let was_out_of_bounds = pos.0.x < -half_w || pos.0.x > half_w || 
+                                 pos.0.y < -half_h || pos.0.y > half_h;
+        
         // 1. Clamp Position
         if pos.0.x < -half_w { pos.0.x = -half_w; }
         if pos.0.x > half_w { pos.0.x = half_w; }
         if pos.0.y < -half_h { pos.0.y = -half_h; }
         if pos.0.y > half_h { pos.0.y = half_h; }
+        
+        if was_out_of_bounds {
+            escaped_count += 1;
+            if escaped_count <= 3 {
+                warn!("[BOUNDS] Entity {:?} was outside map bounds! Pos: {:?}, Bounds: ±{} x ±{}", 
+                      entity, pos.0, half_w, half_h);
+            }
+        }
 
         // 2. Zero Velocity against walls
         if pos.0.x <= -half_w && vel.0.x < FixedNum::ZERO { vel.0.x = FixedNum::ZERO; }
         if pos.0.x >= half_w && vel.0.x > FixedNum::ZERO { vel.0.x = FixedNum::ZERO; }
         if pos.0.y <= -half_h && vel.0.y < FixedNum::ZERO { vel.0.y = FixedNum::ZERO; }
         if pos.0.y >= half_h && vel.0.y > FixedNum::ZERO { vel.0.y = FixedNum::ZERO; }
+    }
+    
+    if escaped_count > 3 {
+        warn!("[BOUNDS] {} total entities escaped map bounds this tick!", escaped_count);
     }
 }
 
@@ -611,7 +601,11 @@ fn detect_collisions(
     sim_config: Res<SimConfig>,
     mut events: MessageWriter<CollisionEvent>,
 ) {
+    let start_time = std::time::Instant::now();
     let mut colliding_entities = std::collections::HashSet::new();
+    let total_entities = query.iter().count();
+    let mut total_potential_checks = 0;
+    let mut actual_collision_count = 0;
 
     // We need to check collisions.
     // To avoid duplicates, we can enforce order, but SpatialHash returns neighbors which might include entities "behind" us in iteration order.
@@ -625,6 +619,7 @@ fn detect_collisions(
         let search_radius = collider.radius * sim_config.collision_search_radius_multiplier; 
         
         let potential_collisions = spatial_hash.get_potential_collisions(pos.0, search_radius, Some(entity));
+        total_potential_checks += potential_collisions.len();
         
         for (other_entity, _) in potential_collisions {
             if entity > other_entity { continue; } // Avoid duplicates (self already excluded)
@@ -644,6 +639,7 @@ fn detect_collisions(
                 if dist_sq < min_dist_sq {
                     colliding_entities.insert(entity);
                     colliding_entities.insert(other_entity);
+                    actual_collision_count += 1;
                     
                     let dist = dist_sq.sqrt();
                     let overlap = min_dist - dist;
@@ -676,6 +672,13 @@ fn detect_collisions(
         } else {
             commands.entity(entity).remove::<Colliding>();
         }
+    }
+    
+    let duration = start_time.elapsed();
+    // Log every 100 ticks or if collision detection is slow (> 10ms)
+    if duration.as_millis() > 10 {
+        warn!("[COLLISION] Slow collision detection: {:?} | entities: {} | potential checks: {} | actual collisions: {}", 
+              duration, total_entities, total_potential_checks, actual_collision_count);
     }
 }
 
@@ -883,8 +886,19 @@ fn apply_new_obstacles(
     mut graph: ResMut<HierarchicalGraph>,
     obstacles: Query<(&SimPosition, &Collider), Added<StaticObstacle>>,
 ) {
+    let obstacle_count = obstacles.iter().count();
+    if obstacle_count == 0 {
+        return;
+    }
+    
+    let start_time = std::time::Instant::now();
+    info!("apply_new_obstacles: START - Processing {} new obstacles", obstacle_count);
     let flow_field = &mut map_flow_field.0;
-    for (pos, collider) in obstacles.iter() {
+    
+    for (i, (pos, collider)) in obstacles.iter().enumerate() {
+        if i % 10 == 0 && i > 0 {
+            info!("  Applied {}/{} obstacles to flow field", i, obstacle_count);
+        }
         apply_obstacle_to_flow_field(flow_field, pos.0, collider.radius);
         
         // Invalidate affected cluster caches so units reroute around the new obstacle
@@ -915,6 +929,9 @@ fn apply_new_obstacles(
             }
         }
     }
+    
+    let duration = start_time.elapsed();
+    info!("apply_new_obstacles: END - Completed processing {} obstacles in {:?}", obstacle_count, duration);
 }
 
 
@@ -928,7 +945,11 @@ fn toggle_debug(
 
     if keyboard.just_pressed(config.key_debug_flow) {
         debug_config.show_flow_field = !debug_config.show_flow_field;
-        info!("Flow field debug: {}", debug_config.show_flow_field);
+        if debug_config.show_flow_field {
+            info!("Flow field debug enabled - rendering flow field gizmos");
+        } else {
+            info!("Flow field debug disabled");
+        }
     }
     if keyboard.just_pressed(config.key_debug_graph) {
         debug_config.show_pathfinding_graph = !debug_config.show_pathfinding_graph;
@@ -1046,6 +1067,8 @@ pub fn follow_path(
     graph: Res<HierarchicalGraph>,
     map_flow_field: Res<MapFlowField>,
 ) {
+    let start_time = std::time::Instant::now();
+    let path_count = query.iter().count();
     let speed = sim_config.unit_speed;
     let max_force = sim_config.steering_force;
     let dt = FixedNum::ONE / FixedNum::from_num(sim_config.tick_rate);
@@ -1160,6 +1183,12 @@ pub fn follow_path(
                 }
             }
         }
+    }
+    
+    // Log if path processing is slow (> 5ms)
+    let duration = start_time.elapsed();
+    if duration.as_millis() > 5 {
+        warn!("[PATH] Slow path following: {:?} for {} paths", duration, path_count);
     }
 }
 
@@ -1415,16 +1444,38 @@ fn should_draw_cluster(cluster_center: Vec2, camera_center: Vec2, view_radius: f
     (true, lod_step)
 }
 
-fn sim_start(mut stats: ResMut<SimPerformance>) {
+fn sim_start(
+    mut stats: ResMut<SimPerformance>,
+    time: Res<Time<Fixed>>,
+    units_query: Query<Entity, With<crate::game::unit::Unit>>,
+    paths_query: Query<&Path>,
+) {
     stats.start_time = Some(Instant::now());
+    
+    // Log every 5 seconds (100 ticks at 20 Hz)
+    let tick = (time.elapsed_secs() * 20.0) as u64;
+    if tick % 100 == 0 {
+        let unit_count = units_query.iter().count();
+        let path_count = paths_query.iter().count();
+        info!("[SIM STATUS] Tick: {} | Units: {} | Active Paths: {} | Last sim duration: {:?}", 
+              tick, unit_count, path_count, stats.last_duration);
+    }
 }
 
 fn sim_end(mut stats: ResMut<SimPerformance>) {
     if let Some(start) = stats.start_time {
         stats.last_duration = start.elapsed();
-        // Log occasionally? Or just store it.
-        // Let's log if it exceeds a threshold, e.g., 16ms (60fps)
-        if stats.last_duration.as_millis() > 16 {
+        
+        // Performance threshold depends on build mode:
+        // - Debug builds are much slower (10-50x), so use a higher threshold
+        // - Release builds should target 60fps (16ms) or better
+        #[cfg(debug_assertions)]
+        const THRESHOLD_MS: u128 = 100; // Debug builds: warn if > 100ms
+        
+        #[cfg(not(debug_assertions))]
+        const THRESHOLD_MS: u128 = 16; // Release builds: warn if > 16ms (60fps)
+        
+        if stats.last_duration.as_millis() > THRESHOLD_MS {
             warn!("Sim tick took too long: {:?}", stats.last_duration);
         }
     }

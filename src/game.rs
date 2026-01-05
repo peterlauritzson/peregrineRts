@@ -80,6 +80,9 @@ impl Plugin for GamePlugin {
 #[derive(Component)]
 pub struct GameEntity;
 
+#[derive(Component)]
+pub struct GroundPlane;
+
 fn setup_common(mut commands: Commands) {
     // UI Camera - needed for Menu and HUD
     commands.spawn((
@@ -95,14 +98,20 @@ fn setup_game(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    sim_config: Res<simulation::SimConfig>,
 ) {
     info!("Game setup started");
 
-    // Ground Plane
+    // Ground Plane - sized to match map dimensions
+    let map_width = sim_config.map_width.to_num::<f32>();
+    let map_height = sim_config.map_height.to_num::<f32>();
+    info!("Creating ground plane: {}x{}", map_width, map_height);
+    
     commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(2048.0, 2048.0))),
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(map_width, map_height))),
         MeshMaterial3d(materials.add(Color::srgb(0.3, 0.5, 0.3))),
         GameEntity,
+        GroundPlane,
     ));
 
     // Light

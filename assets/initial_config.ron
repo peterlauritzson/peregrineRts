@@ -1,0 +1,58 @@
+// Initial/Static Configuration
+// These values are loaded ONCE at startup and define fundamental game parameters.
+// Changing these requires restarting the game or explicitly regenerating content.
+// DO NOT modify these during gameplay as they affect determinism.
+
+(
+    // Simulation Core
+    tick_rate: 30.0,
+    unit_speed: 10.0,
+    map_width: 2048.0,
+    map_height: 2048.0,
+    unit_radius: 0.5,
+
+    // Collision Physics
+    collision_push_strength: 1.0,
+    collision_restitution: 0.5,
+    collision_drag: 0.02,
+    collision_iterations: 4,
+    collision_search_radius_multiplier: 4.0,
+    obstacle_search_range: 1,
+    epsilon: 0.0001,
+    obstacle_push_strength: 1.0,
+    arrival_threshold: 0.01,
+
+    // Movement & Forces
+    max_force: 40.0,
+    steering_force: 40.0,
+    repulsion_force: 20.0,
+    repulsion_decay: 2.0,
+    friction: 0.98,
+    min_velocity: 0.01,
+    braking_force: 5.0,
+    touch_dist_multiplier: 2.1,
+    check_dist_multiplier: 4.0,
+    
+    // Boids Behavior
+    separation_weight: 1.5,
+    alignment_weight: 1.0,
+    cohesion_weight: 1.0,
+    neighbor_radius: 5.0,
+    separation_radius: 1.5,
+
+    // Force Sources
+    black_hole_strength: 50.0,
+    wind_spot_strength: -50.0,
+    force_source_radius: 10.0,
+
+    // Editor Defaults
+    editor_num_obstacles: 50,
+    editor_obstacle_min_radius: 10.0,
+    editor_obstacle_max_radius: 50.0,
+    editor_default_obstacle_radius: 20.0,
+    editor_map_size_x: 2048.0,
+    editor_map_size_y: 2048.0,
+    
+    // Pathfinding
+    pathfinding_build_batch_size: 5,
+)

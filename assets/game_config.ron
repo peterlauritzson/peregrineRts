@@ -1,20 +1,9 @@
-(
-    tick_rate: 30.0,
-    unit_speed: 10.0,
-    map_width: 2048.0,
-    map_height: 2048.0,
-    unit_radius: 0.5,
-    collision_push_strength: 1.0,
-    collision_restitution: 0.5,
-    collision_drag: 0.02,
-    collision_iterations: 4,
-    collision_search_radius_multiplier: 4.0,
-    obstacle_search_range: 1,
-    epsilon: 0.0001,
-    obstacle_push_strength: 1.0,
-    arrival_threshold: 0.01,
+// Runtime Configuration
+// These values can be hot-reloaded during gameplay.
+// They affect controls, camera, UI, and debug visualization.
 
-    // Controls
+(
+    // Key Bindings (hot-reloadable)
     key_camera_forward: KeyW,
     key_camera_backward: KeyS,
     key_camera_left: KeyA,
@@ -28,47 +17,16 @@
     key_pause: Escape,
     key_toggle_health_bars: KeyL,
 
-    // Camera
+    // Camera Settings (hot-reloadable)
     camera_speed: 20.0,
     camera_zoom_speed: 50.0,
 
-    // Gameplay
-    black_hole_strength: 50.0,
-    wind_spot_strength: -50.0,
-    force_source_radius: 10.0,
+    // UI Settings (hot-reloadable)
     selection_drag_threshold: 5.0,
     selection_click_radius: 1.0,
-
-    max_force: 40.0,
-    steering_force: 40.0,
-    repulsion_force: 20.0,
-    repulsion_decay: 2.0,
-    friction: 0.98,
-    min_velocity: 0.01,
-    braking_force: 5.0,
-    touch_dist_multiplier: 2.1,
-    check_dist_multiplier: 4.0,
     
-    // Boids
-    separation_weight: 1.5,
-    alignment_weight: 1.0,
-    cohesion_weight: 1.0,
-    neighbor_radius: 5.0,
-    separation_radius: 1.5,
-
-    // Editor
-    editor_num_obstacles: 50,
-    editor_obstacle_min_radius: 10.0,
-    editor_obstacle_max_radius: 50.0,
-    editor_default_obstacle_radius: 20.0,
-    editor_map_size_x: 2048.0,
-    editor_map_size_y: 2048.0,
-    
-    // Debug visualization settings
+    // Debug Visualization (hot-reloadable)
     debug_flow_field_view_radius: 50.0,
     debug_path_trace_max_steps: 200,
     debug_unit_lod_height_threshold: 50.0,
-    
-    // Pathfinding settings
-    pathfinding_build_batch_size: 5,
 )
