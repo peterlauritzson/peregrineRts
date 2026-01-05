@@ -105,7 +105,7 @@ impl Default for Path {
 /// - [PATHFINDING.md](documents/Design%20docs/PATHFINDING.md) - Detailed design doc
 /// - `incremental_build_graph()` - Non-blocking graph construction
 /// - Memory budget analysis in CURRENT_IMPROVEMENTS.md Issue #9
-#[derive(Resource, Default, Serialize, Deserialize)]
+#[derive(Resource, Default, Serialize, Deserialize, Clone)]
 pub struct HierarchicalGraph {
     pub nodes: Vec<Portal>,
     pub edges: BTreeMap<usize, Vec<(usize, FixedNum)>>, // PortalId -> [(TargetPortalId, Cost)]

@@ -586,6 +586,12 @@ fn editor_button_system(
                         build_state.step = GraphBuildStep::NotStarted;
                     }
                     EditorButtonAction::SaveMap => {
+                        // Check if graph is initialized before saving
+                        if !graph.initialized {
+                            warn!("Cannot save map - graph not finalized yet! Click 'Finalize / Bake Map' and wait for completion.");
+                            return;
+                        }
+                        
                         let mut obstacles = Vec::new();
                         for (pos, collider) in all_obstacles_query.iter() {
                             obstacles.push(MapObstacle {
@@ -594,9 +600,8 @@ fn editor_button_system(
                             });
                         }
                         
-                        // Create MapData
-                        // Note: We need to get map dimensions and other config from somewhere.
-                        // For now, hardcoding or using defaults.
+                        info!("Saving map with {} portals and {} clusters", graph.nodes.len(), graph.clusters.len());
+                        
                         let map_data = MapData {
                             version: MAP_VERSION,
                             map_width: FixedNum::from_num(editor_state.current_map_size.x),
@@ -605,8 +610,8 @@ fn editor_button_system(
                             cluster_size: CLUSTER_SIZE,
                             obstacles,
                             start_locations: vec![], // TODO: Add start locations
-                            cost_field: map_flow_field.0.cost_field.clone(), // Use current flow field cost
-                            graph: Default::default(), // Will be generated on load
+                            cost_field: map_flow_field.0.cost_field.clone(),
+                            graph: graph.clone(), // Save the built graph!
                         };
                         
                         if let Err(e) = save_map("assets/maps/default.pmap", &map_data) {
@@ -800,6 +805,9 @@ fn check_finalization_complete(
 
     if graph.initialized {
         editor_state.is_finalizing = false;
+        info!("Map finalization COMPLETE! Graph has {} portals and {} clusters", 
+              graph.nodes.len(), graph.clusters.len());
+        info!("You can now save the map.");
         // Remove loading overlay
         for entity in loading_query.iter() {
             commands.entity(entity).despawn();

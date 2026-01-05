@@ -253,6 +253,7 @@ impl Plugin for SimulationPlugin {
 
         // Register Systems
         app.add_systems(Startup, (init_flow_field, init_sim_from_initial_config).chain());
+        app.add_systems(OnEnter(GameState::InGame), update_ground_plane_from_loaded_map);
         app.add_systems(Update, (update_sim_from_runtime_config, toggle_debug, draw_flow_field_gizmos, draw_force_sources, draw_unit_paths).run_if(in_state(GameState::InGame).or(in_state(GameState::Editor)).or(in_state(GameState::Loading))));
         app.add_systems(Update, apply_new_obstacles.run_if(in_state(GameState::InGame).or(in_state(GameState::Editor)).or(in_state(GameState::Loading))));
         app.add_systems(FixedUpdate, (
@@ -384,11 +385,23 @@ fn init_sim_from_initial_config(
                 let mut flow_field = FlowField::new(width, height, map_data.cell_size, origin);
                 flow_field.cost_field = map_data.cost_field;
                 map_flow_field.0 = flow_field;
+                
+                // Update SimConfig with loaded map dimensions
+                sim_config.map_width = map_data.map_width;
+                sim_config.map_height = map_data.map_height;
+                info!("Updated SimConfig from loaded map: {}x{}", 
+                      map_data.map_width.to_num::<f32>(), map_data.map_height.to_num::<f32>());
+                
+                // Update SpatialHash with loaded map dimensions
+                let cell_size = sim_config.unit_radius * FixedNum::from_num(2.0) * FixedNum::from_num(1.5);
+                spatial_hash.resize(map_data.map_width, map_data.map_height, cell_size);
+                info!("Updated SpatialHash for loaded map size");
 
                 // Set Graph (if available)
                 if let Some(ref mut graph) = graph {
                     **graph = map_data.graph;
                     graph.initialized = true;
+                    info!("Loaded hierarchical graph with {} portals", graph.nodes.len());
                 }
 
                 loaded_from_file = true;
@@ -408,6 +421,30 @@ fn init_sim_from_initial_config(
         
         map_flow_field.0 = FlowField::new(width, height, FixedNum::from_num(CELL_SIZE), origin);
         info!("Initialized FlowField from InitialConfig: {}x{} cells", width, height);
+    }
+}
+
+/// Update ground plane mesh to match loaded map dimensions.
+/// This runs when entering InGame state, after init_sim_from_initial_config has loaded the map.
+fn update_ground_plane_from_loaded_map(
+    mut commands: Commands,
+    sim_config: Res<SimConfig>,
+    ground_plane_query: Query<(Entity, &Mesh3d), With<crate::game::GroundPlane>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    map_status: Res<MapStatus>,
+) {
+    // Only update if a map was actually loaded
+    if !map_status.loaded {
+        return;
+    }
+    
+    let map_width = sim_config.map_width.to_num::<f32>();
+    let map_height = sim_config.map_height.to_num::<f32>();
+    
+    for (entity, _mesh3d) in ground_plane_query.iter() {
+        let new_mesh = meshes.add(Plane3d::default().mesh().size(map_width, map_height));
+        commands.entity(entity).insert(Mesh3d(new_mesh));
+        info!("Updated ground plane to match loaded map: {}x{}", map_width, map_height);
     }
 }
 
@@ -940,20 +977,32 @@ fn toggle_debug(
     mut debug_config: ResMut<DebugConfig>,
     config_handle: Res<GameConfigHandle>,
     game_configs: Res<Assets<GameConfig>>,
+    graph: Res<HierarchicalGraph>,
+    map_flow_field: Res<MapFlowField>,
 ) {
     let Some(config) = game_configs.get(&config_handle.0) else { return };
 
     if keyboard.just_pressed(config.key_debug_flow) {
         debug_config.show_flow_field = !debug_config.show_flow_field;
         if debug_config.show_flow_field {
-            info!("Flow field debug enabled - rendering flow field gizmos");
+            info!("Flow field debug ENABLED - rendering flow field gizmos");
+            info!("  Graph initialized: {}", graph.initialized);
+            info!("  Graph clusters: {}", graph.clusters.len());
+            info!("  Flow field size: {}x{}", map_flow_field.0.width, map_flow_field.0.height);
         } else {
             info!("Flow field debug disabled");
         }
     }
     if keyboard.just_pressed(config.key_debug_graph) {
         debug_config.show_pathfinding_graph = !debug_config.show_pathfinding_graph;
-        info!("Pathfinding graph debug: {}", debug_config.show_pathfinding_graph);
+        if debug_config.show_pathfinding_graph {
+            info!("Pathfinding graph debug ENABLED");
+            info!("  Graph initialized: {}", graph.initialized);
+            info!("  Total portals: {}", graph.nodes.len());
+            info!("  Total clusters: {}", graph.clusters.len());
+        } else {
+            info!("Pathfinding graph debug disabled");
+        }
     }
     if keyboard.just_pressed(config.key_debug_path) {
         debug_config.show_paths = !debug_config.show_paths;
@@ -971,6 +1020,16 @@ fn draw_flow_field_gizmos(
     q_camera: Query<(&Camera, &GlobalTransform), With<crate::game::camera::RtsCamera>>,
 ) {
     if !debug_config.show_flow_field {
+        return;
+    }
+    
+    if !graph.initialized {
+        warn!("[DEBUG] Cannot draw flow field - graph not initialized!");
+        return;
+    }
+    
+    if graph.clusters.is_empty() {
+        warn!("[DEBUG] Cannot draw flow field - no clusters in graph!");
         return;
     }
 
