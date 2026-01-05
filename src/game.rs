@@ -9,7 +9,6 @@ pub mod math;
 pub mod flow_field;
 pub mod spatial_hash;
 pub mod pathfinding;
-pub mod stress_test;
 pub mod map;
 mod menu;
 mod hud;
@@ -22,7 +21,6 @@ use control::ControlPlugin;
 use simulation::SimulationPlugin;
 use config::GameConfigPlugin;
 use pathfinding::PathfindingPlugin;
-use stress_test::StressTestPlugin;
 use menu::MenuPlugin;
 use hud::HudPlugin;
 use loading::LoadingPlugin;
@@ -39,8 +37,12 @@ pub enum GameState {
     Paused,
 }
 
-pub struct GamePlugin {
-    pub stress_test: bool,
+pub struct GamePlugin;
+
+impl Default for GamePlugin {
+    fn default() -> Self {
+        Self
+    }
 }
 
 impl Plugin for GamePlugin {
@@ -59,10 +61,6 @@ impl Plugin for GamePlugin {
             LoadingPlugin,
             EditorPlugin,
         ));
-
-        if self.stress_test {
-            app.add_plugins(StressTestPlugin);
-        }
         
         // Common setup (UI Camera)
         app.add_systems(Startup, setup_common);

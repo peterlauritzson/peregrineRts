@@ -71,6 +71,7 @@ pub struct GameConfig {
     pub key_spawn_black_hole: KeyCode,
     pub key_spawn_wind_spot: KeyCode,
     pub key_spawn_unit: KeyCode,
+    pub key_spawn_batch: KeyCode,
     pub key_pause: KeyCode,
     pub key_toggle_health_bars: KeyCode,
 

@@ -316,7 +316,7 @@ impl Plugin for PathfindingPlugin {
         // Removed synchronous build_graph system that froze the game for 10+ seconds on large maps
         app.add_systems(Update, (draw_graph_gizmos).run_if(in_state(GameState::InGame).or(in_state(GameState::Editor))));
         app.add_systems(FixedUpdate, process_path_requests.run_if(in_state(GameState::InGame).or(in_state(GameState::Editor))));
-        app.add_systems(Update, incremental_build_graph.run_if(in_state(GameState::Loading).or(in_state(GameState::Editor))));
+        app.add_systems(Update, incremental_build_graph.run_if(in_state(GameState::Loading).or(in_state(GameState::Editor)).or(in_state(GameState::InGame))));
         app.add_systems(OnEnter(GameState::Loading), start_graph_build);
     }
 }

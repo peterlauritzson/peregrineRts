@@ -6,6 +6,7 @@ use crate::game::math::{FixedVec2, FixedNum};
 use crate::game::camera::RtsCamera;
 use crate::game::config::{GameConfig, GameConfigHandle, InitialConfig};
 use crate::game::GameState;
+use rand::{rng, Rng};
 
 pub struct ControlPlugin;
 
@@ -223,7 +224,8 @@ fn handle_debug_spawning(
 
     if keys.just_pressed(config.key_spawn_black_hole) || 
        keys.just_pressed(config.key_spawn_wind_spot) ||
-       keys.just_pressed(config.key_spawn_unit) {
+       keys.just_pressed(config.key_spawn_unit) ||
+       keys.just_pressed(config.key_spawn_batch) {
          let Ok(ray) = camera.viewport_to_world(camera_transform, cursor_position) else { return };
         
         // Intersect with ground plane (y=0)
@@ -268,8 +270,31 @@ fn handle_debug_spawning(
                         player_id: 0,
                         position: pos_fixed,
                     });
+                } else if keys.just_pressed(config.key_spawn_batch) {
+                    info!("Spawning batch of units at {:?}", pos_fixed);
+                    spawn_batch_at(&mut spawn_events, 100, intersection_point.x, intersection_point.z);
                 }
             }
         }
+    }
+}
+
+fn spawn_batch_at(
+    spawn_events: &mut MessageWriter<SpawnUnitCommand>,
+    count: usize,
+    center_x: f32,
+    center_z: f32,
+) {
+    let mut rng = rng();
+    let spread = 50.0; // Spread units around the click
+    
+    for _ in 0..count {
+        let pos_x = center_x + rng.random_range(-spread..spread);
+        let pos_z = center_z + rng.random_range(-spread..spread);
+        
+        spawn_events.write(SpawnUnitCommand {
+            player_id: 0,
+            position: FixedVec2::from_f32(pos_x, pos_z),
+        });
     }
 }

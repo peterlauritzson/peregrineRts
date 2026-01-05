@@ -10,6 +10,15 @@ use crate::game::pathfinding::{CLUSTER_SIZE, HierarchicalGraph, GraphBuildState,
 use crate::game::spatial_hash::SpatialHash;
 use rand::Rng;
 
+#[derive(Resource)]
+pub struct PendingMapGeneration {
+    pub map_width: f32,
+    pub map_height: f32,
+    pub num_obstacles: usize,
+    pub min_radius: f32,
+    pub max_radius: f32,
+}
+
 pub struct EditorPlugin;
 
 impl Plugin for EditorPlugin {
@@ -24,9 +33,9 @@ impl Plugin for EditorPlugin {
 }
 
 #[derive(Resource)]
-struct EditorResources {
-    obstacle_mesh: Handle<Mesh>,
-    obstacle_material: Handle<StandardMaterial>,
+pub struct EditorResources {
+    pub obstacle_mesh: Handle<Mesh>,
+    pub obstacle_material: Handle<StandardMaterial>,
 }
 
 fn setup_editor_resources(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<StandardMaterial>>) {

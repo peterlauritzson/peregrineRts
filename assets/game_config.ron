@@ -14,6 +14,7 @@
     key_spawn_black_hole: KeyB,
     key_spawn_wind_spot: KeyV,
     key_spawn_unit: Space,
+    key_spawn_batch: KeyN,
     key_pause: Escape,
     key_toggle_health_bars: KeyL,
 

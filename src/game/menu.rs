@@ -5,6 +5,29 @@ use crate::game::config::{GameConfig, GameConfigHandle};
 use std::fs;
 use bevy::window::WindowMode;
 
+#[derive(Resource, Default)]
+struct RandomMapState {
+    show_dialog: bool,
+    map_width: String,
+    map_height: String,
+    num_obstacles: String,
+    obstacle_size: String,
+}
+
+#[derive(Component, Clone, Copy, PartialEq)]
+enum RandomMapInputField {
+    MapWidth,
+    MapHeight,
+    NumObstacles,
+    ObstacleSize,
+}
+
+#[derive(Resource, Default)]
+struct ActiveRandomMapField {
+    field: Option<RandomMapInputField>,
+    first_input: bool,
+}
+
 pub struct MenuPlugin;
 
 macro_rules! spawn_button {
@@ -38,9 +61,11 @@ macro_rules! spawn_button {
 
 impl Plugin for MenuPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(GameState::MainMenu), setup_menu)
+        app.init_resource::<RandomMapState>()
+           .init_resource::<ActiveRandomMapField>()
+           .add_systems(OnEnter(GameState::MainMenu), setup_menu)
            .add_systems(OnExit(GameState::MainMenu), cleanup_menu)
-           .add_systems(Update, menu_action.run_if(in_state(GameState::MainMenu)))
+           .add_systems(Update, (menu_action, handle_random_map_dialog, handle_random_map_input_clicks, keyboard_input_random_map).run_if(in_state(GameState::MainMenu)))
            
            // Pause Logic
            .add_systems(Update, toggle_pause.run_if(in_state(GameState::InGame).or(in_state(GameState::Paused)).or(in_state(GameState::Editor))))
@@ -61,6 +86,7 @@ struct MenuRoot;
 #[derive(Component)]
 enum MenuButtonAction {
     Play,
+    PlayRandomMap,
     Editor,
     Settings,
     Quit,
@@ -91,6 +117,7 @@ enum BindableAction {
     SpawnBlackHole,
     SpawnWindSpot,
     SpawnUnit,
+    SpawnBatch,
     Pause,
     ToggleHealthBars,
 }
@@ -108,6 +135,7 @@ impl BindableAction {
             BindableAction::SpawnBlackHole => "Spawn Black Hole".to_string(),
             BindableAction::SpawnWindSpot => "Spawn Wind Spot".to_string(),
             BindableAction::SpawnUnit => "Spawn Unit".to_string(),
+            BindableAction::SpawnBatch => "Spawn Batch".to_string(),
             BindableAction::Pause => "Pause".to_string(),
             BindableAction::ToggleHealthBars => "Toggle Health Bars".to_string(),
         }
@@ -121,6 +149,23 @@ enum SettingsButtonAction {
     ToggleFullscreen,
     Save,
 }
+
+#[derive(Component)]
+enum RandomMapDialogAction {
+    Generate,
+    Cancel,
+    IncrementMapWidth,
+    DecrementMapWidth,
+    IncrementMapHeight,
+    DecrementMapHeight,
+    IncrementObstacles,
+    DecrementObstacles,
+    IncrementObstacleSize,
+    DecrementObstacleSize,
+}
+
+#[derive(Component)]
+struct RandomMapDialogRoot;
 
 #[derive(Component)]
 struct Rebinding;
@@ -155,6 +200,9 @@ fn setup_menu(mut commands: Commands) {
             // Play Button
             spawn_button!(parent, "Play Game", MenuButtonAction::Play);
             
+            // Play Random Map Button
+            spawn_button!(parent, "Play Random Map", MenuButtonAction::PlayRandomMap);
+            
             // Editor Button
             spawn_button!(parent, "Map Editor", MenuButtonAction::Editor);
 
@@ -166,10 +214,19 @@ fn setup_menu(mut commands: Commands) {
         });
 }
 
-fn cleanup_menu(mut commands: Commands, query: Query<Entity, With<MenuRoot>>) {
+fn cleanup_menu(
+    mut commands: Commands,
+    query: Query<Entity, With<MenuRoot>>,
+    dialog_query: Query<Entity, With<RandomMapDialogRoot>>,
+    mut random_map_state: ResMut<RandomMapState>,
+) {
     for entity in query.iter() {
         commands.entity(entity).despawn();
     }
+    for entity in dialog_query.iter() {
+        commands.entity(entity).despawn();
+    }
+    random_map_state.show_dialog = false;
 }
 
 fn menu_action(
@@ -180,6 +237,7 @@ fn menu_action(
     mut next_state: ResMut<NextState<GameState>>,
     mut exit: MessageWriter<AppExit>,
     mut commands: Commands,
+    mut random_map_state: ResMut<RandomMapState>,
 ) {
     for (interaction, action) in interaction_query.iter() {
         if *interaction == Interaction::Pressed {
@@ -187,6 +245,16 @@ fn menu_action(
                 MenuButtonAction::Play => {
                     commands.insert_resource(TargetGameState(GameState::InGame));
                     next_state.set(GameState::Loading);
+                }
+                MenuButtonAction::PlayRandomMap => {
+                    // Initialize default values if empty
+                    if random_map_state.map_width.is_empty() {
+                        random_map_state.map_width = "500".to_string();
+                        random_map_state.map_height = "500".to_string();
+                        random_map_state.num_obstacles = "50".to_string();
+                        random_map_state.obstacle_size = "20".to_string();
+                    }
+                    random_map_state.show_dialog = true;
                 }
                 MenuButtonAction::Editor => {
                     commands.insert_resource(TargetGameState(GameState::Editor));
@@ -336,6 +404,7 @@ fn setup_settings_menu(
                 (BindableAction::SpawnBlackHole, config.key_spawn_black_hole),
                 (BindableAction::SpawnWindSpot, config.key_spawn_wind_spot),
                 (BindableAction::SpawnUnit, config.key_spawn_unit),
+                (BindableAction::SpawnBatch, config.key_spawn_batch),
                 (BindableAction::Pause, config.key_pause),
                 (BindableAction::ToggleHealthBars, config.key_toggle_health_bars),
             ];
@@ -495,6 +564,7 @@ fn handle_rebinding(
                         BindableAction::SpawnBlackHole => config.key_spawn_black_hole = new_key,
                         BindableAction::SpawnWindSpot => config.key_spawn_wind_spot = new_key,
                         BindableAction::SpawnUnit => config.key_spawn_unit = new_key,
+                        BindableAction::SpawnBatch => config.key_spawn_batch = new_key,
                         BindableAction::Pause => config.key_pause = new_key,
                         BindableAction::ToggleHealthBars => config.key_toggle_health_bars = new_key,
                     }
@@ -511,4 +581,351 @@ fn handle_rebinding(
             break;
         }
     }
+}
+
+// Random Map Dialog Systems
+
+fn handle_random_map_dialog(
+    mut commands: Commands,
+    mut random_map_state: ResMut<RandomMapState>,
+    active_field: Res<ActiveRandomMapField>,
+    existing_dialog: Query<Entity, With<RandomMapDialogRoot>>,
+    interaction_query: Query<
+        (&Interaction, &RandomMapDialogAction),
+        (Changed<Interaction>, With<Button>),
+    >,
+    mut next_state: ResMut<NextState<GameState>>,
+) {
+    // Spawn or despawn dialog based on state
+    if random_map_state.show_dialog && existing_dialog.is_empty() {
+        spawn_random_map_dialog(&mut commands, &random_map_state, &active_field);
+    } else if !random_map_state.show_dialog && !existing_dialog.is_empty() {
+        for entity in existing_dialog.iter() {
+            commands.entity(entity).despawn();
+        }
+    }
+    
+    // Handle button interactions
+    for (interaction, action) in interaction_query.iter() {
+        if *interaction == Interaction::Pressed {
+            match action {
+                RandomMapDialogAction::Generate => {
+                    // Store the generation params in a resource for the loading system to use
+                    if let (Ok(width), Ok(height), Ok(obstacles), Ok(size)) = (
+                        random_map_state.map_width.parse::<f32>(),
+                        random_map_state.map_height.parse::<f32>(),
+                        random_map_state.num_obstacles.parse::<usize>(),
+                        random_map_state.obstacle_size.parse::<f32>(),
+                    ) {
+                        commands.insert_resource(crate::game::editor::PendingMapGeneration {
+                            map_width: width,
+                            map_height: height,
+                            num_obstacles: obstacles,
+                            min_radius: size * 0.5,
+                            max_radius: size * 1.5,
+                        });
+                        commands.insert_resource(TargetGameState(GameState::InGame));
+                        next_state.set(GameState::Loading);
+                        random_map_state.show_dialog = false;
+                    }
+                }
+                RandomMapDialogAction::Cancel => {
+                    random_map_state.show_dialog = false;
+                }
+                RandomMapDialogAction::IncrementMapWidth => {
+                    if let Ok(mut val) = random_map_state.map_width.parse::<i32>() {
+                        val += 100;
+                        random_map_state.map_width = val.to_string();
+                    }
+                }
+                RandomMapDialogAction::DecrementMapWidth => {
+                    if let Ok(mut val) = random_map_state.map_width.parse::<i32>() {
+                        val = (val - 100).max(100);
+                        random_map_state.map_width = val.to_string();
+                    }
+                }
+                RandomMapDialogAction::IncrementMapHeight => {
+                    if let Ok(mut val) = random_map_state.map_height.parse::<i32>() {
+                        val += 100;
+                        random_map_state.map_height = val.to_string();
+                    }
+                }
+                RandomMapDialogAction::DecrementMapHeight => {
+                    if let Ok(mut val) = random_map_state.map_height.parse::<i32>() {
+                        val = (val - 100).max(100);
+                        random_map_state.map_height = val.to_string();
+                    }
+                }
+                RandomMapDialogAction::IncrementObstacles => {
+                    if let Ok(mut val) = random_map_state.num_obstacles.parse::<i32>() {
+                        val += 10;
+                        random_map_state.num_obstacles = val.to_string();
+                    }
+                }
+                RandomMapDialogAction::DecrementObstacles => {
+                    if let Ok(mut val) = random_map_state.num_obstacles.parse::<i32>() {
+                        val = (val - 10).max(0);
+                        random_map_state.num_obstacles = val.to_string();
+                    }
+                }
+                RandomMapDialogAction::IncrementObstacleSize => {
+                    if let Ok(mut val) = random_map_state.obstacle_size.parse::<i32>() {
+                        val += 5;
+                        random_map_state.obstacle_size = val.to_string();
+                    }
+                }
+                RandomMapDialogAction::DecrementObstacleSize => {
+                    if let Ok(mut val) = random_map_state.obstacle_size.parse::<i32>() {
+                        val = (val - 5).max(5);
+                        random_map_state.obstacle_size = val.to_string();
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn handle_random_map_input_clicks(
+    interaction_query: Query<
+        (&Interaction, &RandomMapInputField),
+        (Changed<Interaction>, With<Button>),
+    >,
+    mut active_field: ResMut<ActiveRandomMapField>,
+) {
+    for (interaction, field_type) in interaction_query.iter() {
+        if *interaction == Interaction::Pressed {
+            active_field.field = Some(*field_type);
+            active_field.first_input = true;
+        }
+    }
+}
+
+fn keyboard_input_random_map(
+    mut keys: MessageReader<bevy::input::keyboard::KeyboardInput>,
+    mut active_field: ResMut<ActiveRandomMapField>,
+    mut random_map_state: ResMut<RandomMapState>,
+) {
+    let Some(field) = active_field.field else { return };
+    
+    for event in keys.read() {
+        if event.state.is_pressed() {
+            let key = event.key_code;
+            
+            let target_string = match field {
+                RandomMapInputField::MapWidth => &mut random_map_state.map_width,
+                RandomMapInputField::MapHeight => &mut random_map_state.map_height,
+                RandomMapInputField::NumObstacles => &mut random_map_state.num_obstacles,
+                RandomMapInputField::ObstacleSize => &mut random_map_state.obstacle_size,
+            };
+            
+            // Clear on first input
+            if active_field.first_input {
+                target_string.clear();
+                active_field.first_input = false;
+            }
+            
+            match key {
+                KeyCode::Digit0 => target_string.push('0'),
+                KeyCode::Digit1 => target_string.push('1'),
+                KeyCode::Digit2 => target_string.push('2'),
+                KeyCode::Digit3 => target_string.push('3'),
+                KeyCode::Digit4 => target_string.push('4'),
+                KeyCode::Digit5 => target_string.push('5'),
+                KeyCode::Digit6 => target_string.push('6'),
+                KeyCode::Digit7 => target_string.push('7'),
+                KeyCode::Digit8 => target_string.push('8'),
+                KeyCode::Digit9 => target_string.push('9'),
+                KeyCode::Backspace => { target_string.pop(); },
+                KeyCode::Enter | KeyCode::Escape => {
+                    active_field.field = None;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn spawn_random_map_dialog(
+    commands: &mut Commands,
+    random_map_state: &RandomMapState,
+    active_field: &ActiveRandomMapField,
+) {
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Percent(20.0),
+            top: Val::Percent(15.0),
+            width: Val::Percent(60.0),
+            height: Val::Auto,
+            flex_direction: FlexDirection::Column,
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            border: UiRect::all(Val::Px(2.0)),
+            padding: UiRect::all(Val::Px(20.0)),
+            ..default()
+        },
+        BackgroundColor(Color::srgb(0.2, 0.2, 0.2)),
+        BorderColor::from(Color::WHITE),
+        RandomMapDialogRoot,
+    )).with_children(|parent| {
+        parent.spawn((
+            Text::new("Generate Random Map"),
+            TextFont { font_size: 24.0, ..default() },
+            TextColor(Color::WHITE),
+            Node { margin: UiRect::bottom(Val::Px(20.0)), ..default() },
+        ));
+
+        // Helper macro to create adjustable value rows
+        macro_rules! create_value_row {
+            ($label:expr, $value:expr, $dec:expr, $inc:expr, $field_type:expr) => {
+                let is_active = active_field.field == Some($field_type);
+                let border_color = if is_active { Color::srgb(0.3, 0.7, 1.0) } else { Color::srgb(0.5, 0.5, 0.5) };
+                let display_value = if is_active { format!("{}_", $value) } else { $value.to_string() };
+                parent.spawn((
+                    Node {
+                        flex_direction: FlexDirection::Row,
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::SpaceBetween,
+                        margin: UiRect::bottom(Val::Px(15.0)),
+                        width: Val::Percent(100.0),
+                        ..default()
+                    },
+                )).with_children(|row| {
+                    row.spawn((
+                        Text::new($label),
+                        TextFont { font_size: 18.0, ..default() },
+                        TextColor(Color::WHITE),
+                        Node { width: Val::Px(180.0), ..default() },
+                    ));
+                    
+                    row.spawn((
+                        Node {
+                            flex_direction: FlexDirection::Row,
+                            align_items: AlignItems::Center,
+                            ..default()
+                        },
+                    )).with_children(|controls| {
+                        controls.spawn((
+                            Button,
+                            Node {
+                                width: Val::Px(40.0),
+                                height: Val::Px(35.0),
+                                justify_content: JustifyContent::Center,
+                                align_items: AlignItems::Center,
+                                margin: UiRect::right(Val::Px(10.0)),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgb(0.5, 0.3, 0.3)),
+                            $dec,
+                        )).with_children(|btn| {
+                            btn.spawn((
+                                Text::new("-"),
+                                TextFont { font_size: 24.0, ..default() },
+                                TextColor(Color::WHITE),
+                            ));
+                        });
+                        
+                        controls.spawn((
+                            Button,
+                            Node {
+                                width: Val::Px(100.0),
+                                height: Val::Px(35.0),
+                                justify_content: JustifyContent::Center,
+                                align_items: AlignItems::Center,
+                                border: UiRect::all(Val::Px(2.0)),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgb(0.1, 0.1, 0.1)),
+                            BorderColor::from(border_color),
+                            $field_type,
+                        )).with_children(|val| {
+                            val.spawn((
+                                Text::new(display_value),
+                                TextFont { font_size: 18.0, ..default() },
+                                TextColor(Color::WHITE),
+                            ));
+                        });
+                        
+                        controls.spawn((
+                            Button,
+                            Node {
+                                width: Val::Px(40.0),
+                                height: Val::Px(35.0),
+                                justify_content: JustifyContent::Center,
+                                align_items: AlignItems::Center,
+                                margin: UiRect::left(Val::Px(10.0)),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgb(0.3, 0.5, 0.3)),
+                            $inc,
+                        )).with_children(|btn| {
+                            btn.spawn((
+                                Text::new("+"),
+                                TextFont { font_size: 24.0, ..default() },
+                                TextColor(Color::WHITE),
+                            ));
+                        });
+                    });
+                });
+            };
+        }
+
+        create_value_row!("Map Width:", &random_map_state.map_width, RandomMapDialogAction::DecrementMapWidth, RandomMapDialogAction::IncrementMapWidth, RandomMapInputField::MapWidth);
+        create_value_row!("Map Height:", &random_map_state.map_height, RandomMapDialogAction::DecrementMapHeight, RandomMapDialogAction::IncrementMapHeight, RandomMapInputField::MapHeight);
+        create_value_row!("Num Obstacles:", &random_map_state.num_obstacles, RandomMapDialogAction::DecrementObstacles, RandomMapDialogAction::IncrementObstacles, RandomMapInputField::NumObstacles);
+        create_value_row!("Obstacle Radius:", &random_map_state.obstacle_size, RandomMapDialogAction::DecrementObstacleSize, RandomMapDialogAction::IncrementObstacleSize, RandomMapInputField::ObstacleSize);
+
+        parent.spawn((
+            Text::new("Tip: Start small (500x500, 50 obstacles) and increase gradually"),
+            TextFont { font_size: 14.0, ..default() },
+            TextColor(Color::srgb(0.7, 0.7, 0.7)),
+            Node { margin: UiRect::vertical(Val::Px(15.0)), ..default() },
+        ));
+
+        parent.spawn((
+            Node {
+                flex_direction: FlexDirection::Row,
+                column_gap: Val::Px(10.0),
+                ..default()
+            },
+        )).with_children(|buttons| {
+            buttons.spawn((
+                Button,
+                Node {
+                    width: Val::Px(120.0),
+                    height: Val::Px(40.0),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                BackgroundColor(Color::srgb(0.3, 0.6, 0.3)),
+                RandomMapDialogAction::Generate,
+            )).with_children(|btn| {
+                btn.spawn((
+                    Text::new("Generate"),
+                    TextFont { font_size: 18.0, ..default() },
+                    TextColor(Color::WHITE),
+                ));
+            });
+            
+            buttons.spawn((
+                Button,
+                Node {
+                    width: Val::Px(120.0),
+                    height: Val::Px(40.0),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                BackgroundColor(Color::srgb(0.6, 0.3, 0.3)),
+                RandomMapDialogAction::Cancel,
+            )).with_children(|btn| {
+                btn.spawn((
+                    Text::new("Cancel"),
+                    TextFont { font_size: 18.0, ..default() },
+                    TextColor(Color::WHITE),
+                ));
+            });
+        });
+    });
 }
