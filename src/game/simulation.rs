@@ -255,7 +255,7 @@ impl Plugin for SimulationPlugin {
         app.add_systems(Startup, (init_flow_field, init_sim_from_initial_config).chain());
         app.add_systems(OnEnter(GameState::InGame), update_ground_plane_from_loaded_map);
         app.add_systems(Update, (update_sim_from_runtime_config, toggle_debug, draw_flow_field_gizmos, draw_force_sources, draw_unit_paths).run_if(in_state(GameState::InGame).or(in_state(GameState::Editor)).or(in_state(GameState::Loading))));
-        app.add_systems(Update, apply_new_obstacles.run_if(in_state(GameState::InGame).or(in_state(GameState::Editor)).or(in_state(GameState::Loading))));
+        app.add_systems(Update, apply_new_obstacles.run_if(in_state(GameState::InGame).or(in_state(GameState::Loading))));
         app.add_systems(FixedUpdate, (
             sim_start.before(SimSet::Input),
             cache_previous_state.in_set(SimSet::Input),
@@ -958,10 +958,13 @@ fn apply_new_obstacles(
             let min_cluster_y = min_y / CLUSTER_SIZE;
             let max_cluster_y = max_y / CLUSTER_SIZE;
             
-            // Invalidate all affected clusters
+            // Invalidate all affected clusters and regenerate their flow fields
             for cy in min_cluster_y..=max_cluster_y {
                 for cx in min_cluster_x..=max_cluster_x {
-                    graph.clear_cluster_cache((cx, cy));
+                    let cluster_key = (cx, cy);
+                    graph.clear_cluster_cache(cluster_key);
+                    // Regenerate flow fields for this cluster immediately
+                    crate::game::pathfinding::regenerate_cluster_flow_fields(&mut graph, flow_field, cluster_key);
                 }
             }
         }
@@ -1123,7 +1126,7 @@ pub fn follow_path(
     mut commands: Commands,
     mut query: Query<(Entity, &SimPosition, &SimVelocity, &mut SimAcceleration, &mut Path)>,
     sim_config: Res<SimConfig>,
-    graph: Res<HierarchicalGraph>,
+    mut graph: ResMut<HierarchicalGraph>,
     map_flow_field: Res<MapFlowField>,
 ) {
     let start_time = std::time::Instant::now();
@@ -1204,8 +1207,8 @@ pub fn follow_path(
                         let portal = graph.nodes[target_portal_id].clone(); 
                         
                         if current_cluster_id == portal.cluster {
-                             if let Some(cluster) = graph.clusters.get(&current_cluster_id) {
-                                 let local_field = cluster.get_flow_field(target_portal_id);
+                             if let Some(cluster) = graph.clusters.get_mut(&current_cluster_id) {
+                                 let local_field = cluster.get_or_generate_flow_field(target_portal_id, &portal, flow_field);
                                  
                                  let min_x = cx * CLUSTER_SIZE;
                                  let min_y = cy * CLUSTER_SIZE;
@@ -1414,7 +1417,11 @@ fn draw_unit_paths(
 
                         // Get flow field for this portal
                         if let Some(cluster) = graph.clusters.get(&portal.cluster) {
-                            let ff = cluster.get_flow_field(portal_id);
+                            let Some(ff) = cluster.get_flow_field(portal_id) else {
+                                // Flow field not available, skip visualization for this portal
+                                // (We don't generate on-demand for visualization to avoid mutations)
+                                continue;
+                            };
                             
                             // Trace
                             let mut steps = 0;

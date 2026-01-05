@@ -378,8 +378,30 @@ impl Cluster {
     pub fn get_flow_field(
         &self,
         portal_id: usize,
+    ) -> Option<&LocalFlowField> {
+        self.flow_field_cache.get(&portal_id)
+    }
+
+    /// Get flow field for a portal, generating it on-demand if missing.
+    /// This should only happen if obstacles were added and regeneration failed.
+    /// Logs a warning when generation is needed.
+    pub fn get_or_generate_flow_field(
+        &mut self,
+        portal_id: usize,
+        portal: &Portal,
+        map_flow_field: &crate::game::flow_field::FlowField,
     ) -> &LocalFlowField {
-        self.flow_field_cache.get(&portal_id).expect("Flow field not found in cache")
+        if !self.flow_field_cache.contains_key(&portal_id) {
+            warn!(
+                "[FLOW FIELD] Missing flow field for portal {} in cluster {:?} - generating on-demand. \
+                This indicates flow field regeneration after obstacle placement may have failed.",
+                portal_id, self.id
+            );
+            // TODO: Consider pausing game with overlay: "Generating missing flow field..."
+            let field = generate_local_flow_field(self.id, portal, map_flow_field);
+            self.flow_field_cache.insert(portal_id, field);
+        }
+        &self.flow_field_cache[&portal_id]
     }
 }
 
@@ -1185,7 +1207,13 @@ fn precompute_flow_fields_for_cluster(
     flow_field: &crate::game::flow_field::FlowField,
     key: (usize, usize),
 ) {
-    let portals = graph.clusters[&key].portals.clone();
+    // Check if cluster exists before trying to access it
+    let Some(cluster) = graph.clusters.get(&key) else {
+        // Cluster doesn't exist - this can happen for edge areas or uninitialized regions
+        return;
+    };
+    
+    let portals = cluster.portals.clone();
     for portal_id in portals {
         if let Some(portal) = graph.nodes.get(portal_id).cloned() {
             let field = generate_local_flow_field(key, &portal, flow_field);
@@ -1194,6 +1222,16 @@ fn precompute_flow_fields_for_cluster(
             }
         }
     }
+}
+
+/// Regenerate flow fields for a specific cluster after obstacles are added.
+/// This is called by apply_new_obstacles after clearing cluster cache.
+pub fn regenerate_cluster_flow_fields(
+    graph: &mut HierarchicalGraph,
+    flow_field: &crate::game::flow_field::FlowField,
+    cluster_key: (usize, usize),
+) {
+    precompute_flow_fields_for_cluster(graph, flow_field, cluster_key);
 }
 
 fn draw_graph_gizmos(
