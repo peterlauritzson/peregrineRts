@@ -518,6 +518,7 @@ fn start_graph_build(
     graph: Res<HierarchicalGraph>,
     mut loading_progress: ResMut<LoadingProgress>,
     target_state: Option<Res<TargetGameState>>,
+    pending_gen: Option<Res<crate::game::editor::PendingMapGeneration>>,
 ) {
     // If we are going to the editor, don't build the graph automatically
     if let Some(target) = target_state {
@@ -527,6 +528,14 @@ fn start_graph_build(
             build_state.step = GraphBuildStep::Done;
             return;
         }
+    }
+
+    // If we have a pending map generation, don't auto-complete loading
+    // The handle_pending_map_generation system will reset the graph and trigger a new build
+    if pending_gen.is_some() {
+        info!("Pending map generation detected - skipping auto-complete, will rebuild graph after generation");
+        build_state.step = GraphBuildStep::NotStarted;
+        return;
     }
 
     if !graph.initialized {

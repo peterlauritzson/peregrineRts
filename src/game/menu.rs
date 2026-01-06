@@ -65,7 +65,7 @@ impl Plugin for MenuPlugin {
            .init_resource::<ActiveRandomMapField>()
            .add_systems(OnEnter(GameState::MainMenu), setup_menu)
            .add_systems(OnExit(GameState::MainMenu), cleanup_menu)
-           .add_systems(Update, (menu_action, handle_random_map_dialog, handle_random_map_input_clicks, keyboard_input_random_map).run_if(in_state(GameState::MainMenu)))
+           .add_systems(Update, (menu_action, handle_random_map_dialog, handle_random_map_input_clicks, keyboard_input_random_map, update_random_map_dialog_values, update_random_map_field_borders, update_button_colors).run_if(in_state(GameState::MainMenu)))
            
            // Pause Logic
            .add_systems(Update, toggle_pause.run_if(in_state(GameState::InGame).or(in_state(GameState::Paused)).or(in_state(GameState::Editor))))
@@ -166,6 +166,14 @@ enum RandomMapDialogAction {
 
 #[derive(Component)]
 struct RandomMapDialogRoot;
+
+#[derive(Component, Clone, Copy, PartialEq)]
+enum RandomMapValueText {
+    MapWidth,
+    MapHeight,
+    NumObstacles,
+    ObstacleSize,
+}
 
 #[derive(Component)]
 struct Rebinding;
@@ -745,6 +753,103 @@ fn keyboard_input_random_map(
     }
 }
 
+fn update_random_map_dialog_values(
+    random_map_state: Res<RandomMapState>,
+    active_field: Res<ActiveRandomMapField>,
+    mut value_text_query: Query<(&mut Text, &RandomMapValueText)>,
+) {
+    if !random_map_state.is_changed() && !active_field.is_changed() {
+        return;
+    }
+    
+    for (mut text, value_type) in value_text_query.iter_mut() {
+        let (value, field_type) = match value_type {
+            RandomMapValueText::MapWidth => (&random_map_state.map_width, RandomMapInputField::MapWidth),
+            RandomMapValueText::MapHeight => (&random_map_state.map_height, RandomMapInputField::MapHeight),
+            RandomMapValueText::NumObstacles => (&random_map_state.num_obstacles, RandomMapInputField::NumObstacles),
+            RandomMapValueText::ObstacleSize => (&random_map_state.obstacle_size, RandomMapInputField::ObstacleSize),
+        };
+        
+        let is_active = active_field.field == Some(field_type);
+        let display_value = if is_active { 
+            format!("{}_", value) 
+        } else { 
+            value.to_string() 
+        };
+        
+        text.0 = display_value;
+    }
+}
+
+fn update_random_map_field_borders(
+    active_field: Res<ActiveRandomMapField>,
+    mut field_query: Query<(&RandomMapInputField, &mut BorderColor)>,
+) {
+    if !active_field.is_changed() {
+        return;
+    }
+    
+    for (field_type, mut border_color) in field_query.iter_mut() {
+        let is_active = active_field.field == Some(*field_type);
+        let color = if is_active { 
+            Color::srgb(0.3, 0.7, 1.0) 
+        } else { 
+            Color::srgb(0.5, 0.5, 0.5) 
+        };
+        *border_color = BorderColor::from(color);
+    }
+}
+
+fn update_button_colors(
+    mut interaction_query: Query<
+        (&Interaction, &mut BackgroundColor, Option<&MenuButtonAction>, Option<&PauseButtonAction>, Option<&RandomMapDialogAction>),
+        Changed<Interaction>,
+    >,
+) {
+    for (interaction, mut color, menu_action, pause_action, dialog_action) in interaction_query.iter_mut() {
+        // Determine the base color based on button type
+        let (normal_color, hover_color, pressed_color) = if dialog_action.is_some() {
+            match dialog_action.unwrap() {
+                RandomMapDialogAction::Generate => (
+                    Color::srgb(0.3, 0.6, 0.3),
+                    Color::srgb(0.35, 0.7, 0.35),
+                    Color::srgb(0.25, 0.5, 0.25),
+                ),
+                RandomMapDialogAction::Cancel => (
+                    Color::srgb(0.6, 0.3, 0.3),
+                    Color::srgb(0.7, 0.35, 0.35),
+                    Color::srgb(0.5, 0.25, 0.25),
+                ),
+                RandomMapDialogAction::IncrementMapWidth | RandomMapDialogAction::IncrementMapHeight | 
+                RandomMapDialogAction::IncrementObstacles | RandomMapDialogAction::IncrementObstacleSize => (
+                    Color::srgb(0.3, 0.5, 0.3),
+                    Color::srgb(0.35, 0.6, 0.35),
+                    Color::srgb(0.25, 0.4, 0.25),
+                ),
+                _ => (
+                    Color::srgb(0.5, 0.3, 0.3),
+                    Color::srgb(0.6, 0.35, 0.35),
+                    Color::srgb(0.4, 0.25, 0.25),
+                ),
+            }
+        } else if menu_action.is_some() || pause_action.is_some() {
+            (
+                Color::srgb(0.2, 0.2, 0.2),
+                Color::srgb(0.3, 0.3, 0.3),
+                Color::srgb(0.15, 0.15, 0.15),
+            )
+        } else {
+            continue;
+        };
+        
+        *color = match *interaction {
+            Interaction::Pressed => BackgroundColor(pressed_color),
+            Interaction::Hovered => BackgroundColor(hover_color),
+            Interaction::None => BackgroundColor(normal_color),
+        };
+    }
+}
+
 fn spawn_random_map_dialog(
     commands: &mut Commands,
     random_map_state: &RandomMapState,
@@ -777,7 +882,7 @@ fn spawn_random_map_dialog(
 
         // Helper macro to create adjustable value rows
         macro_rules! create_value_row {
-            ($label:expr, $value:expr, $dec:expr, $inc:expr, $field_type:expr) => {
+            ($label:expr, $value:expr, $dec:expr, $inc:expr, $field_type:expr, $value_marker:expr) => {
                 let is_active = active_field.field == Some($field_type);
                 let border_color = if is_active { Color::srgb(0.3, 0.7, 1.0) } else { Color::srgb(0.5, 0.5, 0.5) };
                 let display_value = if is_active { format!("{}_", $value) } else { $value.to_string() };
@@ -843,6 +948,7 @@ fn spawn_random_map_dialog(
                                 Text::new(display_value),
                                 TextFont { font_size: 18.0, ..default() },
                                 TextColor(Color::WHITE),
+                                $value_marker,
                             ));
                         });
                         
@@ -870,10 +976,10 @@ fn spawn_random_map_dialog(
             };
         }
 
-        create_value_row!("Map Width:", &random_map_state.map_width, RandomMapDialogAction::DecrementMapWidth, RandomMapDialogAction::IncrementMapWidth, RandomMapInputField::MapWidth);
-        create_value_row!("Map Height:", &random_map_state.map_height, RandomMapDialogAction::DecrementMapHeight, RandomMapDialogAction::IncrementMapHeight, RandomMapInputField::MapHeight);
-        create_value_row!("Num Obstacles:", &random_map_state.num_obstacles, RandomMapDialogAction::DecrementObstacles, RandomMapDialogAction::IncrementObstacles, RandomMapInputField::NumObstacles);
-        create_value_row!("Obstacle Radius:", &random_map_state.obstacle_size, RandomMapDialogAction::DecrementObstacleSize, RandomMapDialogAction::IncrementObstacleSize, RandomMapInputField::ObstacleSize);
+        create_value_row!("Map Width:", &random_map_state.map_width, RandomMapDialogAction::DecrementMapWidth, RandomMapDialogAction::IncrementMapWidth, RandomMapInputField::MapWidth, RandomMapValueText::MapWidth);
+        create_value_row!("Map Height:", &random_map_state.map_height, RandomMapDialogAction::DecrementMapHeight, RandomMapDialogAction::IncrementMapHeight, RandomMapInputField::MapHeight, RandomMapValueText::MapHeight);
+        create_value_row!("Num Obstacles:", &random_map_state.num_obstacles, RandomMapDialogAction::DecrementObstacles, RandomMapDialogAction::IncrementObstacles, RandomMapInputField::NumObstacles, RandomMapValueText::NumObstacles);
+        create_value_row!("Obstacle Radius:", &random_map_state.obstacle_size, RandomMapDialogAction::DecrementObstacleSize, RandomMapDialogAction::IncrementObstacleSize, RandomMapInputField::ObstacleSize, RandomMapValueText::ObstacleSize);
 
         parent.spawn((
             Text::new("Tip: Start small (500x500, 50 obstacles) and increase gradually"),

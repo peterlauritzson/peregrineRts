@@ -252,7 +252,8 @@ impl Plugin for SimulationPlugin {
         ).chain().run_if(in_state(GameState::InGame).or(in_state(GameState::Editor))));
 
         // Register Systems
-        app.add_systems(Startup, (init_flow_field, init_sim_from_initial_config).chain());
+        app.add_systems(Startup, (init_flow_field, init_sim_config_from_initial).chain());
+        app.add_systems(OnEnter(GameState::Loading), load_default_map);
         app.add_systems(OnEnter(GameState::InGame), update_ground_plane_from_loaded_map);
         app.add_systems(Update, (update_sim_from_runtime_config, toggle_debug, draw_flow_field_gizmos, draw_force_sources, draw_unit_paths).run_if(in_state(GameState::InGame).or(in_state(GameState::Editor)).or(in_state(GameState::Loading))));
         app.add_systems(Update, apply_new_obstacles.run_if(in_state(GameState::InGame).or(in_state(GameState::Loading))));
@@ -274,24 +275,15 @@ impl Plugin for SimulationPlugin {
     }
 }
 
-/// Initialize SimConfig from InitialConfig at startup.
-/// This runs once and sets up all the deterministic simulation parameters.
-fn init_sim_from_initial_config(
+/// Initialize SimConfig from InitialConfig at startup (lightweight, no map loading).
+/// This just sets the config values and fixed timestep.
+fn init_sim_config_from_initial(
     mut fixed_time: ResMut<Time<Fixed>>,
     mut sim_config: ResMut<SimConfig>,
-    mut spatial_hash: ResMut<SpatialHash>,
-    mut map_flow_field: ResMut<MapFlowField>,
-    mut graph: Option<ResMut<HierarchicalGraph>>,
-    mut map_status: ResMut<MapStatus>,
     initial_config: Option<Res<InitialConfig>>,
-    obstacles: Query<(Entity, &SimPosition, &Collider), With<StaticObstacle>>,
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    info!("Initializing SimConfig from InitialConfig");
+    info!("Initializing SimConfig from InitialConfig (lightweight startup init)");
     
-    // Get config or use defaults
     let config = match initial_config {
         Some(cfg) => cfg.clone(),
         None => {
@@ -335,10 +327,43 @@ fn init_sim_from_initial_config(
     sim_config.black_hole_strength = FixedNum::from_num(config.black_hole_strength);
     sim_config.wind_spot_strength = FixedNum::from_num(config.wind_spot_strength);
     sim_config.force_source_radius = FixedNum::from_num(config.force_source_radius);
+    
+    info!("SimConfig initialized with map size: {}x{}", 
+          sim_config.map_width.to_num::<f32>(), sim_config.map_height.to_num::<f32>());
+}
 
-    // Resize spatial hash
-    let cell_size = sim_config.unit_radius * FixedNum::from_num(2.0) * FixedNum::from_num(1.5);
-    spatial_hash.resize(sim_config.map_width, sim_config.map_height, cell_size);
+/// Load default map from file during Loading state.
+/// Only runs if there's no PendingMapGeneration (which means user clicked "Play" not "Play Random Map").
+fn load_default_map(
+    mut sim_config: ResMut<SimConfig>,
+    mut spatial_hash: ResMut<SpatialHash>,
+    mut map_flow_field: ResMut<MapFlowField>,
+    mut graph: Option<ResMut<HierarchicalGraph>>,
+    mut map_status: ResMut<MapStatus>,
+    initial_config: Option<Res<InitialConfig>>,
+    obstacles: Query<(Entity, &SimPosition, &Collider), With<StaticObstacle>>,
+    pending_gen: Option<Res<crate::game::editor::PendingMapGeneration>>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    // If we have a pending map generation, skip default map loading
+    // The handle_pending_map_generation system will handle everything
+    if pending_gen.is_some() {
+        info!("Skipping default map load - PendingMapGeneration detected");
+        return;
+    }
+    
+    info!("Loading default map during Loading state");
+    
+    // Get initial config for default values if map load fails
+    let _config = match initial_config {
+        Some(cfg) => cfg.clone(),
+        None => {
+            warn!("InitialConfig not found, using defaults");
+            InitialConfig::default()
+        }
+    };
 
     // Try to load map from file
     let mut loaded_from_file = false;
@@ -421,6 +446,11 @@ fn init_sim_from_initial_config(
         
         map_flow_field.0 = FlowField::new(width, height, FixedNum::from_num(CELL_SIZE), origin);
         info!("Initialized FlowField from InitialConfig: {}x{} cells", width, height);
+        
+        // Initialize SpatialHash with default map size
+        let cell_size = sim_config.unit_radius * FixedNum::from_num(2.0) * FixedNum::from_num(1.5);
+        spatial_hash.resize(sim_config.map_width, sim_config.map_height, cell_size);
+        info!("Initialized SpatialHash for default map size");
     }
 }
 
