@@ -210,15 +210,16 @@ fn handle_pending_map_generation(
                     crate::game::GameEntity,
                     Mesh3d(resources.obstacle_mesh.clone()),
                     MeshMaterial3d(resources.obstacle_material.clone()),
-                    Transform::from_xyz(x, 0.0, z).with_scale(Vec3::splat(radius)),
+                    Transform::from_xyz(x, 1.0, z)
+                        .with_scale(Vec3::new(radius, 1.0, radius)),
                     GlobalTransform::default(),
                     SimPosition(FixedVec2::from_f32(x, z)),
+                    StaticObstacle,
                     Collider {
                         radius: FixedNum::from_num(radius),
                         layer: layers::OBSTACLE,
                         mask: layers::UNIT | layers::OBSTACLE,
                     },
-                    StaticObstacle,
                 ));
             }
             

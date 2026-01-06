@@ -16,7 +16,7 @@
     collision_restitution: 0.5,
     collision_drag: 0.02,
     collision_iterations: 4,
-    collision_search_radius_multiplier: 4.0,
+    collision_search_radius_multiplier: 2.5,  // Reduced from 4.0 for better performance
     obstacle_search_range: 1,
     epsilon: 0.0001,
     obstacle_push_strength: 1.0,

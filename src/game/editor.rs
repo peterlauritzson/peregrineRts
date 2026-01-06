@@ -40,7 +40,7 @@ pub struct EditorResources {
 
 fn setup_editor_resources(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<StandardMaterial>>) {
     commands.insert_resource(EditorResources {
-        obstacle_mesh: meshes.add(Circle::new(1.0).mesh()), // 2D circle converted to mesh, scale it later
+        obstacle_mesh: meshes.add(Cylinder::new(1.0, 2.0)), // Cylinder with radius 1.0 and height 2.0, scale it later
         obstacle_material: materials.add(Color::srgb(0.5, 0.5, 0.5)),
     });
 }
@@ -878,9 +878,8 @@ fn spawn_obstacle(commands: &mut Commands, position: FixedVec2, radius: FixedNum
             layer: layers::OBSTACLE,
             mask: layers::ALL,
         },
-        Transform::from_translation(Vec3::new(position.x.to_num(), 0.0, position.y.to_num()))
-            .with_scale(Vec3::new(radius.to_num::<f32>(), radius.to_num::<f32>(), radius.to_num::<f32>()))
-            .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
+        Transform::from_translation(Vec3::new(position.x.to_num(), 1.0, position.y.to_num()))
+            .with_scale(Vec3::new(radius.to_num::<f32>(), 1.0, radius.to_num::<f32>())),
         GlobalTransform::default(),
         Mesh3d(resources.obstacle_mesh.clone()),
         MeshMaterial3d(resources.obstacle_material.clone()),

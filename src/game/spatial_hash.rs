@@ -113,6 +113,22 @@ impl SpatialHash {
         }
     }
 
+    /// Remove an entity from a specific cell.
+    /// Used when an entity moves from one cell to another.
+    pub fn remove(&mut self, entity: Entity, col: usize, row: usize) {
+        let idx = row * self.cols + col;
+        if idx < self.cells.len() {
+            self.cells[idx].retain(|&(e, _)| e != entity);
+        }
+    }
+
+    // Getters for grid parameters
+    pub fn cell_size(&self) -> FixedNum { self.cell_size }
+    pub fn map_width(&self) -> FixedNum { self.map_width }
+    pub fn map_height(&self) -> FixedNum { self.map_height }
+    pub fn cols(&self) -> usize { self.cols }
+    pub fn rows(&self) -> usize { self.rows }
+
     /// Returns all entities within query_radius of pos.
     /// If exclude_entity is Some, that entity will be excluded from results.
     /// This avoids wasted self-collision checks in collision detection.
