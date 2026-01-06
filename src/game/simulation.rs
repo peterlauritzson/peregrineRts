@@ -667,12 +667,17 @@ fn detect_collisions(
     spatial_hash: Res<SpatialHash>,
     sim_config: Res<SimConfig>,
     mut events: MessageWriter<CollisionEvent>,
+    time: Res<Time<Fixed>>,
 ) {
     let start_time = std::time::Instant::now();
     let mut colliding_entities = std::collections::HashSet::new();
     let total_entities = query.iter().count();
     let mut total_potential_checks = 0;
     let mut actual_collision_count = 0;
+    let mut total_duplicate_skips = 0;
+    let mut total_layer_filtered = 0;
+    let mut max_neighbors_found = 0;
+    let mut total_neighbors_found = 0;
 
     // We need to check collisions.
     // To avoid duplicates, we can enforce order, but SpatialHash returns neighbors which might include entities "behind" us in iteration order.
@@ -686,14 +691,21 @@ fn detect_collisions(
         let search_radius = collider.radius * sim_config.collision_search_radius_multiplier; 
         
         let potential_collisions = spatial_hash.get_potential_collisions(pos.0, search_radius, Some(entity));
-        total_potential_checks += potential_collisions.len();
+        let neighbors_count = potential_collisions.len();
+        total_potential_checks += neighbors_count;
+        total_neighbors_found += neighbors_count;
+        max_neighbors_found = max_neighbors_found.max(neighbors_count);
         
         for (other_entity, _) in potential_collisions {
-            if entity > other_entity { continue; } // Avoid duplicates (self already excluded)
+            if entity > other_entity { 
+                total_duplicate_skips += 1;
+                continue; 
+            } // Avoid duplicates (self already excluded)
             
             if let Ok((_, other_pos, other_collider)) = query.get(other_entity) {
                 // Check layers
                 if (collider.mask & other_collider.layer) == 0 && (other_collider.mask & collider.layer) == 0 {
+                    total_layer_filtered += 1;
                     continue;
                 }
 
@@ -742,10 +754,40 @@ fn detect_collisions(
     }
     
     let duration = start_time.elapsed();
-    // Log every 100 ticks or if collision detection is slow (> 10ms)
-    if duration.as_millis() > 10 {
-        warn!("[COLLISION] Slow collision detection: {:?} | entities: {} | potential checks: {} | actual collisions: {}", 
-              duration, total_entities, total_potential_checks, actual_collision_count);
+    let tick = (time.elapsed_secs() * 30.0) as u64; // Assuming 30 tick rate
+    
+    // Log detailed metrics every 100 ticks or if collision detection is slow (> 5ms in release)
+    let should_log = duration.as_millis() > 5 || tick % 100 == 0;
+    
+    if should_log {
+        let avg_neighbors = if total_entities > 0 {
+            total_neighbors_found as f32 / total_entities as f32
+        } else {
+            0.0
+        };
+        
+        let useful_check_ratio = if total_potential_checks > 0 {
+            (actual_collision_count as f32 / total_potential_checks as f32) * 100.0
+        } else {
+            0.0
+        };
+        
+        info!(
+            "[COLLISION_DETECT] {:?} | Entities: {} | Neighbors: {} (avg: {:.1}, max: {}) | \
+             Potential checks: {} | Duplicate skips: {} | Layer filtered: {} | \
+             Actual collisions: {} | Hit ratio: {:.2}% | Search radius multiplier: {:.1}x",
+            duration,
+            total_entities,
+            total_neighbors_found,
+            avg_neighbors,
+            max_neighbors_found,
+            total_potential_checks,
+            total_duplicate_skips,
+            total_layer_filtered,
+            actual_collision_count,
+            useful_check_ratio,
+            sim_config.collision_search_radius_multiplier.to_num::<f32>()
+        );
     }
 }
 
@@ -798,11 +840,15 @@ fn resolve_collisions(
     mut query: Query<&mut SimAcceleration>,
     sim_config: Res<SimConfig>,
     mut events: MessageReader<CollisionEvent>,
+    time: Res<Time<Fixed>>,
 ) {
+    let start_time = std::time::Instant::now();
     let repulsion_strength = sim_config.repulsion_force;
     let decay = sim_config.repulsion_decay;
+    let mut event_count = 0;
     
     for event in events.read() {
+        event_count += 1;
         // Apply repulsion force based on overlap
         // Force increases as overlap increases
         let force_mag = repulsion_strength * (FixedNum::ONE + event.overlap * decay);
@@ -818,6 +864,12 @@ fn resolve_collisions(
             acc2.0 = acc2.0 - force;
         }
     }
+    
+    let duration = start_time.elapsed();
+    let tick = (time.elapsed_secs() * 30.0) as u64;
+    if duration.as_millis() > 2 || tick % 100 == 0 {
+        info!("[COLLISION_RESOLVE] {:?} | Collision events processed: {}", duration, event_count);
+    }
 }
 
 fn resolve_obstacle_collisions(
@@ -825,13 +877,21 @@ fn resolve_obstacle_collisions(
     map_flow_field: Res<MapFlowField>,
     sim_config: Res<SimConfig>,
     free_obstacles: Query<(&SimPosition, &Collider), (With<StaticObstacle>, Without<FlowFieldObstacle>)>,
+    time: Res<Time<Fixed>>,
 ) {
+    let start_time = std::time::Instant::now();
     let repulsion_strength = sim_config.repulsion_force;
     let decay = sim_config.repulsion_decay;
     let flow_field = &map_flow_field.0;
     let obstacle_radius = flow_field.cell_size / FixedNum::from_num(2.0);
+    let mut total_units = 0;
+    let mut total_grid_checks = 0;
+    let mut total_grid_collisions = 0;
+    let mut total_free_obstacle_checks = 0;
+    let mut total_free_obstacle_collisions = 0;
     
     for (_entity, u_pos, mut u_acc, u_collider) in units.iter_mut() {
+        total_units += 1;
         let unit_radius = u_collider.radius;
         let min_dist = unit_radius + obstacle_radius;
         let min_dist_sq = min_dist * min_dist;
@@ -846,12 +906,14 @@ fn resolve_obstacle_collisions(
 
             for y in min_y..=max_y {
                 for x in min_x..=max_x {
+                    total_grid_checks += 1;
                     if flow_field.cost_field[flow_field.get_index(x, y)] == 255 {
                         let o_pos = flow_field.grid_to_world(x, y);
                         let delta = u_pos.0 - o_pos;
                         let dist_sq = delta.length_squared();
                         
                         if dist_sq < min_dist_sq && dist_sq > sim_config.epsilon {
+                            total_grid_collisions += 1;
                             let dist = dist_sq.sqrt();
                             let overlap = min_dist - dist;
                             let dir = delta / dist;
@@ -867,6 +929,7 @@ fn resolve_obstacle_collisions(
 
         // Check free obstacles (not in flow field)
         for (obs_pos, obs_collider) in free_obstacles.iter() {
+            total_free_obstacle_checks += 1;
             let min_dist_free = unit_radius + obs_collider.radius;
             let min_dist_sq_free = min_dist_free * min_dist_free;
 
@@ -874,6 +937,7 @@ fn resolve_obstacle_collisions(
             let dist_sq = delta.length_squared();
 
             if dist_sq < min_dist_sq_free && dist_sq > sim_config.epsilon {
+                total_free_obstacle_collisions += 1;
                 let dist = dist_sq.sqrt();
                 let overlap = min_dist_free - dist;
                 let dir = delta / dist;
@@ -883,6 +947,20 @@ fn resolve_obstacle_collisions(
                 u_acc.0 = u_acc.0 + dir * force_mag;
             }
         }
+    }
+    
+    let duration = start_time.elapsed();
+    let tick = (time.elapsed_secs() * 30.0) as u64;
+    if duration.as_millis() > 2 || tick % 100 == 0 {
+        let avg_grid_checks = if total_units > 0 { total_grid_checks as f32 / total_units as f32 } else { 0.0 };
+        let avg_free_checks = if total_units > 0 { total_free_obstacle_checks as f32 / total_units as f32 } else { 0.0 };
+        
+        info!(
+            "[OBSTACLE_RESOLVE] {:?} | Units: {} | Grid checks: {} (avg: {:.1}, collisions: {}) | \
+             Free obstacle checks: {} (avg: {:.1}, collisions: {})",
+            duration, total_units, total_grid_checks, avg_grid_checks, total_grid_collisions,
+            total_free_obstacle_checks, avg_free_checks, total_free_obstacle_collisions
+        );
     }
 }
 
@@ -1303,10 +1381,20 @@ fn seek(pos: FixedVec2, target: FixedVec2, vel: FixedVec2, acc: &mut FixedVec2, 
 fn update_spatial_hash(
     mut spatial_hash: ResMut<SpatialHash>,
     query: Query<(Entity, &SimPosition)>,
+    time: Res<Time<Fixed>>,
 ) {
+    let start_time = std::time::Instant::now();
     spatial_hash.clear();
+    let mut entity_count = 0;
     for (entity, pos) in query.iter() {
         spatial_hash.insert(entity, pos.0);
+        entity_count += 1;
+    }
+    
+    let duration = start_time.elapsed();
+    let tick = (time.elapsed_secs() * 30.0) as u64;
+    if duration.as_millis() > 2 || tick % 100 == 0 {
+        info!("[SPATIAL_HASH_UPDATE] {:?} | Entities inserted: {}", duration, entity_count);
     }
 }
 

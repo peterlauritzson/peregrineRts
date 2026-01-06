@@ -73,7 +73,7 @@ impl SpatialHash {
 3. **Consistency** - All systems use the same query mechanism
 4. **Scalability** - Enables 10M units across multiple gameplay systems
 
-**See Also:** [COLLISION_HANDLING.md](documents/Design%20docs/COLLISION_HANDLING.md) has been updated to reflect this broader design.
+**See Also:** [SPATIAL_PARTITIONING.md](documents/Design%20docs/SPATIAL_PARTITIONING.md) has been updated to reflect this broader design.
 
 **Estimated Impact:** 1000x-10000x performance improvement for boids at scale, plus enables all future proximity-based gameplay systems.
 
@@ -632,7 +632,7 @@ When a new obstacle is added via the editor or gameplay:
 2. But the HierarchicalGraph is NOT invalidated ❌
 3. Units will use the old graph, walking through newly placed obstacles
 
-**According to [COLLISION_HANDLING.md](documents/Design%20docs/COLLISION_HANDLING.md#L109-L114):**
+**According to [SPATIAL_PARTITIONING.md](documents/Design%20docs/SPATIAL_PARTITIONING.md#L109-L114):**
 > **Dynamic Updates:** Placing a building only triggers a re-calculation for the specific cluster it touches.
 
 This is **not implemented**.
@@ -683,7 +683,7 @@ This is **not implemented**.
 - Supports dynamic obstacle placement during gameplay
 - Flow fields update immediately, paths update on next request
 
-**Conclusion:** The feature described in COLLISION_HANDLING.md as "not implemented" is actually fully implemented. The system properly invalidates affected cluster caches when obstacles are added, ensuring units reroute around new obstacles. No code changes needed.
+**Conclusion:** The feature described in SPATIAL_PARTITIONING.md as "not implemented" is actually fully implemented. The system properly invalidates affected cluster caches when obstacles are added, ensuring units reroute around new obstacles. No code changes needed.
 
 **Note on Testing:** Integration tests were created but encountered issues with Bevy's `Added<T>` component detection in test environments. The production code is verified to work correctly - this is a test harness issue, not a feature issue. Manual testing confirms obstacles invalidate caches as expected.
 
