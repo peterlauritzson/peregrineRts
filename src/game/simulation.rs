@@ -739,8 +739,8 @@ fn update_neighbor_cache(
     spatial_hash: Res<SpatialHash>,
     sim_config: Res<SimConfig>,
     time: Res<Time<Fixed>>,
-    obstacles_query: Query<Entity, (With<StaticObstacle>, With<SimPosition>, With<Collider>)>,
-    all_entities: Query<(Entity, Option<&StaticObstacle>, Option<&SimPosition>, Option<&Collider>)>,
+    _obstacles_query: Query<Entity, (With<StaticObstacle>, With<SimPosition>, With<Collider>)>,
+    _all_entities: Query<(Entity, Option<&StaticObstacle>, Option<&SimPosition>, Option<&Collider>)>,
 ) {
     let start_time = std::time::Instant::now();
     
@@ -802,24 +802,6 @@ fn update_neighbor_cache(
                     Some(entity)
                 )
             };
-            
-            // Debug: log what's in the spatial hash query results for first cache miss
-            if cache_misses == 1 {
-                let obstacle_count = cache.neighbors.iter()
-                    .filter(|&&(e, _)| obstacles_query.contains(e))
-                    .count();
-                
-                // Check components of first neighbor if any
-                if let Some(&(first_neighbor, _)) = cache.neighbors.first() {
-                    if let Ok((_, has_static, has_pos, has_collider)) = all_entities.get(first_neighbor) {
-                        info!("[DEBUG_COMPONENTS] First neighbor {:?} - StaticObstacle: {}, SimPosition: {}, Collider: {}",
-                              first_neighbor, has_static.is_some(), has_pos.is_some(), has_collider.is_some());
-                    }
-                }
-                
-                info!("[DEBUG] First cache MISS: entity {:?} at pos {:?} with radius {:.2}, got {} neighbors ({} are obstacles)",
-                      entity, pos.0, search_radius.to_num::<f32>(), cache.neighbors.len(), obstacle_count);
-            }
             
             cache.last_query_pos = pos.0;
             cache.frames_since_update = 0;
@@ -1080,7 +1062,7 @@ fn resolve_obstacle_collisions(
     let mut total_neighbors_checked = 0;
     let mut total_obstacle_query_matches = 0;
     
-    for (entity, u_pos, mut u_acc, u_collider, cache) in units.iter_mut() {
+    for (_entity, u_pos, mut u_acc, u_collider, cache) in units.iter_mut() {
         total_units += 1;
         let unit_radius = u_collider.radius;
         let min_dist = unit_radius + obstacle_radius;
@@ -1121,62 +1103,32 @@ fn resolve_obstacle_collisions(
         // Obstacles are already in the spatial hash, so they appear in cached neighbors
         total_neighbors_checked += cache.neighbors.len();
         
-        // Debug: Log unit position and neighbors for debugging
-        if total_units <= 5 {
-            info!("[COLLISION_CHECK] Unit entity {:?} at pos ({:.2}, {:.2}) with radius {:.2} checking {} neighbors",
-                entity, u_pos.0.x.to_num::<f32>(), u_pos.0.y.to_num::<f32>(), unit_radius.to_num::<f32>(), cache.neighbors.len());
-            
-            for (idx, &(neighbor_entity, neighbor_pos)) in cache.neighbors.iter().enumerate() {
-                let has_static_obstacle = obstacle_query.contains(neighbor_entity);
-                let dist = (u_pos.0 - neighbor_pos).length();
-                if has_static_obstacle {
-                    if let Ok((_, obs_collider)) = obstacle_query.get(neighbor_entity) {
-                        info!("[COLLISION_CHECK]   Neighbor {}: Entity {:?} is OBSTACLE at ({:.2}, {:.2}), radius {:.2}, distance {:.2}",
-                            idx, neighbor_entity, neighbor_pos.x.to_num::<f32>(), neighbor_pos.y.to_num::<f32>(), 
-                            obs_collider.radius.to_num::<f32>(), dist.to_num::<f32>());
-                    }
-                } else {
-                    info!("[COLLISION_CHECK]   Neighbor {}: Entity {:?} is UNIT at ({:.2}, {:.2}), distance {:.2}",
-                        idx, neighbor_entity, neighbor_pos.x.to_num::<f32>(), neighbor_pos.y.to_num::<f32>(), dist.to_num::<f32>());
-                }
-            }
-        }
-        
         for &(neighbor_entity, _) in &cache.neighbors {
             // Check if this neighbor is a static obstacle
-            if let Ok((obs_pos, obs_collider)) = obstacle_query.get(neighbor_entity) {
-                total_obstacle_query_matches += 1;
-                total_free_obstacle_checks += 1;
-                let min_dist_free = unit_radius + obs_collider.radius;
-                let min_dist_sq_free = min_dist_free * min_dist_free;
+            let Ok((obs_pos, obs_collider)) = obstacle_query.get(neighbor_entity) else {
+                continue;
+            };
+            
+            total_obstacle_query_matches += 1;
+            total_free_obstacle_checks += 1;
+            let min_dist_free = unit_radius + obs_collider.radius;
+            let min_dist_sq_free = min_dist_free * min_dist_free;
 
-                let delta = u_pos.0 - obs_pos.0;
-                let dist_sq = delta.length_squared();
-                let dist = dist_sq.sqrt();
-
-                if total_units <= 5 {
-                    info!("[OBSTACLE_COLLISION] Unit {:?} vs Obstacle {:?}: distance {:.2}, min_required {:.2} (unit_r {:.2} + obs_r {:.2})",
-                        entity, neighbor_entity, dist.to_num::<f32>(), min_dist_free.to_num::<f32>(), 
-                        unit_radius.to_num::<f32>(), obs_collider.radius.to_num::<f32>());
-                }
-
-                if dist_sq < min_dist_sq_free && dist_sq > sim_config.epsilon {
-                    total_free_obstacle_collisions += 1;
-                    let overlap = min_dist_free - dist;
-                    let dir = delta / dist;
-
-                    // Apply force
-                    let force_mag = repulsion_strength * (FixedNum::ONE + overlap * decay);
-                    u_acc.0 = u_acc.0 + dir * force_mag;
-                    
-                    if total_units <= 5 {
-                        info!("[OBSTACLE_COLLISION] >>> COLLISION DETECTED! Overlap: {:.2}, applying force magnitude {:.2} in direction ({:.2}, {:.2})",
-                            overlap.to_num::<f32>(), force_mag.to_num::<f32>(), dir.x.to_num::<f32>(), dir.y.to_num::<f32>());
-                    }
-                } else if total_units <= 5 {
-                    info!("[OBSTACLE_COLLISION] >>> No collision (distance > min_required)");
-                }
+            let delta = u_pos.0 - obs_pos.0;
+            let dist_sq = delta.length_squared();
+            
+            if dist_sq >= min_dist_sq_free || dist_sq <= sim_config.epsilon {
+                continue;
             }
+            
+            total_free_obstacle_collisions += 1;
+            let dist = dist_sq.sqrt();
+            let overlap = min_dist_free - dist;
+            let dir = delta / dist;
+
+            // Apply force
+            let force_mag = repulsion_strength * (FixedNum::ONE + overlap * decay);
+            u_acc.0 = u_acc.0 + dir * force_mag;
         }
     }
     
