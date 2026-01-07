@@ -3662,6 +3662,7 @@ dependencies = [
  "rand",
  "ron 0.12.0",
  "serde",
+ "smallvec",
  "tracing-appender",
  "tracing-subscriber",
 ]

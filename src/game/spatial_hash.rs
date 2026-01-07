@@ -114,18 +114,10 @@ impl SpatialHash {
     }
 
     /// Insert with logging for debugging obstacle detection
-    pub fn insert_with_log(&mut self, entity: Entity, pos: FixedVec2, is_obstacle: bool, radius: Option<FixedNum>) {
+    pub fn insert_with_log(&mut self, entity: Entity, pos: FixedVec2, is_obstacle: bool, _radius: Option<FixedNum>) {
         if let Some(idx) = self.get_cell_idx(pos) {
             self.cells[idx].push((entity, pos));
-            if is_obstacle {
-                if let Some(r) = radius {
-                    info!("[SPATIAL_HASH] Inserted OBSTACLE entity {:?} at pos ({:.2}, {:.2}) with radius {:.2} into cell index {}",
-                        entity, pos.x.to_num::<f32>(), pos.y.to_num::<f32>(), r.to_num::<f32>(), idx);
-                } else {
-                    info!("[SPATIAL_HASH] Inserted OBSTACLE entity {:?} at pos ({:.2}, {:.2}) into cell index {}",
-                        entity, pos.x.to_num::<f32>(), pos.y.to_num::<f32>(), idx);
-                }
-            }
+            // Removed per-obstacle logging - too verbose
         } else {
             if is_obstacle {
                 warn!("[SPATIAL_HASH] Failed to insert OBSTACLE entity {:?} at pos ({:.2}, {:.2}) - position out of bounds",
@@ -217,7 +209,8 @@ impl SpatialHash {
     pub fn insert_multi_cell_with_log(&mut self, entity: Entity, pos: FixedVec2, radius: FixedNum, is_obstacle: bool) -> Vec<(usize, usize)> {
         let cells = self.calculate_occupied_cells(pos, radius);
         
-        if is_obstacle {
+        // Only log summary for obstacles, not every cell
+        if is_obstacle && cells.len() > 20 {
             info!("[SPATIAL_HASH] Inserting OBSTACLE entity {:?} at pos ({:.2}, {:.2}) with radius {:.2} into {} cells",
                 entity, pos.x.to_num::<f32>(), pos.y.to_num::<f32>(), radius.to_num::<f32>(), cells.len());
         }
@@ -227,9 +220,6 @@ impl SpatialHash {
             let idx = row * self.cols + col;
             if idx < self.cells.len() {
                 self.cells[idx].push((entity, pos));
-                if is_obstacle {
-                    info!("[SPATIAL_HASH]   - Cell [{}, {}] (idx {})", col, row, idx);
-                }
             }
         }
         

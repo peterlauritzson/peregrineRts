@@ -2,7 +2,6 @@ use bevy::prelude::*;
 use crate::game::simulation::{SimPosition, SimPositionPrev, SimVelocity, SimSet, Colliding, SimConfig, follow_path};
 use crate::game::math::{FixedVec2, FixedNum};
 use crate::game::GameState;
-use crate::game::spatial_hash::SpatialHash;
 
 use crate::game::config::{GameConfig, GameConfigHandle};
 
@@ -266,107 +265,136 @@ fn spawn_unit_visuals(
 }
 
 fn apply_boids_steering(
-    mut query: Query<(Entity, &SimPosition, &mut SimVelocity), With<Unit>>,
-    spatial_hash: Res<SpatialHash>,
+    mut query: Query<(Entity, &SimPosition, &mut SimVelocity, &crate::game::simulation::BoidsNeighborCache), With<Unit>>,
     sim_config: Res<SimConfig>,
+    time: Res<bevy::time::Time<bevy::time::Fixed>>,
 ) {
+    let start_time = std::time::Instant::now();
+    
     let separation_weight = sim_config.separation_weight;
     let alignment_weight = sim_config.alignment_weight;
     let cohesion_weight = sim_config.cohesion_weight;
-    let neighbor_radius = sim_config.neighbor_radius;
     let separation_radius = sim_config.separation_radius;
     let max_speed = sim_config.unit_speed;
 
-    let neighbor_radius_sq = neighbor_radius * neighbor_radius;
+    // Early exit if all weights are zero
+    if separation_weight == FixedNum::ZERO && alignment_weight == FixedNum::ZERO && cohesion_weight == FixedNum::ZERO {
+        return;
+    }
+
     let separation_radius_sq = separation_radius * separation_radius;
 
-    // Collect data to avoid borrowing issues
-    let units: Vec<(Entity, FixedVec2, FixedVec2)> = query.iter().map(|(e, p, v)| (e, p.0, v.0)).collect();
-    let mut steering_forces = Vec::with_capacity(units.len());
+    // No HashMap allocation! Read directly from cached neighbor lists
+    let mut steering_forces = Vec::with_capacity(query.iter().count());
 
-    for (entity, pos, vel) in &units {
-        let mut separation = FixedVec2::ZERO;
-        let mut alignment = FixedVec2::ZERO;
-        let mut cohesion = FixedVec2::ZERO;
+    for (entity, pos, vel, boids_cache) in query.iter() {
+        // Early exit if no cached neighbors
+        if boids_cache.neighbors.is_empty() {
+            continue;
+        }
+        
+        // Accumulate forces (unnormalized for efficiency)
+        let mut separation_accum = FixedVec2::ZERO;
+        let mut alignment_accum = FixedVec2::ZERO;
+        let mut cohesion_accum = FixedVec2::ZERO;
         
         let mut neighbor_count = 0;
         let mut separation_count = 0;
-        let mut center_of_mass = FixedVec2::ZERO;
 
-        // Use spatial hash for O(1) proximity query instead of O(N) brute force
-        // This provides 1000x-10000x performance improvement for large unit counts
-        let nearby_entities = spatial_hash.query_radius(*entity, *pos, neighbor_radius);
+        // Read from cached neighbor list - no spatial hash query, no HashMap lookups!
+        for &(other_entity, other_pos, other_vel) in &boids_cache.neighbors {
+            // Skip self (shouldn't be in cache, but check anyway)
+            if entity == other_entity {
+                continue;
+            }
 
-        for (other_entity, other_pos) in &nearby_entities {
-            // Find the velocity for this other entity
-            let other_vel = units.iter()
-                .find(|(e, _, _)| e == other_entity)
-                .map(|(_, _, v)| *v)
-                .unwrap_or(FixedVec2::ZERO);
+            // Work with squared distances to avoid sqrt
+            let diff = pos.0 - other_pos;
+            let dist_sq = diff.length_squared();
 
-            let dist_sq = (*pos - *other_pos).length_squared();
+            // All neighbors within cache affect alignment & cohesion
+            alignment_accum = alignment_accum + other_vel;
+            cohesion_accum = cohesion_accum + other_pos;
+            neighbor_count += 1;
 
-            if dist_sq < neighbor_radius_sq {
-                // Alignment
-                alignment = alignment + other_vel;
-                
-                // Cohesion
-                center_of_mass = center_of_mass + *other_pos;
-                
-                neighbor_count += 1;
-
-                // Separation
-                if dist_sq < separation_radius_sq {
-                    let dist = dist_sq.sqrt();
-                    let strength = if dist > FixedNum::from_num(0.001) { FixedNum::from_num(1.0) / dist } else { FixedNum::from_num(100.0) }; 
-                    let dir = *pos - *other_pos;
-                    // normalize_or_zero is not on FixedVec2, need to implement or check
-                    let dir_norm = if dir.length_squared() > FixedNum::ZERO { dir.normalize() } else { FixedVec2::ZERO };
-                    separation = separation + dir_norm * strength;
-                    separation_count += 1;
-                }
+            // Separation: only for very close neighbors
+            // Use squared distance math - no sqrt needed!
+            if dist_sq < separation_radius_sq {
+                // Inverse-square falloff for separation strength
+                let strength = separation_radius_sq / dist_sq.max(FixedNum::from_num(0.01));
+                separation_accum = separation_accum + diff * strength;
+                separation_count += 1;
             }
         }
 
-        if neighbor_count > 0 {
-            let nc = FixedNum::from_num(neighbor_count);
-            let align_norm = alignment / nc ;
-            let align_norm = if align_norm.length_squared() > FixedNum::ZERO { align_norm.normalize() } else { FixedVec2::ZERO };
-            alignment = align_norm * max_speed;
-            alignment = alignment - *vel;
-            
-            center_of_mass = center_of_mass / nc;
-            let direction_to_com = center_of_mass - *pos;
-            let cohesion_norm = if direction_to_com.length_squared() > FixedNum::ZERO { direction_to_com.normalize() } else { FixedVec2::ZERO };
-            cohesion = cohesion_norm * max_speed;
-            cohesion = cohesion - *vel;
+        // Skip if no neighbors affected this unit
+        if neighbor_count == 0 {
+            continue;
         }
 
-        if separation_count > 0 {
-             let sc = FixedNum::from_num(separation_count);
-             let sep_norm = separation / sc ;
-             let sep_norm = if sep_norm.length_squared() > FixedNum::ZERO { sep_norm.normalize() } else { FixedVec2::ZERO };
-             separation = sep_norm * max_speed;
-             separation = separation - *vel;
+        // Calculate final steering forces
+        let mut total_force = FixedVec2::ZERO;
+
+        // Alignment: steer toward average heading
+        if alignment_weight > FixedNum::ZERO && neighbor_count > 0 {
+            let avg_vel = alignment_accum / FixedNum::from_num(neighbor_count);
+            let desired = if avg_vel.length_squared() > FixedNum::ZERO {
+                avg_vel.normalize() * max_speed
+            } else {
+                FixedVec2::ZERO
+            };
+            let alignment_force = desired - vel.0;
+            total_force = total_force + alignment_force * alignment_weight;
         }
 
-        let total_force = (separation * separation_weight) + 
-                          (alignment * alignment_weight) + 
-                          (cohesion * cohesion_weight);
-        
-        steering_forces.push((*entity, total_force));
+        // Cohesion: steer toward center of mass
+        if cohesion_weight > FixedNum::ZERO && neighbor_count > 0 {
+            let center_of_mass = cohesion_accum / FixedNum::from_num(neighbor_count);
+            let direction = center_of_mass - pos.0;
+            let desired = if direction.length_squared() > FixedNum::ZERO {
+                direction.normalize() * max_speed
+            } else {
+                FixedVec2::ZERO
+            };
+            let cohesion_force = desired - vel.0;
+            total_force = total_force + cohesion_force * cohesion_weight;
+        }
+
+        // Separation: steer away from crowded neighbors
+        if separation_weight > FixedNum::ZERO && separation_count > 0 {
+            // Normalize the accumulated separation vector
+            let separation_force = if separation_accum.length_squared() > FixedNum::ZERO {
+                separation_accum.normalize() * max_speed - vel.0
+            } else {
+                FixedVec2::ZERO
+            };
+            total_force = total_force + separation_force * separation_weight;
+        }
+
+        steering_forces.push((entity, total_force));
     }
 
     // Apply forces
     let delta = FixedNum::from_num(1.0) / FixedNum::from_num(sim_config.tick_rate);
     for (entity, force) in steering_forces {
-        if let Ok((_, _, mut vel)) = query.get_mut(entity) {
+        if let Ok((_, _, mut vel, _)) = query.get_mut(entity) {
             vel.0 = vel.0 + force * delta;
             
-            if vel.0.length_squared() > max_speed * max_speed {
+            // Only clamp if exceeded max speed
+            let speed_sq = vel.0.length_squared();
+            let max_speed_sq = max_speed * max_speed;
+            if speed_sq > max_speed_sq {
                 vel.0 = vel.0.normalize() * max_speed;
             }
         }
+    }
+    
+    // Log performance
+    let duration = start_time.elapsed();
+    let tick = (time.elapsed_secs() * 30.0) as u64;
+    let unit_count = query.iter().count();
+    if duration.as_millis() > 2 || tick % 100 == 0 {
+        warn!("[BOIDS_STEERING] {:?} | Units: {}", duration, unit_count);
     }
 }
 

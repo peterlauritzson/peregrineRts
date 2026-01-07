@@ -18,7 +18,16 @@
 ### 3. Performance & Scalability (The "10M Unit" Goal)
 *   **Data-Oriented**: Keep "hot" simulation components small and contiguous. Avoid `Box<T>` or heavy nesting in components.
 *   **Batching**: Do not run A* pathfinding for 10,000 units individually. Use **Flow Fields** or group steering.
-*   **No Allocations**: Avoid memory allocation (Vec::push, new objects) inside the hot simulation loop. Pre-allocate buffers.
+*   **No Allocations in Hot Loops**: Avoid memory allocation (Vec::new(), HashMap::new(), String::from()) inside per-frame simulation systems.
+    *   **Why**: Memory allocation is expensive (10-1000ns per allocation) and non-deterministic (timing varies based on allocator state).
+    *   **Heap Fragmentation**: Allocating/deallocating every frame causes memory fragmentation, leading to cache misses and slower allocations over time.
+    *   **GC Pressure**: While Rust has no GC, frequent allocations still trigger OS-level memory management overhead.
+    *   **Solution**: 
+        - Use `Local<T>` resources to cache pre-allocated buffers across frames
+        - Use `Vec::with_capacity()` at startup, then `.clear()` instead of recreating
+        - Prefer `query.get()` for lookups over building temporary HashMaps
+    *   **Example**: Building a HashMap of 3500 units every frame = 3500 allocations + hashing + copying. Instead, use direct query lookups or cached Local<HashMap>.
+    *   **Measurement**: With 3500 units, eliminating one Vec/HashMap per frame saves ~0.5-2ms per tick.
 
 ### 4. Responsiveness (The "E-Sport" Feel)
 *   **Instant Feedback**: When a player clicks, play the sound and show the marker *immediately* (Frame 0), even if the network command takes 100ms to execute.

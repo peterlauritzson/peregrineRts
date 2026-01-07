@@ -38,6 +38,7 @@ pub struct InitialConfig {
     pub cohesion_weight: f32,
     pub neighbor_radius: f32,
     pub separation_radius: f32,
+    pub boids_max_neighbors: usize,
     
     // Force sources
     pub black_hole_strength: f32,
@@ -165,6 +166,7 @@ impl Default for InitialConfig {
             cohesion_weight: 1.0,
             neighbor_radius: 5.0,
             separation_radius: 1.5,
+            boids_max_neighbors: 8,
             black_hole_strength: 50.0,
             wind_spot_strength: -50.0,
             force_source_radius: 10.0,

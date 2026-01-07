@@ -105,7 +105,7 @@ impl Default for Collider {
     }
 }
 
-/// Cached neighbor list for spatial queries.
+/// Cached neighbor list for collision detection.
 /// 
 /// Stores the result of spatial hash queries to avoid redundant lookups.
 /// Cache is invalidated when the entity moves significantly or after a timeout.
@@ -128,6 +128,33 @@ impl Default for CachedNeighbors {
             last_query_pos: FixedVec2::ZERO,
             frames_since_update: 0,
             is_fast_mover: false,
+        }
+    }
+}
+
+/// Cached neighbor list for boids steering calculations.
+/// 
+/// Separate from CachedNeighbors because boids needs:
+/// - Larger search radius (5.0 units vs 2.0 for collision)
+/// - Velocity data for alignment behavior
+/// - Fewer neighbors (limit to 8 closest)
+/// - Can tolerate stale data (visual-only behavior)
+#[derive(Component, Debug, Clone)]
+pub struct BoidsNeighborCache {
+    /// Closest N neighbors with position and velocity (stack-allocated up to 8)
+    pub neighbors: smallvec::SmallVec<[(Entity, FixedVec2, FixedVec2); 8]>,
+    /// Position where the last query was performed
+    pub last_query_pos: FixedVec2,
+    /// Frames elapsed since last cache update
+    pub frames_since_update: u32,
+}
+
+impl Default for BoidsNeighborCache {
+    fn default() -> Self {
+        Self {
+            neighbors: smallvec::SmallVec::new(),
+            last_query_pos: FixedVec2::ZERO,
+            frames_since_update: 0,
         }
     }
 }
@@ -221,6 +248,7 @@ pub struct SimConfig {
     pub cohesion_weight: FixedNum,
     pub neighbor_radius: FixedNum,
     pub separation_radius: FixedNum,
+    pub boids_max_neighbors: usize,
     pub black_hole_strength: FixedNum,
     pub wind_spot_strength: FixedNum,
     pub force_source_radius: FixedNum,
@@ -257,6 +285,7 @@ impl Default for SimConfig {
             cohesion_weight: FixedNum::from_num(1.0),
             neighbor_radius: FixedNum::from_num(5.0),
             separation_radius: FixedNum::from_num(1.5),
+            boids_max_neighbors: 8,
             black_hole_strength: FixedNum::from_num(50.0),
             wind_spot_strength: FixedNum::from_num(-50.0),
             force_source_radius: FixedNum::from_num(10.0),
@@ -322,8 +351,9 @@ impl Plugin for SimulationPlugin {
             follow_path.in_set(SimSet::Steering),
             apply_forces.in_set(SimSet::Steering).before(follow_path),
             apply_velocity.in_set(SimSet::Integration),
-            update_spatial_hash.in_set(SimSet::Physics).before(update_neighbor_cache).before(detect_collisions).before(resolve_collisions),
+            update_spatial_hash.in_set(SimSet::Physics).before(update_neighbor_cache).before(update_boids_neighbor_cache).before(detect_collisions).before(resolve_collisions),
             update_neighbor_cache.in_set(SimSet::Physics).before(detect_collisions),
+            update_boids_neighbor_cache.in_set(SimSet::Physics),
             constrain_to_map_bounds.in_set(SimSet::Physics),
             detect_collisions.in_set(SimSet::Physics).before(resolve_collisions),
             resolve_collisions.in_set(SimSet::Physics),
@@ -382,6 +412,7 @@ fn init_sim_config_from_initial(
     sim_config.cohesion_weight = FixedNum::from_num(config.cohesion_weight);
     sim_config.neighbor_radius = FixedNum::from_num(config.neighbor_radius);
     sim_config.separation_radius = FixedNum::from_num(config.separation_radius);
+    sim_config.boids_max_neighbors = config.boids_max_neighbors;
     sim_config.black_hole_strength = FixedNum::from_num(config.black_hole_strength);
     sim_config.wind_spot_strength = FixedNum::from_num(config.wind_spot_strength);
     sim_config.force_source_radius = FixedNum::from_num(config.force_source_radius);
@@ -564,7 +595,10 @@ fn process_input(
     mut spawn_events: MessageReader<SpawnUnitCommand>,
     mut path_requests: MessageWriter<PathRequest>,
     query: Query<&SimPosition>,
+    time: Res<Time<Fixed>>,
 ) {
+    let start_time = std::time::Instant::now();
+    
     // Deterministic Input Processing:
     // 1. Collect all events
     // 2. Sort by Player ID (and potentially sequence number if we had one)
@@ -616,8 +650,15 @@ fn process_input(
             SimAcceleration(FixedVec2::ZERO),
             Collider::default(),
             CachedNeighbors::default(),
+            BoidsNeighborCache::default(),
             OccupiedCells::default(), // Will be populated on first spatial hash update
         ));
+    }
+    
+    let duration = start_time.elapsed();
+    let tick = (time.elapsed_secs() * 30.0) as u64;
+    if duration.as_millis() > 2 || tick % 100 == 0 {
+        info!("[PROCESS_INPUT] {:?}", duration);
     }
 }
 
@@ -662,17 +703,30 @@ pub struct FlowFieldObstacle;
 
 fn cache_previous_state(
     mut query: Query<(&mut SimPositionPrev, &SimPosition)>,
+    time: Res<Time<Fixed>>,
 ) {
+    let start_time = std::time::Instant::now();
+    let entity_count = query.iter().count();
+    
     for (mut prev, pos) in query.iter_mut() {
         prev.0 = pos.0;
+    }
+    
+    let duration = start_time.elapsed();
+    let tick = (time.elapsed_secs() * 30.0) as u64;
+    if duration.as_millis() > 2 || tick % 100 == 0 {
+        info!("[CACHE_PREV_STATE] {:?} | Entities: {}", duration, entity_count);
     }
 }
 
 fn apply_velocity(
     sim_config: Res<SimConfig>,
     mut query: Query<(&mut SimPosition, &mut SimVelocity, &mut SimAcceleration)>,
+    time: Res<Time<Fixed>>,
 ) {
+    let start_time = std::time::Instant::now();
     let delta = FixedNum::from_num(1.0) / FixedNum::from_num(sim_config.tick_rate);
+    let entity_count = query.iter().count();
 
     for (mut pos, mut vel, mut acc) in query.iter_mut() {
         // Apply acceleration
@@ -688,6 +742,12 @@ fn apply_velocity(
         if vel.0.length_squared() > FixedNum::ZERO {
             pos.0 = pos.0 + vel.0 * delta;
         }
+    }
+    
+    let duration = start_time.elapsed();
+    let tick = (time.elapsed_secs() * 30.0) as u64;
+    if duration.as_millis() > 2 || tick % 100 == 0 {
+        info!("[APPLY_VELOCITY] {:?} | Entities: {}", duration, entity_count);
     }
 }
 
@@ -837,6 +897,83 @@ fn update_neighbor_cache(
     }
 }
 
+/// Update cached neighbor lists for boids steering.
+/// Runs less frequently than collision cache (every 3-5 frames) since boids is visual-only.
+fn update_boids_neighbor_cache(
+    mut query: Query<(Entity, &SimPosition, &SimVelocity, &mut BoidsNeighborCache)>,
+    spatial_hash: Res<SpatialHash>,
+    sim_config: Res<SimConfig>,
+    all_units: Query<&SimVelocity>,
+    time: Res<Time<Fixed>>,
+) {
+    let start_time = std::time::Instant::now();
+    
+    // Boids can tolerate stale data - update every 3-5 frames depending on movement
+    const MOVEMENT_THRESHOLD: f32 = 1.0;  // More lenient than collision (0.5)
+    const MAX_FRAMES: u32 = 5;            // Slower than collision (2-10)
+    
+    let mut total_entities = 0;
+    let mut cache_hits = 0;
+    let mut cache_misses = 0;
+    let mut total_neighbors = 0;
+    
+    for (entity, pos, _vel, mut cache) in query.iter_mut() {
+        total_entities += 1;
+        cache.frames_since_update += 1;
+        
+        let moved_distance = (pos.0 - cache.last_query_pos).length();
+        let needs_update = moved_distance.to_num::<f32>() > MOVEMENT_THRESHOLD 
+                        || cache.frames_since_update >= MAX_FRAMES;
+        
+        if needs_update {
+            // Cache MISS - rebuild neighbor list
+            cache_misses += 1;
+            
+            // Query spatial hash with boids neighbor radius (5.0 units)
+            let nearby = spatial_hash.query_radius(entity, pos.0, sim_config.neighbor_radius);
+            
+            // Limit to closest N neighbors (configured max, typically 8)
+            cache.neighbors.clear();
+            for (neighbor_entity, neighbor_pos) in nearby.iter().take(sim_config.boids_max_neighbors) {
+                // Fetch velocity for this neighbor
+                if let Ok(neighbor_vel) = all_units.get(*neighbor_entity) {
+                    cache.neighbors.push((*neighbor_entity, *neighbor_pos, neighbor_vel.0));
+                }
+            }
+            
+            total_neighbors += cache.neighbors.len();
+            cache.last_query_pos = pos.0;
+            cache.frames_since_update = 0;
+        } else {
+            // Cache HIT - reuse old neighbor list
+            cache_hits += 1;
+            total_neighbors += cache.neighbors.len();
+        }
+    }
+    
+    let duration = start_time.elapsed();
+    let tick = (time.elapsed_secs() * 30.0) as u64;
+    
+    if duration.as_millis() > 1 || tick % 100 == 0 {
+        let cache_hit_rate = if total_entities > 0 {
+            (cache_hits as f32 / total_entities as f32) * 100.0
+        } else {
+            0.0
+        };
+        
+        let avg_neighbors = if total_entities > 0 {
+            total_neighbors as f32 / total_entities as f32
+        } else {
+            0.0
+        };
+        
+        info!(
+            "[BOIDS_CACHE] {:?} | Entities: {} | Cache hits: {} ({:.1}%) | Misses: {} | Avg neighbors: {:.1}",
+            duration, total_entities, cache_hits, cache_hit_rate, cache_misses, avg_neighbors
+        );
+    }
+}
+
 fn detect_collisions(
     mut commands: Commands,
     query: Query<(Entity, &SimPosition, &Collider, &CachedNeighbors)>,
@@ -964,7 +1101,11 @@ fn detect_collisions(
 fn apply_friction(
     mut query: Query<&mut SimVelocity>,
     sim_config: Res<SimConfig>,
+    time: Res<Time<Fixed>>,
 ) {
+    let start_time = std::time::Instant::now();
+    let entity_count = query.iter().count();
+    
     let friction = sim_config.friction;
     let min_velocity_sq = sim_config.min_velocity * sim_config.min_velocity;
     for mut vel in query.iter_mut() {
@@ -973,12 +1114,22 @@ fn apply_friction(
             vel.0 = FixedVec2::ZERO;
         }
     }
+    
+    let duration = start_time.elapsed();
+    let tick = (time.elapsed_secs() * 30.0) as u64;
+    if duration.as_millis() > 2 || tick % 100 == 0 {
+        warn!("[APPLY_FRICTION] {:?} | Entities: {}", duration, entity_count);
+    }
 }
 
 fn apply_forces(
     mut units: Query<(&SimPosition, &mut SimAcceleration)>,
     sources: Query<(&SimPosition, &ForceSource)>,
+    time: Res<Time<Fixed>>,
 ) {
+    let start_time = std::time::Instant::now();
+    let unit_count = units.iter().count();
+    
     for (u_pos, mut u_acc) in units.iter_mut() {
         for (s_pos, source) in sources.iter() {
              let delta = s_pos.0 - u_pos.0;
@@ -1003,6 +1154,12 @@ fn apply_forces(
                  }
              }
         }
+    }
+    
+    let duration = start_time.elapsed();
+    let tick = (time.elapsed_secs() * 30.0) as u64;
+    if duration.as_millis() > 2 || tick % 100 == 0 {
+        info!("[APPLY_FORCES] {:?} | Units: {}", duration, unit_count);
     }
 }
 
@@ -1415,6 +1572,7 @@ pub fn follow_path(
     sim_config: Res<SimConfig>,
     mut graph: ResMut<HierarchicalGraph>,
     map_flow_field: Res<MapFlowField>,
+    time: Res<Time<Fixed>>,
 ) {
     let start_time = std::time::Instant::now();
     let path_count = query.iter().count();
@@ -1559,13 +1717,13 @@ pub fn follow_path(
         }
     }
     
-    // Log if path processing is slow (> 5ms) or report early arrivals
+    // Log path processing timing
     let duration = start_time.elapsed();
-    if duration.as_millis() > 5 {
-        warn!("[PATH] Slow path following: {:?} for {} paths", duration, path_count);
-    }
-    if early_arrivals > 0 {
-        info!("[PATH] Early arrivals due to crowding: {} units stopped short", early_arrivals);
+    let tick = (time.elapsed_secs() * 30.0) as u64;
+    
+    // Always log on every 100th tick or if slow
+    if duration.as_millis() > 2 || tick % 100 == 0 {
+        info!("[FOLLOW_PATH] {:?} | Paths: {} | Early arrivals: {}", duration, path_count, early_arrivals);
     }
 }
 
