@@ -113,6 +113,27 @@ impl SpatialHash {
         }
     }
 
+    /// Insert with logging for debugging obstacle detection
+    pub fn insert_with_log(&mut self, entity: Entity, pos: FixedVec2, is_obstacle: bool, radius: Option<FixedNum>) {
+        if let Some(idx) = self.get_cell_idx(pos) {
+            self.cells[idx].push((entity, pos));
+            if is_obstacle {
+                if let Some(r) = radius {
+                    info!("[SPATIAL_HASH] Inserted OBSTACLE entity {:?} at pos ({:.2}, {:.2}) with radius {:.2} into cell index {}",
+                        entity, pos.x.to_num::<f32>(), pos.y.to_num::<f32>(), r.to_num::<f32>(), idx);
+                } else {
+                    info!("[SPATIAL_HASH] Inserted OBSTACLE entity {:?} at pos ({:.2}, {:.2}) into cell index {}",
+                        entity, pos.x.to_num::<f32>(), pos.y.to_num::<f32>(), idx);
+                }
+            }
+        } else {
+            if is_obstacle {
+                warn!("[SPATIAL_HASH] Failed to insert OBSTACLE entity {:?} at pos ({:.2}, {:.2}) - position out of bounds",
+                    entity, pos.x.to_num::<f32>(), pos.y.to_num::<f32>());
+            }
+        }
+    }
+
     /// Remove an entity from a specific cell.
     /// Used when an entity moves from one cell to another.
     pub fn remove(&mut self, entity: Entity, col: usize, row: usize) {
@@ -120,6 +141,99 @@ impl SpatialHash {
         if idx < self.cells.len() {
             self.cells[idx].retain(|&(e, _)| e != entity);
         }
+    }
+
+    /// Remove an entity from multiple cells.
+    /// Used when updating entities that occupy multiple cells.
+    pub fn remove_multi_cell(&mut self, entity: Entity, cells: &[(usize, usize)]) {
+        for &(col, row) in cells {
+            self.remove(entity, col, row);
+        }
+    }
+
+    /// Calculate all grid cells that an entity's radius overlaps.
+    /// Returns a vector of (col, row) tuples.
+    ///
+    /// # Multi-Cell Storage
+    ///
+    /// This is critical for correct collision detection with variable entity sizes.
+    /// An entity is inserted into **all** cells its radius overlaps, ensuring that
+    /// queries from nearby entities will always find it.
+    ///
+    /// # Example
+    ///
+    /// - Small entity (radius 0.5, cell_size 2.0): Occupies 1-4 cells
+    /// - Medium obstacle (radius 10): Occupies ~25 cells  
+    /// - Large obstacle (radius 20): Occupies ~100 cells
+    pub fn calculate_occupied_cells(&self, pos: FixedVec2, radius: FixedNum) -> Vec<(usize, usize)> {
+        let mut cells = Vec::new();
+        
+        let half_w = self.map_width / FixedNum::from_num(2.0);
+        let half_h = self.map_height / FixedNum::from_num(2.0);
+        
+        // Calculate the bounding box of cells the entity overlaps
+        let min_x = pos.x - radius + half_w;
+        let max_x = pos.x + radius + half_w;
+        let min_y = pos.y - radius + half_h;
+        let max_y = pos.y + radius + half_h;
+        
+        // Convert to grid coordinates, clamped to valid range
+        let min_col = (min_x / self.cell_size).floor().to_num::<isize>().max(0) as usize;
+        let max_col = (max_x / self.cell_size).floor().to_num::<isize>().min((self.cols as isize) - 1) as usize;
+        let min_row = (min_y / self.cell_size).floor().to_num::<isize>().max(0) as usize;
+        let max_row = (max_y / self.cell_size).floor().to_num::<isize>().min((self.rows as isize) - 1) as usize;
+        
+        // Generate all cells in the bounding box
+        for row in min_row..=max_row {
+            for col in min_col..=max_col {
+                cells.push((col, row));
+            }
+        }
+        
+        cells
+    }
+
+    /// Insert an entity into all cells its radius overlaps.
+    /// Returns the list of cells the entity was inserted into.
+    ///
+    /// This should be used for all entity insertions to ensure correct collision
+    /// detection with variable entity sizes.
+    pub fn insert_multi_cell(&mut self, entity: Entity, pos: FixedVec2, radius: FixedNum) -> Vec<(usize, usize)> {
+        let cells = self.calculate_occupied_cells(pos, radius);
+        
+        // Insert into each overlapping cell
+        for &(col, row) in &cells {
+            let idx = row * self.cols + col;
+            if idx < self.cells.len() {
+                self.cells[idx].push((entity, pos));
+            }
+        }
+        
+        cells
+    }
+
+    /// Insert an entity into all cells its radius overlaps, with logging.
+    /// Returns the list of cells the entity was inserted into.
+    pub fn insert_multi_cell_with_log(&mut self, entity: Entity, pos: FixedVec2, radius: FixedNum, is_obstacle: bool) -> Vec<(usize, usize)> {
+        let cells = self.calculate_occupied_cells(pos, radius);
+        
+        if is_obstacle {
+            info!("[SPATIAL_HASH] Inserting OBSTACLE entity {:?} at pos ({:.2}, {:.2}) with radius {:.2} into {} cells",
+                entity, pos.x.to_num::<f32>(), pos.y.to_num::<f32>(), radius.to_num::<f32>(), cells.len());
+        }
+        
+        // Insert into each overlapping cell
+        for &(col, row) in &cells {
+            let idx = row * self.cols + col;
+            if idx < self.cells.len() {
+                self.cells[idx].push((entity, pos));
+                if is_obstacle {
+                    info!("[SPATIAL_HASH]   - Cell [{}, {}] (idx {})", col, row, idx);
+                }
+            }
+        }
+        
+        cells
     }
 
     // Getters for grid parameters
@@ -133,6 +247,15 @@ impl SpatialHash {
     /// If exclude_entity is Some, that entity will be excluded from results.
     /// This avoids wasted self-collision checks in collision detection.
     pub fn get_potential_collisions(&self, pos: FixedVec2, query_radius: FixedNum, exclude_entity: Option<Entity>) -> Vec<(Entity, FixedVec2)> {
+        self.get_potential_collisions_internal(pos, query_radius, exclude_entity, false)
+    }
+
+    /// Get potential collisions with optional debug logging
+    pub fn get_potential_collisions_with_log(&self, pos: FixedVec2, query_radius: FixedNum, exclude_entity: Option<Entity>) -> Vec<(Entity, FixedVec2)> {
+        self.get_potential_collisions_internal(pos, query_radius, exclude_entity, true)
+    }
+
+    fn get_potential_collisions_internal(&self, pos: FixedVec2, query_radius: FixedNum, exclude_entity: Option<Entity>, log: bool) -> Vec<(Entity, FixedVec2)> {
         let mut result = Vec::new();
         
         let half_w = self.map_width / FixedNum::from_num(2.0);
@@ -147,11 +270,28 @@ impl SpatialHash {
         let max_col = (max_x / self.cell_size).floor().to_num::<isize>().min((self.cols as isize) - 1) as usize;
         let min_row = (min_y / self.cell_size).floor().to_num::<isize>().max(0) as usize;
         let max_row = (max_y / self.cell_size).floor().to_num::<isize>().min((self.rows as isize) - 1) as usize;
+        
+        if log {
+            info!("[SPATIAL_HASH_QUERY] Querying from pos ({:.2}, {:.2}) with radius {:.2}",
+                pos.x.to_num::<f32>(), pos.y.to_num::<f32>(), query_radius.to_num::<f32>());
+            info!("[SPATIAL_HASH_QUERY] Checking cells - cols: {}..={}, rows: {}..={}",
+                min_col, max_col, min_row, max_row);
+        }
 
         for row in min_row..=max_row {
             for col in min_col..=max_col {
                 let idx = row * self.cols + col;
                 if idx < self.cells.len() {
+                    if log && !self.cells[idx].is_empty() {
+                        info!("[SPATIAL_HASH_QUERY] Cell [{}, {}] (idx {}) contains {} entities",
+                            col, row, idx, self.cells[idx].len());
+                        for &(entity, entity_pos) in &self.cells[idx] {
+                            let dist = (pos - entity_pos).length();
+                            info!("[SPATIAL_HASH_QUERY]   - Entity {:?} at ({:.2}, {:.2}), distance: {:.2}",
+                                entity, entity_pos.x.to_num::<f32>(), entity_pos.y.to_num::<f32>(), dist.to_num::<f32>());
+                        }
+                    }
+                    
                     if let Some(exclude) = exclude_entity {
                         // Exclude specific entity from results
                         for &(entity, entity_pos) in &self.cells[idx] {
@@ -165,6 +305,10 @@ impl SpatialHash {
                     }
                 }
             }
+        }
+        
+        if log {
+            info!("[SPATIAL_HASH_QUERY] Found {} potential collision entities", result.len());
         }
         
         result

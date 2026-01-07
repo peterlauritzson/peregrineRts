@@ -132,6 +132,36 @@ impl Default for CachedNeighbors {
     }
 }
 
+/// Tracks which spatial hash cells an entity currently occupies.
+///
+/// For correct collision detection with variable entity sizes, entities are stored
+/// in **all** spatial hash cells their radius overlaps. This component tracks those
+/// cells so they can be efficiently updated when the entity moves.
+///
+/// # Multi-Cell Storage Rationale
+///
+/// - Small entities (radius ≤ cell_size): Occupy 1-4 cells
+/// - Medium entities (radius = 2× cell_size): Occupy ~9 cells  
+/// - Large entities (radius = 10× cell_size): Occupy ~100 cells
+///
+/// Without multi-cell storage, large entities can be invisible to queries from
+/// nearby small entities, causing collision detection failures.
+///
+/// See SPATIAL_PARTITIONING.md Section 2.2 for detailed explanation.
+#[derive(Component, Debug, Clone)]
+pub struct OccupiedCells {
+    /// All (col, row) pairs this entity currently occupies in the spatial hash
+    pub cells: Vec<(usize, usize)>,
+}
+
+impl Default for OccupiedCells {
+    fn default() -> Self {
+        Self {
+            cells: Vec::new(),
+        }
+    }
+}
+
 /// Runtime simulation configuration with fixed-point values for deterministic physics.
 ///
 /// This resource stores all simulation parameters converted from [`GameConfig`] (f32/f64)
@@ -586,7 +616,7 @@ fn process_input(
             SimAcceleration(FixedVec2::ZERO),
             Collider::default(),
             CachedNeighbors::default(),
-            LastGridCell { col: 0, row: 0 }, // Will be updated on first spatial hash update
+            OccupiedCells::default(), // Will be populated on first spatial hash update
         ));
     }
 }
@@ -621,13 +651,14 @@ pub struct StaticObstacle;
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct FlowFieldObstacle;
 
-/// Tracks the last spatial hash grid cell an entity occupied.
-/// Used to avoid redundant spatial hash updates when entity stays in same cell.
-#[derive(Component, Debug, Clone, Copy)]
-pub struct LastGridCell {
-    pub col: usize,
-    pub row: usize,
-}
+// DEPRECATED: Replaced by OccupiedCells for multi-cell spatial hash storage
+// /// Tracks the last spatial hash grid cell an entity occupied.
+// /// Used to avoid redundant spatial hash updates when entity stays in same cell.
+// #[derive(Component, Debug, Clone, Copy)]
+// pub struct LastGridCell {
+//     pub col: usize,
+//     pub row: usize,
+// }
 
 fn cache_previous_state(
     mut query: Query<(&mut SimPositionPrev, &SimPosition)>,
@@ -726,6 +757,9 @@ fn update_neighbor_cache(
     let mut fast_movers = 0;
     let mut total_obstacles_in_all_caches = 0;
     
+    // Count total units for conditional logging
+    let total_units = query.iter().count();
+    
     for (entity, pos, velocity, mut cache, collider) in query.iter_mut() {
         total_entities += 1;
         cache.frames_since_update += 1;
@@ -753,11 +787,21 @@ fn update_neighbor_cache(
             // Cache MISS - perform full spatial query
             cache_misses += 1;
             let search_radius = collider.radius * sim_config.collision_search_radius_multiplier;
-            cache.neighbors = spatial_hash.get_potential_collisions(
-                pos.0, 
-                search_radius, 
-                Some(entity)
-            );
+            
+            // Use detailed logging version if we have very few units
+            cache.neighbors = if total_units <= 5 {
+                spatial_hash.get_potential_collisions_with_log(
+                    pos.0, 
+                    search_radius, 
+                    Some(entity)
+                )
+            } else {
+                spatial_hash.get_potential_collisions(
+                    pos.0, 
+                    search_radius, 
+                    Some(entity)
+                )
+            };
             
             // Debug: log what's in the spatial hash query results for first cache miss
             if cache_misses == 1 {
@@ -1036,7 +1080,7 @@ fn resolve_obstacle_collisions(
     let mut total_neighbors_checked = 0;
     let mut total_obstacle_query_matches = 0;
     
-    for (_entity, u_pos, mut u_acc, u_collider, cache) in units.iter_mut() {
+    for (entity, u_pos, mut u_acc, u_collider, cache) in units.iter_mut() {
         total_units += 1;
         let unit_radius = u_collider.radius;
         let min_dist = unit_radius + obstacle_radius;
@@ -1077,12 +1121,25 @@ fn resolve_obstacle_collisions(
         // Obstacles are already in the spatial hash, so they appear in cached neighbors
         total_neighbors_checked += cache.neighbors.len();
         
-        // Debug: Check what components the first neighbor has
-        if total_units == 1 && !cache.neighbors.is_empty() {
-            let first_neighbor = cache.neighbors[0].0;
-            let has_static_obstacle = obstacle_query.contains(first_neighbor);
-            info!("[DEBUG] First unit has {} neighbors. First neighbor entity: {:?}, has StaticObstacle query match: {}", 
-                  cache.neighbors.len(), first_neighbor, has_static_obstacle);
+        // Debug: Log unit position and neighbors for debugging
+        if total_units <= 5 {
+            info!("[COLLISION_CHECK] Unit entity {:?} at pos ({:.2}, {:.2}) with radius {:.2} checking {} neighbors",
+                entity, u_pos.0.x.to_num::<f32>(), u_pos.0.y.to_num::<f32>(), unit_radius.to_num::<f32>(), cache.neighbors.len());
+            
+            for (idx, &(neighbor_entity, neighbor_pos)) in cache.neighbors.iter().enumerate() {
+                let has_static_obstacle = obstacle_query.contains(neighbor_entity);
+                let dist = (u_pos.0 - neighbor_pos).length();
+                if has_static_obstacle {
+                    if let Ok((_, obs_collider)) = obstacle_query.get(neighbor_entity) {
+                        info!("[COLLISION_CHECK]   Neighbor {}: Entity {:?} is OBSTACLE at ({:.2}, {:.2}), radius {:.2}, distance {:.2}",
+                            idx, neighbor_entity, neighbor_pos.x.to_num::<f32>(), neighbor_pos.y.to_num::<f32>(), 
+                            obs_collider.radius.to_num::<f32>(), dist.to_num::<f32>());
+                    }
+                } else {
+                    info!("[COLLISION_CHECK]   Neighbor {}: Entity {:?} is UNIT at ({:.2}, {:.2}), distance {:.2}",
+                        idx, neighbor_entity, neighbor_pos.x.to_num::<f32>(), neighbor_pos.y.to_num::<f32>(), dist.to_num::<f32>());
+                }
+            }
         }
         
         for &(neighbor_entity, _) in &cache.neighbors {
@@ -1095,16 +1152,29 @@ fn resolve_obstacle_collisions(
 
                 let delta = u_pos.0 - obs_pos.0;
                 let dist_sq = delta.length_squared();
+                let dist = dist_sq.sqrt();
+
+                if total_units <= 5 {
+                    info!("[OBSTACLE_COLLISION] Unit {:?} vs Obstacle {:?}: distance {:.2}, min_required {:.2} (unit_r {:.2} + obs_r {:.2})",
+                        entity, neighbor_entity, dist.to_num::<f32>(), min_dist_free.to_num::<f32>(), 
+                        unit_radius.to_num::<f32>(), obs_collider.radius.to_num::<f32>());
+                }
 
                 if dist_sq < min_dist_sq_free && dist_sq > sim_config.epsilon {
                     total_free_obstacle_collisions += 1;
-                    let dist = dist_sq.sqrt();
                     let overlap = min_dist_free - dist;
                     let dir = delta / dist;
 
                     // Apply force
                     let force_mag = repulsion_strength * (FixedNum::ONE + overlap * decay);
                     u_acc.0 = u_acc.0 + dir * force_mag;
+                    
+                    if total_units <= 5 {
+                        info!("[OBSTACLE_COLLISION] >>> COLLISION DETECTED! Overlap: {:.2}, applying force magnitude {:.2} in direction ({:.2}, {:.2})",
+                            overlap.to_num::<f32>(), force_mag.to_num::<f32>(), dir.x.to_num::<f32>(), dir.y.to_num::<f32>());
+                    }
+                } else if total_units <= 5 {
+                    info!("[OBSTACLE_COLLISION] >>> No collision (distance > min_required)");
                 }
             }
         }
@@ -1565,61 +1635,79 @@ fn seek(pos: FixedVec2, target: FixedVec2, vel: FixedVec2, acc: &mut FixedVec2, 
 
 fn update_spatial_hash(
     mut spatial_hash: ResMut<SpatialHash>,
-    mut query: Query<(Entity, &SimPosition, &mut LastGridCell)>,
-    new_entities: Query<(Entity, &SimPosition), Without<LastGridCell>>,
+    mut query: Query<(Entity, &SimPosition, &Collider, &mut OccupiedCells), Without<StaticObstacle>>,
+    new_entities: Query<(Entity, &SimPosition, &Collider), Without<OccupiedCells>>,
     obstacles_query: Query<Entity, With<StaticObstacle>>,
     mut commands: Commands,
     time: Res<Time<Fixed>>,
 ) {
     let start_time = std::time::Instant::now();
-    let cell_size = spatial_hash.cell_size();
-    let map_width = spatial_hash.map_width();
-    let map_height = spatial_hash.map_height();
-    let cols = spatial_hash.cols();
-    let rows = spatial_hash.rows();
     
     let mut updates = 0;
     let mut unchanged = 0;
     let mut new_count = 0;
     let mut new_obstacles = 0;
+    let mut multi_cell_count = 0;
     
-    // Handle entities that don't have LastGridCell yet (first time in spatial hash)
-    for (entity, pos) in new_entities.iter() {
-        // Calculate grid cell
-        let half_w = map_width / FixedNum::from_num(2.0);
-        let half_h = map_height / FixedNum::from_num(2.0);
-        let grid_x = pos.0.x + half_w;
-        let grid_y = pos.0.y + half_h;
-        let col = ((grid_x / cell_size).floor().to_num::<isize>().max(0) as usize).min(cols - 1);
-        let row = ((grid_y / cell_size).floor().to_num::<isize>().max(0) as usize).min(rows - 1);
+    // Handle entities that don't have OccupiedCells yet (first time in spatial hash)
+    for (entity, pos, collider) in new_entities.iter() {
+        let is_obstacle = obstacles_query.contains(entity);
         
-        spatial_hash.insert(entity, pos.0);
-        commands.entity(entity).insert(LastGridCell { col, row });
+        // Insert into all cells the entity's radius overlaps
+        let occupied = if is_obstacle {
+            spatial_hash.insert_multi_cell_with_log(entity, pos.0, collider.radius, true)
+        } else {
+            spatial_hash.insert_multi_cell(entity, pos.0, collider.radius)
+        };
+        
+        if occupied.len() > 1 {
+            multi_cell_count += 1;
+        }
+        
+        // Track which cells this entity occupies
+        commands.entity(entity).insert(OccupiedCells {
+            cells: occupied,
+        });
+        
         new_count += 1;
         
-        if obstacles_query.contains(entity) {
+        if is_obstacle {
             new_obstacles += 1;
         }
     }
     
-    // Handle existing entities - only update if they changed cells
-    for (entity, pos, mut last_cell) in query.iter_mut() {
-        // Calculate current grid cell
-        let half_w = map_width / FixedNum::from_num(2.0);
-        let half_h = map_height / FixedNum::from_num(2.0);
-        let grid_x = pos.0.x + half_w;
-        let grid_y = pos.0.y + half_h;
-        let col = ((grid_x / cell_size).floor().to_num::<isize>().max(0) as usize).min(cols - 1);
-        let row = ((grid_y / cell_size).floor().to_num::<isize>().max(0) as usize).min(rows - 1);
+    // Handle static obstacles - they never move, so skip them entirely
+    // (They were already inserted in the new_entities pass above)
+    
+    // Handle dynamic entities - only update if position changed significantly
+    for (entity, pos, collider, mut occupied_cells) in query.iter_mut() {
+        // Calculate what cells this entity should now occupy
+        let new_cells = spatial_hash.calculate_occupied_cells(pos.0, collider.radius);
         
-        if col != last_cell.col || row != last_cell.row {
-            // Cell changed - need to update
-            // Remove from old cell and insert into new cell
-            spatial_hash.remove(entity, last_cell.col, last_cell.row);
-            spatial_hash.insert(entity, pos.0);
-            last_cell.col = col;
-            last_cell.row = row;
+        // Check if the occupied cells changed
+        if new_cells != occupied_cells.cells {
+            // Remove from old cells
+            spatial_hash.remove_multi_cell(entity, &occupied_cells.cells);
+            
+            // Insert into new cells
+            for &(col, row) in &new_cells {
+                let idx = row * spatial_hash.cols() + col;
+                if idx < spatial_hash.cols() * spatial_hash.rows() {
+                    // Directly access cells (we already calculated the index)
+                    // Note: We can't directly access the cells vec, so use the position to insert
+                    // This is a bit inefficient, but safe
+                }
+            }
+            // Actually, let's use insert_multi_cell for simplicity
+            spatial_hash.insert_multi_cell(entity, pos.0, collider.radius);
+            
+            // Update tracked cells
+            occupied_cells.cells = new_cells;
             updates += 1;
+            
+            if occupied_cells.cells.len() > 1 {
+                multi_cell_count += 1;
+            }
         } else {
             unchanged += 1;
         }
@@ -1629,8 +1717,8 @@ fn update_spatial_hash(
     let tick = (time.elapsed_secs() * 30.0) as u64;
     if duration.as_millis() > 2 || tick % 100 == 0 || new_obstacles > 0 {
         let total = new_count + updates + unchanged;
-        info!("[SPATIAL_HASH_UPDATE] {:?} | Entities: {} (new: {} [{} obstacles], updated: {}, unchanged: {})", 
-              duration, total, new_count, new_obstacles, updates, unchanged);
+        info!("[SPATIAL_HASH_UPDATE] {:?} | Entities: {} (new: {} [{} obstacles], updated: {}, unchanged: {}, multi-cell: {})", 
+              duration, total, new_count, new_obstacles, updates, unchanged, multi_cell_count);
     }
 }
 

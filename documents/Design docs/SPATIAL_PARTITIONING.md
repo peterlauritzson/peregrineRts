@@ -19,12 +19,51 @@ To avoid $O(N^2)$ proximity checks (which would require 100 billion comparisons 
 *   **Cell Size:** Tuned based on typical query radius (usually 2-3x unit radius).
 *   **Dynamic:** Rebuilt every physics tick as entities move.
 
-### 2.2 Lifecycle (Every Tick)
-1.  **Clear:** The grid is cleared at the start of every physics tick.
-2.  **Insert:** Every dynamic entity inserts itself into the cell(s) corresponding to its position.
-3.  **Query:** Systems query nearby cells based on their search radius.
+### 2.2 Storage Strategy: Multi-Cell Insertion
 
-### 2.3 Query Types
+**CRITICAL DESIGN DECISION (January 2026):**
+
+Entities are inserted into **ALL cells their radius overlaps**, not just the cell containing their center point. This is essential for correct collision detection with variable entity sizes.
+
+**Why Multi-Cell Storage is Required:**
+- A large obstacle (radius 20) centered at one cell can overlap units in distant cells
+- A small unit querying its local cells won't find the obstacle's center if it's far away
+- Example bug: Unit at (55, 152) inside obstacle at (56, 148) with radius 20:
+  - Obstacle center in cell [152, 198]
+  - Unit querying cells [152-153, 200-201]
+  - NO OVERLAP → collision missed!
+
+**Implementation:**
+```rust
+// Calculate all cells an entity overlaps
+let min_x = (pos.x - radius) / cell_size;
+let max_x = (pos.x + radius) / cell_size;
+let min_y = (pos.y - radius) / cell_size;
+let max_y = (pos.y + radius) / cell_size;
+
+// Insert into every overlapping cell
+for row in min_y..=max_y {
+    for col in min_x..=max_x {
+        spatial_hash.insert_into_cell(row, col, entity, pos);
+    }
+}
+```
+
+**Component for Tracking:**
+```rust
+#[derive(Component)]
+struct OccupiedCells {
+    cells: Vec<(usize, usize)>,  // All (col, row) pairs this entity occupies
+}
+```
+
+### 2.3 Lifecycle (Every Tick)
+1.  **Insert New Entities:** Entities without `OccupiedCells` calculate all overlapping cells and insert into each
+2.  **Update Moved Entities:** Recalculate overlapping cells, remove from old cells, insert into new cells
+3.  **Static Entities:** Calculate cells once on spawn, never update (zero ongoing cost)
+4.  **Query:** Systems query nearby cells based on their search radius
+
+### 2.4 Query Types
 
 The spatial hash supports multiple query patterns:
 
@@ -36,7 +75,10 @@ The spatial hash supports multiple query patterns:
 | **AoE Query** | Find entities in area | Explosion damage, heal aura | `effect_radius` (varies) |
 | **Layer-Filtered Query** | Find specific entity types | "Find enemy units in range" | Varies |
 
-### 2.4 Query API (Proposed)
+**Query Correctness Guarantee:**
+With multi-cell storage, queries are guaranteed to find all entities within the search radius, regardless of entity size. A unit with search radius `R` will find any entity whose bounding circle overlaps the search circle, even if the entity's center is far outside `R`.
+
+### 2.5 Query API (Proposed)
 
 ```rust
 impl SpatialHash {
@@ -66,13 +108,32 @@ impl SpatialHash {
 }
 ```
 
-### 2.5 Design Principles
+### 2.6 Design Principles
 
-1. **Single Source of Truth:** One spatial structure for all proximity queries
-2. **Self-Exclusion:** Queries never return the querying entity itself
-3. **Correctness over Speed:** Spatial hash must return identical results to brute-force O(N) search
-4. **Layer Awareness:** Support collision layers for filtering
-5. **Performance:** Target O(1) amortized query time
+1. **Multi-Cell Storage:** Entities occupy all cells their radius overlaps (guarantees correctness)
+2. **Single Source of Truth:** One spatial structure for all proximity queries
+3. **Self-Exclusion:** Queries never return the querying entity itself
+4. **Correctness over Speed:** Spatial hash must return identical results to brute-force O(N) search
+5. **Layer Awareness:** Support collision layers for filtering
+6. **Performance:** Target O(1) amortized query time
+7. **Future-Proof:** Handles variable entity sizes (small dogs to capital ships)
+
+### 2.7 Performance Characteristics
+
+**Memory Cost:**
+- Small entities (radius ≤ cell_size): Occupy 1-4 cells
+- Medium entities (radius = 2× cell_size): Occupy ~9 cells
+- Large entities (radius = 10× cell_size): Occupy ~100 cells
+- Cost scales with `O(radius²)` but is proportional to actual spatial footprint
+
+**Update Cost:**
+- Static obstacles: **Zero** (inserted once, never updated)
+- Dynamic units crossing cells: Must recalculate occupied cells
+- Optimization: Only update when position changes significantly (already implemented)
+
+**Query Cost:**
+- With multi-cell storage: Queries can search smaller radius relative to entity sizes
+- Trade-off: More insertions for large entities, but simpler, more reliable queries
 
 ---
 
@@ -273,6 +334,75 @@ The proximity/collision system is the foundation of gameplay. It must be exhaust
 ## 9. Spatial Query Performance Analysis & Findings
 
 > **CRITICAL:** These performance issues affect **ALL proximity queries**, not just collision detection. As boids, combat systems, and AI are added, these bottlenecks will multiply. Current lag with 1-2k units is purely from collision queries - adding neighbor queries for boids will likely double the cost.
+
+### 9.0 **CRITICAL BUG: Large Entity Detection Failure (January 6, 2026)**
+
+**Status:** RESOLVED - Multi-cell storage implementation  
+**Severity:** CRITICAL - Game-breaking for variable entity sizes
+
+**Problem:**
+Entities were only stored in the spatial hash cell containing their **center point**. This caused catastrophic failures with variable-sized entities:
+
+**Example Scenario:**
+- Obstacle at position `(55.96, 147.65)` with radius `19.74`
+- Unit spawns at position `(55.51, 152.13)` with radius `0.50`
+- Distance between centers: ~4.5 units
+- **Unit is clearly INSIDE the obstacle** (4.5 < 19.74)
+
+**What Went Wrong:**
+```
+Obstacle center at (55.96, 147.65):
+  - Cell size = 2.0
+  - Grid position = (305.96, 397.65) → cell [152, 198]
+
+Unit at (55.51, 152.13) queries with radius 1.25:
+  - Searches cells [152-153, 200-201]
+  - Obstacle is in cell [152, 198]
+  - NO OVERLAP between searched cells and obstacle cell
+  - COLLISION NOT DETECTED despite 22.84 units of overlap!
+```
+
+**Root Cause:**
+The unit's search radius (1.25) couldn't reach the obstacle's center (4.5 units away), even though the obstacle's actual collision radius (19.74) completely encompassed the unit.
+
+**Why This is Fundamental:**
+- Cannot solve by increasing unit search radius → defeats spatial partitioning
+- Cannot solve by two-way queries → duplicates all work, doesn't scale
+- Cannot solve by separate large-entity handling → doesn't generalize to all size combinations
+- **Must solve by proper spatial storage:** Entities in all cells they overlap
+
+**Solution: Multi-Cell Insertion**
+Every entity is inserted into **all spatial hash cells its radius overlaps**:
+- Small entity (radius 0.5, cell_size 2.0): Occupies 1-4 cells
+- Medium obstacle (radius 10): Occupies ~25 cells  
+- Large obstacle (radius 20): Occupies ~100 cells
+- Capital ship (radius 50): Occupies ~625 cells
+
+**Why This Works:**
+- Unit querying local cells will find ANY entity overlapping those cells
+- Large entity stored in 100 cells → queryable from any of those 100 locations
+- Symmetric solution: Works for small-vs-large, large-vs-small, large-vs-large
+- Scales to future content: tiny dogs, normal units, capital ships, giant obstacles
+
+**Trade-offs:**
+- ✅ Guarantees correctness for all entity size combinations
+- ✅ Zero runtime cost for static obstacles (inserted once)
+- ✅ Future-proof for variable entity sizes
+- ✅ Leverages spatial coherence (moving units update only when crossing cells)
+- ❌ Memory: O(radius²) cells per entity (acceptable, proportional to footprint)
+- ❌ Update complexity: Must track all occupied cells, update on movement
+
+**Design Validation:**
+This is how professional RTS games handle spatial partitioning:
+- Supreme Commander: Large units mark multiple grid cells
+- StarCraft 2: Entities occupy all relevant grid cells
+- Beyond All Reason: Quad-tree with multi-node storage
+
+**Implementation Status:**
+- Component added: `OccupiedCells` tracks all cells entity occupies
+- Insert logic: Calculates and populates all overlapping cells
+- Update logic: Compares old vs new cells, updates spatial hash accordingly
+- Query logic: Unchanged (already correct)
 
 ### 9.1 Known Performance Issues (January 2026)
 
