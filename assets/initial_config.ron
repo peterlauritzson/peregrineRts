@@ -39,6 +39,7 @@
     cohesion_weight: 1.0,
     neighbor_radius: 5.0,
     separation_radius: 1.5,
+    boids_max_neighbors: 8,
 
     // Force Sources
     black_hole_strength: 50.0,

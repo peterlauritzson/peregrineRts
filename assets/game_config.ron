@@ -17,6 +17,7 @@
     key_spawn_batch: KeyN,
     key_pause: Escape,
     key_toggle_health_bars: KeyL,
+    key_clear_force_sources: Delete,
 
     // Camera Settings (hot-reloadable)
     camera_speed: 20.0,

@@ -128,3 +128,52 @@ We will build this iteratively to ensure the game remains playable at every step
 1.  **Portal Refinement:** Instead of "Center of Edge", find the actual walkable gaps.
 2.  **Path Smoothing:** Post-process the path to remove "zig-zags" between portals.
 3.  **Async Pathfinding:** Ensure the game doesn't stutter if 100 units request paths at once (Time-slicing).
+---
+
+## 5. Future Optimizations: Group Leadership & Shared Pathfinding
+
+### The Problem
+With thousands or millions of units, pathfinding every unit individually becomes expensive even with hierarchical algorithms. In typical RTS scenarios, large groups of units often move together toward the same destination, creating redundant pathfinding work.
+
+### Solution: Leader-Based Pathfinding
+Instead of computing paths for every unit, designate **leaders** and have nearby units follow them.
+
+#### Implementation Strategy
+
+**1. Spatial Clustering**
+- Divide units into spatial groups (can reuse existing spatial hash)
+- Groups are dynamic - units can switch groups based on proximity and destination
+- Each group size: ~10-50 units depending on density
+
+**2. Leader Selection**
+- Per group, select one leader (e.g., first unit to request path, or unit closest to center)
+- Leader gets full pathfinding (hierarchical A* through portal graph)
+- Followers skip pathfinding and use leader's path as guidance
+
+**3. Formation Following**
+- Followers use **leader's waypoints** as general direction
+- Local steering (boids + obstacle avoidance) handles formation naturally
+- No rigid formation logic needed - emergent behavior from local forces
+
+**4. Dynamic Re-assignment**
+- If leader dies/disappears, promote new leader from followers
+- Units can leave group if they diverge significantly from leader's path
+- Groups can merge/split based on spatial proximity and goal similarity
+
+#### Benefits
+- **Reduced pathfinding load:** 90-95% reduction for grouped units (1 path per 10-50 units)
+- **Emergent formations:** Natural column/spread based on terrain and boids
+- **Scalability:** Enables 100K+ units with reasonable pathfinding costs
+- **Realism:** Mimics real-world behavior where units follow squad leaders
+
+#### Example Workload Reduction
+- **Before:** 10,000 units × 0.1ms = 1000ms per frame (freeze)
+- **After (20 units/group):** 500 leaders × 0.1ms = 50ms per frame (acceptable)
+
+#### Integration Points
+- Works with existing hierarchical pathfinding (leaders use portal graph)
+- Works with existing flow fields (followers still use local steering)
+- Works with existing spatial hash (for group formation)
+- Minimal changes to unit movement systems (followers just have different target source)
+
+---

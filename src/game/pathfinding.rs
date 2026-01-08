@@ -1174,14 +1174,11 @@ fn process_path_requests(
         return;
     }
 
-    for (i, request) in path_requests.read().enumerate() {
-        let req_start = std::time::Instant::now();
-        info!("Processing path request {}/{} from {:?} to {:?}", i + 1, request_count, request.start, request.goal);
+    for (_i, request) in path_requests.read().enumerate() {
         let start_node_opt = flow_field.world_to_grid(request.start);
         let goal_node_opt = flow_field.world_to_grid(request.goal);
 
         if let (Some(start_node), Some(goal_node)) = (start_node_opt, goal_node_opt) {
-            info!("Grid coords: {:?} -> {:?}", start_node, goal_node);
             if let Some(path) = find_path_hierarchical(
                 Node { x: start_node.0, y: start_node.1 },
                 Node { x: goal_node.0, y: goal_node.1 },
@@ -1189,14 +1186,7 @@ fn process_path_requests(
                 &graph,
                 &components,
             ) {
-                let req_duration = req_start.elapsed();
-                info!("Path found in {:?}: {:?}", req_duration, path);
-                if req_duration.as_millis() > 50 {
-                    warn!("[PATHFINDING] Slow path request: {:?}", req_duration);
-                }
                 commands.entity(request.entity).insert(path);
-            } else {
-                warn!("No path found (took {:?})", req_start.elapsed());
             }
         } else {
             if start_node_opt.is_none() {

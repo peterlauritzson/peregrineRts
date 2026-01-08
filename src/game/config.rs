@@ -75,6 +75,7 @@ pub struct GameConfig {
     pub key_spawn_batch: KeyCode,
     pub key_pause: KeyCode,
     pub key_toggle_health_bars: KeyCode,
+    pub key_clear_force_sources: KeyCode,
 
     // Camera (hot-reloadable)
     pub camera_speed: f32,

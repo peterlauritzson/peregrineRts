@@ -15,7 +15,7 @@ impl Plugin for ControlPlugin {
         app.init_resource::<DragState>()
            .init_resource::<InputMode>()
            .add_systems(Startup, setup_selection_box)
-           .add_systems(Update, (handle_input, handle_debug_spawning).run_if(in_state(GameState::InGame).or(in_state(GameState::Editor))));
+           .add_systems(Update, (handle_input, handle_debug_spawning, clear_force_sources).run_if(in_state(GameState::InGame).or(in_state(GameState::Editor))));
     }
 }
 
@@ -296,5 +296,22 @@ fn spawn_batch_at(
             player_id: 0,
             position: FixedVec2::from_f32(pos_x, pos_z),
         });
+    }
+}
+
+fn clear_force_sources(
+    mut commands: Commands,
+    keys: Res<ButtonInput<KeyCode>>,
+    q_force_sources: Query<Entity, With<ForceSource>>,
+    config_handle: Res<GameConfigHandle>,
+    game_configs: Res<Assets<GameConfig>>,
+) {
+    let Some(config) = game_configs.get(&config_handle.0) else { return };
+    
+    if keys.just_pressed(config.key_clear_force_sources) {
+        for entity in q_force_sources.iter() {
+            info!("Despawning ForceSource entity");
+            commands.entity(entity).despawn();
+        }
     }
 }
