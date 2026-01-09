@@ -2,7 +2,7 @@ mod types;
 mod cluster;
 mod graph;
 mod components;
-mod flow_field;
+mod cluster_flow;
 mod astar;
 mod graph_build;
 mod systems;

@@ -5,7 +5,7 @@
 
 use bevy::prelude::*;
 use crate::game::math::{FixedNum};
-use crate::game::flow_field::FlowField;
+use crate::game::structures::FlowField;
 use std::time::{Instant, Duration};
 
 // ============================================================================

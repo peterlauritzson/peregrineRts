@@ -118,7 +118,8 @@ impl Default for CachedNeighbors {
         Self {
             neighbors: Vec::new(),
             last_query_pos: FixedVec2::ZERO,
-            frames_since_update: 0,
+            // Initialize to high value to force update on first tick
+            frames_since_update: 999,
             is_fast_mover: false,
         }
     }
@@ -146,7 +147,8 @@ impl Default for BoidsNeighborCache {
         Self {
             neighbors: smallvec::SmallVec::new(),
             last_query_pos: FixedVec2::ZERO,
-            frames_since_update: 0,
+            // Initialize to high value to force update on first tick
+            frames_since_update: 999,
         }
     }
 }

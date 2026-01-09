@@ -12,7 +12,7 @@ use crate::game::math::{FixedVec2, FixedNum};
 use crate::game::config::{GameConfig, GameConfigHandle, InitialConfig};
 use crate::game::pathfinding::{Path, PathRequest, HierarchicalGraph, CLUSTER_SIZE, regenerate_cluster_flow_fields};
 use crate::game::spatial_hash::SpatialHash;
-use crate::game::flow_field::{FlowField, CELL_SIZE};
+use crate::game::structures::{FlowField, CELL_SIZE};
 use std::time::Instant;
 
 use super::components::*;

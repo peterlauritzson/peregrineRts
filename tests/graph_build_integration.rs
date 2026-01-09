@@ -77,7 +77,7 @@ fn test_incremental_build_completes() {
         let height = 100;
         let cell_size = FixedNum::from_num(1.0);
         let origin = FixedVec2::new(FixedNum::from_num(-50.0), FixedNum::from_num(-50.0));
-        map.0 = peregrine::game::flow_field::FlowField::new(width, height, cell_size, origin);
+        map.0 = peregrine::game::structures::FlowField::new(width, height, cell_size, origin);
         map.0.cost_field.fill(1); // All walkable
     }
 
@@ -114,7 +114,7 @@ fn test_incremental_build_produces_valid_graph() {
         let height = 100;
         let cell_size = FixedNum::from_num(1.0);
         let origin = FixedVec2::new(FixedNum::from_num(-50.0), FixedNum::from_num(-50.0));
-        map.0 = peregrine::game::flow_field::FlowField::new(width, height, cell_size, origin);
+        map.0 = peregrine::game::structures::FlowField::new(width, height, cell_size, origin);
         map.0.cost_field.fill(1);
     }
 
@@ -156,7 +156,7 @@ fn test_build_does_not_block_frame() {
         let height = 200;
         let cell_size = FixedNum::from_num(1.0);
         let origin = FixedVec2::new(FixedNum::from_num(-100.0), FixedNum::from_num(-100.0));
-        map.0 = peregrine::game::flow_field::FlowField::new(width, height, cell_size, origin);
+        map.0 = peregrine::game::structures::FlowField::new(width, height, cell_size, origin);
         map.0.cost_field.fill(1);
     }
 
@@ -228,7 +228,7 @@ fn test_build_progress_increases() {
         let height = 100;
         let cell_size = FixedNum::from_num(1.0);
         let origin = FixedVec2::new(FixedNum::from_num(-50.0), FixedNum::from_num(-50.0));
-        map.0 = peregrine::game::flow_field::FlowField::new(width, height, cell_size, origin);
+        map.0 = peregrine::game::structures::FlowField::new(width, height, cell_size, origin);
         map.0.cost_field.fill(1);
     }
 
@@ -295,7 +295,7 @@ fn test_incremental_build_matches_sync_build() {
         let height = 50;
         let cell_size = FixedNum::from_num(1.0);
         let origin = FixedVec2::new(FixedNum::from_num(-25.0), FixedNum::from_num(-25.0));
-        map.0 = peregrine::game::flow_field::FlowField::new(width, height, cell_size, origin);
+        map.0 = peregrine::game::structures::FlowField::new(width, height, cell_size, origin);
         map.0.cost_field.fill(1);
         
         // Add some obstacles to make the graph more interesting

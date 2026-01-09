@@ -5,7 +5,7 @@ use super::types::{LocalFlowField, Portal, CLUSTER_SIZE};
 pub(super) fn generate_local_flow_field(
     cluster_id: (usize, usize),
     portal: &Portal,
-    map_flow_field: &crate::game::flow_field::FlowField,
+    map_flow_field: &crate::game::structures::FlowField,
 ) -> LocalFlowField {
     let (cx, cy) = cluster_id;
     let min_x = cx * CLUSTER_SIZE;

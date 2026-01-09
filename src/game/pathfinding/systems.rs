@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use crate::game::simulation::MapFlowField;
-use crate::game::flow_field::CELL_SIZE;
+use crate::game::structures::CELL_SIZE;
 use crate::game::math::{FixedVec2, FixedNum};
 use super::types::{PathRequest, Node};
 use super::graph::HierarchicalGraph;

@@ -68,7 +68,7 @@ fn test_pathfinding_around_wall() {
         let height = 50;
         let cell_size = FixedNum::from_num(1.0);
         let origin = FixedVec2::new(FixedNum::from_num(-25.0), FixedNum::from_num(-25.0));
-        map.0 = peregrine::game::flow_field::FlowField::new(width, height, cell_size, origin);
+        map.0 = peregrine::game::structures::FlowField::new(width, height, cell_size, origin);
 
         // Clear
         map.0.cost_field.fill(1);
@@ -200,7 +200,7 @@ fn test_pathfinding_close_target_line_of_sight() {
         let height = 50;
         let cell_size = FixedNum::from_num(1.0);
         let origin = FixedVec2::new(FixedNum::from_num(-25.0), FixedNum::from_num(-25.0));
-        map.0 = peregrine::game::flow_field::FlowField::new(width, height, cell_size, origin);
+        map.0 = peregrine::game::structures::FlowField::new(width, height, cell_size, origin);
 
         map.0.cost_field.fill(1);
     }
@@ -298,7 +298,7 @@ fn test_pathfinding_close_target_obstacle() {
         let height = 50;
         let cell_size = FixedNum::from_num(1.0);
         let origin = FixedVec2::new(FixedNum::from_num(-25.0), FixedNum::from_num(-25.0));
-        map.0 = peregrine::game::flow_field::FlowField::new(width, height, cell_size, origin);
+        map.0 = peregrine::game::structures::FlowField::new(width, height, cell_size, origin);
         map.0.cost_field.fill(1);
     }
 

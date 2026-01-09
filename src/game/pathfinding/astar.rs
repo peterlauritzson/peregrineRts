@@ -8,7 +8,7 @@ use super::components::ConnectedComponents;
 /// Find the nearest walkable cell to a target node using BFS
 pub(super) fn find_nearest_walkable(
     target: Node,
-    flow_field: &crate::game::flow_field::FlowField
+    flow_field: &crate::game::structures::FlowField
 ) -> Option<Node> {
     const MAX_SEARCH_RADIUS: usize = 50; // Search up to 50 cells away
     
@@ -62,7 +62,7 @@ pub(super) fn find_nearest_walkable(
 fn has_line_of_sight(
     start: Node,
     goal: Node,
-    flow_field: &crate::game::flow_field::FlowField
+    flow_field: &crate::game::structures::FlowField
 ) -> bool {
     let mut x0 = start.x as isize;
     let mut y0 = start.y as isize;
@@ -107,7 +107,7 @@ pub(super) fn heuristic(x1: usize, y1: usize, x2: usize, y2: usize, cell_size: F
     FixedNum::from_num(dx + dy) * cell_size
 }
 
-fn reconstruct_path(came_from: BTreeMap<Node, Node>, mut current: Node, flow_field: &crate::game::flow_field::FlowField) -> Vec<FixedVec2> {
+fn reconstruct_path(came_from: BTreeMap<Node, Node>, mut current: Node, flow_field: &crate::game::structures::FlowField) -> Vec<FixedVec2> {
     let mut path = Vec::new();
     path.push(flow_field.grid_to_world(current.x, current.y));
     
@@ -123,7 +123,7 @@ fn reconstruct_path(came_from: BTreeMap<Node, Node>, mut current: Node, flow_fie
 pub(super) fn find_path_astar_local(
     start: Node,
     goal: Node,
-    flow_field: &crate::game::flow_field::FlowField,
+    flow_field: &crate::game::structures::FlowField,
     min_x: usize, max_x: usize,
     min_y: usize, max_y: usize,
 ) -> Option<Vec<FixedVec2>> {
@@ -133,7 +133,7 @@ pub(super) fn find_path_astar_local(
 pub(super) fn find_path_astar_local_points(
     start: Node,
     goal: Node,
-    flow_field: &crate::game::flow_field::FlowField,
+    flow_field: &crate::game::structures::FlowField,
     min_x: usize, max_x: usize,
     min_y: usize, max_y: usize,
 ) -> Option<Vec<FixedVec2>> {
@@ -198,7 +198,7 @@ pub(super) fn find_path_astar_local_points(
 pub fn find_path_hierarchical(
     start: Node,
     goal: Node,
-    flow_field: &crate::game::flow_field::FlowField,
+    flow_field: &crate::game::structures::FlowField,
     graph: &HierarchicalGraph,
     components: &ConnectedComponents,
 ) -> Option<Path> {

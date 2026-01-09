@@ -1,271 +1,18 @@
 use bevy::prelude::*;
-use crate::game::simulation::{SimPosition, SimPositionPrev, SimVelocity, SimSet, Colliding, SimConfig, follow_path};
 use crate::game::math::{FixedVec2, FixedNum};
-use crate::game::GameState;
+use crate::game::simulation::{SimPosition, SimVelocity, SimConfig, BoidsNeighborCache};
 
-use crate::game::config::{GameConfig, GameConfigHandle};
+use super::components::Unit;
 
-#[derive(Component)]
-pub struct Unit;
-
-#[derive(Component)]
-pub struct Health {
-    pub current: f32,
-    pub max: f32,
-}
-
-#[derive(Component)]
-pub struct Selected;
-
-#[derive(Component)]
-pub struct SelectionCircle;
-
-#[derive(Component)]
-pub struct HealthBar;
-
-#[derive(Resource, Default)]
-pub struct HealthBarSettings {
-    pub show: bool,
-}
-
-#[derive(Resource)]
-pub struct UnitMesh {
-    pub unit: Handle<Mesh>,
-    pub circle: Handle<Mesh>,
-    pub quad: Handle<Mesh>,
-}
-
-#[derive(Resource)]
-pub struct UnitMaterials {
-    pub normal: Handle<StandardMaterial>,
-    pub colliding: Handle<StandardMaterial>,
-    pub selection_circle: Handle<StandardMaterial>,
-    pub health_bar: Handle<StandardMaterial>,
-}
-
-use crate::game::camera::RtsCamera;
-
-pub struct UnitPlugin;
-
-impl Plugin for UnitPlugin {
-    fn build(&self, app: &mut App) {
-        app.init_resource::<HealthBarSettings>()
-           .add_systems(Startup, (setup_unit_resources).chain())
-           // unit_movement_logic is replaced by follow_flow_field in simulation.rs
-           .add_systems(FixedUpdate, (apply_boids_steering).chain().in_set(SimSet::Steering).after(follow_path))
-           .add_systems(Update, (spawn_unit_visuals, update_selection_visuals, update_selection_circle_visibility, update_health_bars, toggle_health_bars, sync_visuals, update_unit_lod).run_if(in_state(GameState::InGame).or(in_state(GameState::Editor))));
-    }
-}
-
-fn toggle_health_bars(
-    keys: Res<ButtonInput<KeyCode>>,
-    config_handle: Res<GameConfigHandle>,
-    game_configs: Res<Assets<GameConfig>>,
-    mut settings: ResMut<HealthBarSettings>,
-    mut q_bars: Query<&mut Visibility, With<HealthBar>>,
-) {
-    let Some(config) = game_configs.get(&config_handle.0) else { return };
-
-    if keys.just_pressed(config.key_toggle_health_bars) {
-        settings.show = !settings.show;
-        let vis = if settings.show { Visibility::Visible } else { Visibility::Hidden };
-        for mut visibility in q_bars.iter_mut() {
-            *visibility = vis;
-        }
-    }
-}
-
-fn update_health_bars(
-    q_units: Query<(&Children, &Health), Changed<Health>>,
-    mut q_bars: Query<&mut Transform, With<HealthBar>>,
-) {
-    for (children, health) in q_units.iter() {
-        let pct = (health.current / health.max).clamp(0.0, 1.0);
-        for child in children.iter() {
-            if let Ok(mut transform) = q_bars.get_mut(child) {
-                transform.scale.x = pct;
-                // Center is 0.0. Width is 1.0.
-                // If scale is 1.0, left is -0.5, right is 0.5.
-                // If scale is 0.5, left is -0.25, right is 0.25.
-                // We want left to stay at -0.5.
-                // New center = -0.5 + (width * scale / 2.0) = -0.5 + (1.0 * pct / 2.0)
-                transform.translation.x = -0.5 + (pct * 0.5);
-            }
-        }
-    }
-}
-
-fn update_selection_circle_visibility(
-    q_added: Query<&Children, (With<Unit>, Added<Selected>)>,
-    q_children_lookup: Query<&Children>,
-    q_selected: Query<Entity, With<Selected>>,
-    mut q_vis: Query<&mut Visibility, With<SelectionCircle>>,
-    mut removed_selected: RemovedComponents<Selected>,
-) {
-    // Handle Added Selected
-    for children in q_added.iter() {
-        for child in children.iter() {
-            if let Ok(mut vis) = q_vis.get_mut(child) {
-                *vis = Visibility::Visible;
-            }
-        }
-    }
-
-    // Handle Removed Selected
-    for entity in removed_selected.read() {
-        if q_selected.contains(entity) {
-            continue;
-        }
-        if let Ok(children) = q_children_lookup.get(entity) {
-            for child in children.iter() {
-                if let Ok(mut vis) = q_vis.get_mut(child) {
-                    *vis = Visibility::Hidden;
-                }
-            }
-        }
-    }
-}
-
-fn update_unit_lod(
-    mut query: Query<(&mut Visibility, &Transform), With<Unit>>,
-    q_camera: Query<(&GlobalTransform, &Camera), With<RtsCamera>>,
-    config_handle: Res<GameConfigHandle>,
-    game_configs: Res<Assets<GameConfig>>,
-    mut gizmos: Gizmos,
-) {
-    let Some(config) = game_configs.get(&config_handle.0) else { return };
-    let Ok((camera_transform, _camera)) = q_camera.single() else { return };
-    let camera_pos = camera_transform.translation();
-    
-    // Simple LOD: If camera is high up, hide mesh and draw simple gizmo
-    let lod_height_threshold = config.debug_unit_lod_height_threshold;
-    let use_lod = camera_pos.y > lod_height_threshold;
-
-    // Also cull if far away from center of view?
-    // Bevy does frustum culling for meshes, but we can help by disabling visibility if we want to draw icons instead.
-
-    for (mut visibility, transform) in query.iter_mut() {
-        if use_lod {
-            *visibility = Visibility::Hidden;
-            // Draw simple icon (circle)
-            gizmos.circle(
-                Isometry3d::new(
-                    transform.translation,
-                    Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
-                ),
-                0.5,
-                Color::srgb(0.8, 0.7, 0.6),
-            );
-        } else {
-            *visibility = Visibility::Visible;
-        }
-    }
-}
-
-fn sync_visuals(
-    mut query: Query<(&mut Transform, &SimPosition, &SimPositionPrev)>,
-    fixed_time: Res<Time<Fixed>>,
-) {
-    let alpha = fixed_time.overstep_fraction();
-    for (mut transform, pos, prev_pos) in query.iter_mut() {
-        let prev = prev_pos.0.to_vec2();
-        let curr = pos.0.to_vec2();
-        let interpolated = prev.lerp(curr, alpha);
-        transform.translation.x = interpolated.x;
-        transform.translation.z = interpolated.y;
-    }
-}
-
-fn update_selection_visuals(
-    mut query: Query<(Option<&Colliding>, &mut MeshMaterial3d<StandardMaterial>), With<Unit>>,
-    unit_materials: Res<UnitMaterials>,
-) {
-    for (colliding, mut mat_handle) in query.iter_mut() {
-        let target_mat = if colliding.is_some() {
-            &unit_materials.colliding
-        } else {
-            &unit_materials.normal
-        };
-
-        if mat_handle.0 != *target_mat {
-            mat_handle.0 = target_mat.clone();
-        }
-    }
-}
-
-fn setup_unit_resources(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    let mesh = meshes.add(Capsule3d::default());
-    let circle_mesh = meshes.add(Annulus::new(0.6, 0.7)); // Inner radius 0.6, Outer 0.7
-    let quad_mesh = meshes.add(Rectangle::new(1.0, 0.15));
-
-    commands.insert_resource(UnitMesh {
-        unit: mesh,
-        circle: circle_mesh,
-        quad: quad_mesh,
-    });
-
-    let normal_mat = materials.add(Color::srgb(0.8, 0.7, 0.6));
-    let colliding_mat = materials.add(Color::srgb(0.8, 0.2, 0.2));
-    let circle_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.2, 1.0, 0.2),
-        unlit: true,
-        ..default()
-    });
-    let health_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.0, 1.0, 0.0),
-        unlit: true,
-        cull_mode: None, // Double sided
-        ..default()
-    });
-
-    commands.insert_resource(UnitMaterials {
-        normal: normal_mat,
-        colliding: colliding_mat,
-        selection_circle: circle_mat,
-        health_bar: health_mat,
-    });
-}
-
-fn spawn_unit_visuals(
-    mut commands: Commands,
-    query: Query<(Entity, &SimPosition), Added<Unit>>,
-    unit_mesh: Res<UnitMesh>,
-    unit_materials: Res<UnitMaterials>,
-    settings: Res<HealthBarSettings>,
-) {
-    for (entity, pos) in query.iter() {
-        let p = pos.0.to_vec2();
-        commands.entity(entity).insert((
-            Mesh3d(unit_mesh.unit.clone()),
-            MeshMaterial3d(unit_materials.normal.clone()),
-            Transform::from_xyz(p.x, 1.0, p.y),
-        )).with_children(|parent| {
-            parent.spawn((
-                Mesh3d(unit_mesh.circle.clone()),
-                MeshMaterial3d(unit_materials.selection_circle.clone()),
-                Transform::from_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
-                    .with_translation(Vec3::new(0.0, -0.95, 0.0)),
-                Visibility::Hidden,
-                SelectionCircle,
-            ));
-            // Health Bar
-            parent.spawn((
-                Mesh3d(unit_mesh.quad.clone()),
-                MeshMaterial3d(unit_materials.health_bar.clone()),
-                Transform::from_xyz(0.0, 1.5, 0.0),
-                if settings.show { Visibility::Visible } else { Visibility::Hidden },
-                HealthBar,
-            ));
-        });
-    }
-}
-
-fn apply_boids_steering(
-    mut query: Query<(Entity, &SimPosition, &mut SimVelocity, &crate::game::simulation::BoidsNeighborCache), With<Unit>>,
+/// Applies boids-based steering behaviors (separation, alignment, cohesion) to units
+/// 
+/// This system reads from cached neighbor lists (computed by the simulation module)
+/// and applies steering forces to create flocking behavior. The three behaviors are:
+/// - **Separation**: Avoid crowding neighbors that are too close
+/// - **Alignment**: Steer toward the average heading of neighbors
+/// - **Cohesion**: Steer toward the average position (center of mass) of neighbors
+pub(super) fn apply_boids_steering(
+    mut query: Query<(Entity, &SimPosition, &mut SimVelocity, &BoidsNeighborCache), With<Unit>>,
     sim_config: Res<SimConfig>,
     time: Res<bevy::time::Time<bevy::time::Fixed>>,
 ) {
@@ -504,14 +251,14 @@ mod tests {
         app.add_systems(Update, apply_boids_steering);
         app.update();
         
-        // A single unit alone should remain at zero velocity (no neighbors to influence it)
+        // Velocity should remain ZERO (no neighbors to influence it)
         let vel = app.world().get::<SimVelocity>(entity).unwrap().0;
-        assert_eq!(vel, FixedVec2::ZERO, "Single unit should not be influenced by itself");
+        assert_eq!(vel, FixedVec2::ZERO, "Single unit should not influence itself");
     }
 
     #[test]
-    fn test_boids_separation_force() {
-        // Test that two overlapping units generate repulsion
+    fn test_boids_separation_pushes_apart() {
+        // Test that units too close together are pushed apart
         let mut app = App::new();
         app.init_resource::<Time<Fixed>>();
         
@@ -537,17 +284,20 @@ mod tests {
             Unit,
             SimPosition(FixedVec2::new(FixedNum::from_num(0.0), FixedNum::from_num(0.0))),
             SimVelocity(FixedVec2::ZERO),
+            BoidsNeighborCache::default(),
         )).id();
         
         let entity_b = app.world_mut().spawn((
             Unit,
-            SimPosition(FixedVec2::new(FixedNum::from_num(1.0), FixedNum::from_num(0.0))), // 1 unit away
+            SimPosition(FixedVec2::new(FixedNum::from_num(2.0), FixedNum::from_num(0.0))), // Very close
             SimVelocity(FixedVec2::ZERO),
+            BoidsNeighborCache::default(),
         )).id();
         
         // Update spatial hash
         let pos_a = app.world().get::<SimPosition>(entity_a).unwrap().0;
         let pos_b = app.world().get::<SimPosition>(entity_b).unwrap().0;
+        let vel_b = app.world().get::<SimVelocity>(entity_b).unwrap().0;
         {
             let mut hash = app.world_mut().resource_mut::<SpatialHash>();
             hash.clear();
@@ -555,20 +305,25 @@ mod tests {
             hash.insert(entity_b, pos_b);
         }
         
+        // Manually populate boids cache for entity_a with entity_b as neighbor
+        {
+            let mut cache_a = app.world_mut().get_mut::<BoidsNeighborCache>(entity_a).unwrap();
+            cache_a.neighbors.clear();
+            cache_a.neighbors.push((entity_b, pos_b, vel_b));
+        }
+        
         app.add_systems(Update, apply_boids_steering);
         app.update();
         
-        // Entity A should have gained velocity in negative X direction (away from B)
+        // Entity A should move away from B (in -X direction)
         let vel_a = app.world().get::<SimVelocity>(entity_a).unwrap().0;
         
-        // With separation only, A should move away from B (negative X)
-        // We can't predict exact value due to normalization, but X should be negative
-        assert!(vel_a.x < FixedNum::ZERO, "Entity A should move away from B (negative X), got {:?}", vel_a);
+        assert!(vel_a.x < FixedNum::ZERO, "Entity A should move away from B (-X), got {:?}", vel_a);
     }
 
     #[test]
-    fn test_boids_alignment_with_neighbors() {
-        // Test that units align their velocity with nearby units
+    fn test_boids_alignment_matches_neighbor_velocity() {
+        // Test that units align their velocity with neighbors
         let mut app = App::new();
         app.init_resource::<Time<Fixed>>();
         
@@ -581,7 +336,7 @@ mod tests {
         
         let mut sim_config = SimConfig::default();
         sim_config.neighbor_radius = FixedNum::from_num(10.0);
-        sim_config.separation_radius = FixedNum::from_num(2.0); // Small to minimize separation
+        sim_config.separation_radius = FixedNum::from_num(2.0);
         sim_config.separation_weight = FixedNum::ZERO; // Disable separation
         sim_config.alignment_weight = FixedNum::from_num(1.0); // Enable alignment
         sim_config.cohesion_weight = FixedNum::ZERO; // Disable cohesion
@@ -589,27 +344,37 @@ mod tests {
         sim_config.tick_rate = 30.0;
         app.insert_resource(sim_config);
         
-        // Spawn two units: A is stationary, B is moving in +X direction
+        // Spawn entity A stationary, B moving
         let entity_a = app.world_mut().spawn((
             Unit,
             SimPosition(FixedVec2::new(FixedNum::from_num(0.0), FixedNum::from_num(0.0))),
-            SimVelocity(FixedVec2::ZERO),
+            SimVelocity(FixedVec2::ZERO), // Stationary
+            BoidsNeighborCache::default(),
         )).id();
         
         let entity_b = app.world_mut().spawn((
             Unit,
             SimPosition(FixedVec2::new(FixedNum::from_num(5.0), FixedNum::from_num(0.0))),
             SimVelocity(FixedVec2::new(FixedNum::from_num(3.0), FixedNum::from_num(0.0))), // Moving in +X
+            BoidsNeighborCache::default(),
         )).id();
         
         // Update spatial hash
         let pos_a = app.world().get::<SimPosition>(entity_a).unwrap().0;
         let pos_b = app.world().get::<SimPosition>(entity_b).unwrap().0;
+        let vel_b = app.world().get::<SimVelocity>(entity_b).unwrap().0;
         {
             let mut hash = app.world_mut().resource_mut::<SpatialHash>();
             hash.clear();
             hash.insert(entity_a, pos_a);
             hash.insert(entity_b, pos_b);
+        }
+        
+        // Manually populate boids cache for entity_a with entity_b as neighbor
+        {
+            let mut cache_a = app.world_mut().get_mut::<BoidsNeighborCache>(entity_a).unwrap();
+            cache_a.neighbors.clear();
+            cache_a.neighbors.push((entity_b, pos_b, vel_b));
         }
         
         app.add_systems(Update, apply_boids_steering);
@@ -651,30 +416,43 @@ mod tests {
             Unit,
             SimPosition(FixedVec2::new(FixedNum::from_num(0.0), FixedNum::from_num(0.0))),
             SimVelocity(FixedVec2::ZERO),
+            BoidsNeighborCache::default(),
         )).id();
         
         let entity_b = app.world_mut().spawn((
             Unit,
             SimPosition(FixedVec2::new(FixedNum::from_num(8.0), FixedNum::from_num(0.0))),
             SimVelocity(FixedVec2::ZERO),
+            BoidsNeighborCache::default(),
         )).id();
         
         let entity_c = app.world_mut().spawn((
             Unit,
             SimPosition(FixedVec2::new(FixedNum::from_num(12.0), FixedNum::from_num(0.0))),
             SimVelocity(FixedVec2::ZERO),
+            BoidsNeighborCache::default(),
         )).id();
         
         // Update spatial hash
         let pos_a = app.world().get::<SimPosition>(entity_a).unwrap().0;
         let pos_b = app.world().get::<SimPosition>(entity_b).unwrap().0;
         let pos_c = app.world().get::<SimPosition>(entity_c).unwrap().0;
+        let vel_b = app.world().get::<SimVelocity>(entity_b).unwrap().0;
+        let vel_c = app.world().get::<SimVelocity>(entity_c).unwrap().0;
         {
             let mut hash = app.world_mut().resource_mut::<SpatialHash>();
             hash.clear();
             hash.insert(entity_a, pos_a);
             hash.insert(entity_b, pos_b);
             hash.insert(entity_c, pos_c);
+        }
+        
+        // Manually populate boids cache for entity_a with B and C as neighbors
+        {
+            let mut cache_a = app.world_mut().get_mut::<BoidsNeighborCache>(entity_a).unwrap();
+            cache_a.neighbors.clear();
+            cache_a.neighbors.push((entity_b, pos_b, vel_b));
+            cache_a.neighbors.push((entity_c, pos_c, vel_c));
         }
         
         app.add_systems(Update, apply_boids_steering);

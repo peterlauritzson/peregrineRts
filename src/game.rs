@@ -6,7 +6,7 @@ mod control;
 pub mod simulation;
 pub mod config;
 pub mod math;
-pub mod flow_field;
+pub mod structures;
 pub mod spatial_hash;
 pub mod pathfinding;
 pub mod map;

@@ -9,7 +9,7 @@ use bevy::prelude::*;
 use crate::game::math::{FixedVec2, FixedNum};
 use crate::game::config::{GameConfig, GameConfigHandle};
 use crate::game::pathfinding::{Path, HierarchicalGraph, CLUSTER_SIZE};
-use crate::game::flow_field::CELL_SIZE;
+use crate::game::structures::CELL_SIZE;
 use super::components::ForceSource;
 use super::resources::{DebugConfig, MapFlowField};
 

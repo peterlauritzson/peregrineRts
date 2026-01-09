@@ -76,7 +76,7 @@ impl Cluster {
         &mut self,
         portal_id: usize,
         portal: &Portal,
-        map_flow_field: &crate::game::flow_field::FlowField,
+        map_flow_field: &crate::game::structures::FlowField,
     ) -> &super::types::LocalFlowField {
         if !self.flow_field_cache.contains_key(&portal_id) {
             warn!(
@@ -85,7 +85,7 @@ impl Cluster {
                 portal_id, self.id
             );
             // TODO: Consider pausing game with overlay: "Generating missing flow field..."
-            let field = super::flow_field::generate_local_flow_field(self.id, portal, map_flow_field);
+            let field = super::cluster_flow::generate_local_flow_field(self.id, portal, map_flow_field);
             self.flow_field_cache.insert(portal_id, field);
         }
         &self.flow_field_cache[&portal_id]

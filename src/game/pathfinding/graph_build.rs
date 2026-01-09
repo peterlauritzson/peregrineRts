@@ -8,7 +8,7 @@ use super::cluster::Cluster;
 use super::components::ConnectedComponents;
 use super::types::CLUSTER_SIZE;
 use super::astar::find_path_astar_local;
-use super::flow_field::generate_local_flow_field;
+use super::cluster_flow::generate_local_flow_field;
 use std::collections::BTreeMap;
 use crate::game::math::FixedNum;
 
@@ -278,7 +278,7 @@ pub(super) fn incremental_build_graph(
 
 pub(super) fn connect_intra_cluster(
     graph: &mut HierarchicalGraph,
-    flow_field: &crate::game::flow_field::FlowField,
+    flow_field: &crate::game::structures::FlowField,
     key: (usize, usize),
 ) {
     let portals = graph.clusters[&key].portals.clone();
@@ -307,7 +307,7 @@ pub(super) fn connect_intra_cluster(
 
 pub(super) fn precompute_flow_fields_for_cluster(
     graph: &mut HierarchicalGraph,
-    flow_field: &crate::game::flow_field::FlowField,
+    flow_field: &crate::game::structures::FlowField,
     key: (usize, usize),
 ) {
     // Check if cluster exists before trying to access it
@@ -331,7 +331,7 @@ pub(super) fn precompute_flow_fields_for_cluster(
 /// This is called by apply_new_obstacles after clearing cluster cache.
 pub fn regenerate_cluster_flow_fields(
     graph: &mut HierarchicalGraph,
-    flow_field: &crate::game::flow_field::FlowField,
+    flow_field: &crate::game::structures::FlowField,
     cluster_key: (usize, usize),
 ) {
     precompute_flow_fields_for_cluster(graph, flow_field, cluster_key);

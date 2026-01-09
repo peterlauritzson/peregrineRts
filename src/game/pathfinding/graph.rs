@@ -72,7 +72,7 @@ impl HierarchicalGraph {
     }
 
     /// Synchronous graph build for testing. In production, use the incremental build system.
-    pub fn build_graph_sync(&mut self, flow_field: &crate::game::flow_field::FlowField) {
+    pub fn build_graph_sync(&mut self, flow_field: &crate::game::structures::FlowField) {
         self.reset();
         
         if flow_field.width == 0 || flow_field.height == 0 {

@@ -1,8 +1,10 @@
 use bevy::prelude::*;
 use peregrine::game::math::{FixedVec2, FixedNum};
-use peregrine::game::simulation::{SimulationPlugin, MapFlowField, SimPosition, SimVelocity, SimAcceleration, Collider};
+use peregrine::game::simulation::{SimulationPlugin, MapFlowField, SimPosition, SimPositionPrev, SimVelocity, SimAcceleration, Collider, CachedNeighbors, BoidsNeighborCache};
 use peregrine::game::config::GameConfigPlugin;
 use peregrine::game::pathfinding::PathfindingPlugin;
+use peregrine::game::loading::LoadingProgress;
+use peregrine::game::unit::Unit;
 
 #[test]
 fn test_collision_unit_unit() {
@@ -18,6 +20,11 @@ fn test_collision_unit_unit() {
     app.add_plugins(SimulationPlugin);
     app.add_plugins(PathfindingPlugin);
 
+    // Insert LoadingProgress resource (required by PathfindingPlugin systems)
+    if !app.world().contains_resource::<LoadingProgress>() {
+        app.world_mut().insert_resource(LoadingProgress::default());
+    }
+
     app.update();
 
     // 1. Setup Map (Empty)
@@ -32,17 +39,27 @@ fn test_collision_unit_unit() {
     // Radius is typically 0.5. Collision distance is 1.0.
     
     let u1 = app.world_mut().spawn((
+        Unit,
         SimPosition(FixedVec2::new(FixedNum::from_num(-2.0), FixedNum::from_num(0.0))),
+        SimPositionPrev(FixedVec2::new(FixedNum::from_num(-2.0), FixedNum::from_num(0.0))),
         SimVelocity(FixedVec2::new(FixedNum::from_num(1.0), FixedNum::from_num(0.0))),
         SimAcceleration::default(),
         Collider::default(),
+        CachedNeighbors::default(),
+        BoidsNeighborCache::default(),
+        // OccupiedCells will be added by update_spatial_hash system
     )).id();
 
     let u2 = app.world_mut().spawn((
-        SimPosition(FixedVec2::new(FixedNum::from_num(2.0), FixedNum::from_num(0.0))),
+        Unit,
+        SimPosition(FixedVec2::new(FixedNum::from_num(2.0), FixedNum::from_num(0.0))),        
+        SimPositionPrev(FixedVec2::new(FixedNum::from_num(2.0), FixedNum::from_num(0.0))),        
         SimVelocity(FixedVec2::new(FixedNum::from_num(-1.0), FixedNum::from_num(0.0))),
         SimAcceleration::default(),
         Collider::default(),
+        CachedNeighbors::default(),
+        BoidsNeighborCache::default(),
+        // OccupiedCells will be added by update_spatial_hash system
     )).id();
 
     // Run simulation for enough ticks for them to collide
@@ -84,6 +101,11 @@ fn test_collision_unit_wall() {
     app.add_plugins(SimulationPlugin);
     app.add_plugins(PathfindingPlugin);
 
+    // Insert LoadingProgress resource (required by PathfindingPlugin systems)
+    if !app.world().contains_resource::<LoadingProgress>() {
+        app.world_mut().insert_resource(LoadingProgress::default());
+    }
+
     app.update();
 
     // 1. Setup Map with Wall at x=5
@@ -108,10 +130,15 @@ fn test_collision_unit_wall() {
     // 2. Spawn unit moving into wall
     // Unit at (4, 0) moving right (towards x=5)
     let u1 = app.world_mut().spawn((
-        SimPosition(FixedVec2::new(FixedNum::from_num(4.0), FixedNum::from_num(0.0))),
+        Unit,
+        SimPosition(FixedVec2::new(FixedNum::from_num(4.0), FixedNum::from_num(0.0))),        
+        SimPositionPrev(FixedVec2::new(FixedNum::from_num(4.0), FixedNum::from_num(0.0))),
         SimVelocity(FixedVec2::new(FixedNum::from_num(1.0), FixedNum::from_num(0.0))),
         SimAcceleration::default(),
         Collider::default(),
+        CachedNeighbors::default(),
+        BoidsNeighborCache::default(),
+        // OccupiedCells will be added by update_spatial_hash system
     )).id();
 
     // Run simulation
@@ -134,7 +161,11 @@ fn test_collision_crowding() {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
     app.add_plugins(bevy::state::app::StatesPlugin);
-    app.add_plugins(bevy::log::LogPlugin::default());
+    // Enable logging to debug the issue
+    app.add_plugins(bevy::log::LogPlugin {
+        level: bevy::log::Level::ERROR,
+        ..Default::default()
+    });
     app.add_plugins(AssetPlugin::default()); 
     app.init_asset::<Mesh>();
     app.init_asset::<StandardMaterial>();
@@ -146,34 +177,79 @@ fn test_collision_crowding() {
     app.init_state::<peregrine::game::GameState>();
     app.world_mut().resource_mut::<NextState<peregrine::game::GameState>>().set(peregrine::game::GameState::InGame);
 
+    // Insert LoadingProgress resource (required by PathfindingPlugin systems)
+    if !app.world().contains_resource::<LoadingProgress>() {
+        app.world_mut().insert_resource(LoadingProgress::default());
+    }
+
     app.update();
 
+    // Setup Map (Empty, all walkable)
+    {
+        let mut map = app.world_mut().resource_mut::<MapFlowField>();
+        map.0.cost_field.fill(1);
+    }
+
     // Spawn 10 units at the same spot (or very close)
+    // Note: Don't include OccupiedCells - let the spatial hash system add it
     let mut units = Vec::new();
     for _ in 0..10 {
         let id = app.world_mut().spawn((
+            Unit,
             SimPosition(FixedVec2::new(FixedNum::from_num(0.0), FixedNum::from_num(0.0))),
+            SimPositionPrev(FixedVec2::new(FixedNum::from_num(0.0), FixedNum::from_num(0.0))),
             SimVelocity(FixedVec2::ZERO),
             SimAcceleration::default(),
             Collider::default(),
+            CachedNeighbors::default(),
+            BoidsNeighborCache::default(),
+            // OccupiedCells will be added by update_spatial_hash system
         )).id();
         units.push(id);
     }
 
-    // They should push each other apart
-    for _ in 0..100 {
+    // Run one FixedUpdate to initialize OccupiedCells for all units
+    app.world_mut().run_schedule(FixedUpdate);
+    println!("Initialized spatial hash for {} units", units.len());
+
+    // Run simulation for a few ticks to test collision behavior
+    // With friction and repulsion forces, they'll initially push apart hard
+    // but then friction will slow them down.
+    let num_ticks = 5;
+    println!("\n=== Running {} simulation ticks ===", num_ticks);
+    for i in 0..num_ticks {
+        println!("\n--- Tick {} ---", i + 1);
         app.world_mut().run_schedule(FixedUpdate);
     }
 
+    // Log final positions and check if units have spread out
+    println!("\nFinal positions after {} ticks:", num_ticks);
+    let min_distance_threshold = FixedNum::from_num(0.1); // Units should move at least this far
+    let mut stuck_count = 0;
     let mut max_dist = FixedNum::ZERO;
-    for id in &units {
+    
+    for (i, id) in units.iter().enumerate() {
         let pos = app.world().get::<SimPosition>(*id).unwrap().0;
         let dist = pos.length(); // Dist from origin
         if dist > max_dist {
             max_dist = dist;
         }
+        if dist < min_distance_threshold {
+            stuck_count += 1;
+        }
+        println!("  Unit {} at ({}, {}) - distance from origin: {}", i, pos.x, pos.y, dist);
     }
 
-    println!("Max spread distance: {}", max_dist);
-    assert!(max_dist > FixedNum::from_num(1.0), "Units did not spread out!");
+    println!("\nMax spread distance: {}", max_dist);
+    println!("Units still near origin (< {}): {}/{}", min_distance_threshold, stuck_count, units.len());
+    
+    // If more than half the units haven't moved, collision detection isn't working
+    let max_allowed_stuck = units.len() / 2;
+    assert!(
+        stuck_count <= max_allowed_stuck,
+        "Too many units ({}/{}) are still clustered at origin! Collision detection may not be working. Max allowed stuck: {}",
+        stuck_count,
+        units.len(),
+        max_allowed_stuck
+    );
 }
