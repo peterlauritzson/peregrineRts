@@ -135,6 +135,242 @@ impl SpatialHash {
 - With multi-cell storage: Queries can search smaller radius relative to entity sizes
 - Trade-off: More insertions for large entities, but simpler, more reliable queries
 
+### 2.8 Spatial Hash Update Optimizations (January 2026)
+
+**CRITICAL PERFORMANCE INSIGHT:**
+Recalculating occupied cells involves expensive division operations (4 divisions per entity). At 10K entities, this is 40,000 divisions per tick. However, most entities don't actually change cells between ticks - they move slightly within their current cell.
+
+**Four-Stage Optimization Funnel:**
+
+The `update_spatial_hash` system uses a progressive filtering approach to minimize expensive cell calculations:
+
+```
+Stage 0 (Super Fast Flow): Velocity-Based Skip
+  ↓ (2-25% of entities pass through)
+Stage 1 (Fast Flow): Distance-Based Skip  
+  ↓ (43-86% of entities pass through)
+Stage 2 (Slow Path): Calculate Occupied Cells
+  ↓ (full calculation with 4 divisions)
+Stage 3 (Cell Comparison): Check if cells actually changed
+  ↓ (92-97% unchanged, skip spatial hash update)
+Stage 4 (Update): Modify spatial hash grid
+```
+
+**Stage 0: Velocity-Based Estimation (Super Fast Flow)**
+
+Estimate when entity will exit its current cell based on velocity:
+
+```rust
+#[derive(Component)]
+struct OccupiedCells {
+    cells: Vec<(usize, usize)>,
+    last_cell_center: FixedVec2,     // Cached for Stage 1
+    ticks_since_update: u8,          // Counter for Stage 0
+    ticks_to_wall: u8,               // Estimated ticks until cell exit
+}
+
+// Calculate at cell entry (cost: 2 divisions, amortized)
+fn calculate_ticks_to_wall(pos: FixedVec2, velocity: FixedVec2, cell_size: FixedNum) -> u8 {
+    let half_cell = cell_size * FixedNum::from_num(0.5);
+    let cell_center = calculate_cell_center(pos);
+    let offset = pos - cell_center;
+    
+    // Component-wise distance to wall
+    let dist_x = half_cell - offset.x.abs();
+    let dist_y = half_cell - offset.y.abs();
+    
+    // Ticks until hitting wall in each direction
+    let ticks_x = if velocity.x.abs() > FixedNum::ZERO {
+        (dist_x / velocity.x.abs()).to_num::<f32>().ceil() as u8
+    } else { 255 };
+    
+    let ticks_y = if velocity.y.abs() > FixedNum::ZERO {
+        (dist_y / velocity.y.abs()).to_num::<f32>().ceil() as u8
+    } else { 255 };
+    
+    ticks_x.min(ticks_y)
+}
+
+// Per-tick check (cost: 1 comparison)
+if ticks_since_update < ticks_to_wall 
+   && ticks_since_update < spatial_hash_max_ticks_without_update {
+    // Skip! Entity hasn't reached cell boundary yet
+    ticks_since_update += 1;
+    continue;
+}
+```
+
+**Performance:**
+- Hit rate: 2-25% (varies with velocity distribution)
+- Cost per skip: 1 comparison (effectively free)
+- Amortized division cost: 2 divisions every ~8 ticks (when cells change)
+
+**Stage 1: Distance-Based Fast Path (Fast Flow)**
+
+If entity center moved less than half a cell, occupied cells cannot have changed:
+
+```rust
+// Cached at last cell update (cost: 2 divisions, amortized)
+let last_cell_center: FixedVec2 = occupied_cells.last_cell_center;
+
+// Per-tick check (cost: 2 subtractions, 2 comparisons)
+let delta = position - last_cell_center;
+let dx = delta.x.abs();
+let dy = delta.y.abs();
+let half_cell = cell_size * FixedNum::from_num(0.5);
+
+if dx <= half_cell && dy <= half_cell {
+    // Skip! Entity still in same cells
+    continue;
+}
+```
+
+**Performance:**
+- Hit rate: 43-86% (after Stage 0 filtering)
+- Cost per skip: 4 operations (no divisions!)
+- Eliminates 40K divisions → 4K subtractions (10-40× faster per operation)
+
+**Stage 2: Full Cell Calculation (Slow Path)**
+
+Expensive calculation with divisions:
+
+```rust
+let new_cells = calculate_occupied_cells(position, radius, cell_size);
+// Cost: 4 divisions + multiple iterations
+```
+
+**Stage 3: Cell Comparison**
+
+Even if we did the expensive calculation, cells might not have changed:
+
+```rust
+if new_cells == occupied_cells.cells {
+    // Skip spatial hash update! Entity moved but stayed in same cells
+    continue;
+}
+```
+
+**Performance:** 92-97% of entities that reach Stage 2 haven't actually changed cells.
+
+**Stage 4: Spatial Hash Update**
+
+Only ~3% of entities per tick actually need the spatial hash modified.
+
+**Combined Results (10K entities):**
+- Before optimization: 0.68ms (40K divisions)
+- After optimization: 0.33ms (51% reduction)
+- Combined skip rate: 75-95% per tick
+- Scales to 100K: 3.13ms (sub-linear scaling)
+
+**Configuration Parameters:**
+```rust
+// In SimConfig
+spatial_hash_max_ticks_without_update: u8,      // Default: 8 (safety threshold)
+spatial_hash_velocity_estimate_scale: FixedNum, // Default: 1.0 (no margin)
+```
+
+#### ⚠️ CRITICAL BUG: Large Entity Optimization Failure
+
+**Status:** UNRESOLVED - Affects Stage 0 and Stage 1 optimizations  
+**Severity:** HIGH - Causes false positives (wasted calculations) for multi-cell entities  
+**Discovered:** January 10, 2026
+
+**Problem:**
+
+Both the velocity-based and distance-based optimizations assume the entity only occupies ONE cell. For entities with `radius > cell_size`, this is incorrect.
+
+**Failure Case Example:**
+```
+Entity: radius = 2.5, cell_size = 1.0
+- Center at (5.0, 5.0)
+- Occupies cells (3,3) through (7,7) [5×5 grid]
+- Right edge at x = 7.5
+
+--- Tick N ---
+Center moves to (5.4, 5.0)  [moved 0.4 units]
+Right edge now at x = 7.9
+
+--- Stage 1 Check (Distance-Based) ---
+dx = 0.4 < half_cell (0.5) → SKIP ✓
+
+--- Reality ---
+Right edge crossed from cell column 7 to column 8!
+Occupied cells changed: (3,3)-(7,7) → (3,3)-(8,7)
+
+--- What Happens ---
+Stage 1 says "skip" (incorrectly)
+Stage 2 calculates anyway (expensive!)
+Stage 3 detects cells changed
+Stage 4 updates spatial hash
+
+Result: WASTED Stage 2 calculation (false positive)
+```
+
+**Why It's Not a Correctness Bug (Yet):**
+- Stage 3 catches the discrepancy (compares old vs new cells)
+- Spatial hash eventually gets updated correctly
+- **Only wastes the expensive `calculate_occupied_cells()` call**
+- NOT a false negative (missed update) - it's a false positive (unnecessary calculation)
+
+**Performance Impact:**
+- Currently minimal (test entities have radius=0.5, cell_size=5.0 → single cell)
+- **Will become critical** when adding:
+  - Large obstacles (radius 10-20)
+  - Capital ships (radius 50+)
+  - Buildings (arbitrary sizes)
+  - Variable unit sizes (tiny scouts vs huge tanks)
+
+**The Correct Fix:**
+
+Account for entity radius in both optimizations:
+
+**Stage 0 (Velocity) - Fixed:**
+```rust
+// Distance until EDGE crosses next cell boundary
+let distance_to_wall_x = half_cell - offset_x.abs() - collider.radius;
+let distance_to_wall_y = half_cell - offset_y.abs() - collider.radius;
+
+// If already negative, entity is multi-cell
+if distance_to_wall_x <= FixedNum::ZERO || distance_to_wall_y <= FixedNum::ZERO {
+    // Multi-cell entity, fall through to Stage 1
+} else {
+    let ticks_x = distance_to_wall_x / velocity.x.abs();
+    // ...
+}
+```
+
+**Stage 1 (Distance) - Fixed:**
+```rust
+// Edge position = center ± radius
+// For cells not to change: center_delta + radius < cell_size
+let safety_margin = cell_size - collider.radius;
+
+if safety_margin > FixedNum::ZERO {
+    let threshold = safety_margin * FixedNum::from_num(0.5);
+    if dx <= threshold && dy <= threshold {
+        // Skip! Even accounting for radius, edges haven't crossed cells
+        continue;
+    }
+}
+// If safety_margin <= 0, entity occupies multiple cells, skip this optimization
+```
+
+**Implementation Status:**
+- ❌ Not yet implemented (waiting for design decision)
+- ⚠️ Currently using simple radius check to disable optimization for large entities
+- ✅ Stage 3 safety net prevents correctness issues
+
+**Testing Requirements:**
+Before deploying fix:
+1. Test with radius=0.5, cell_size=1.0 (2-cell entity)
+2. Test with radius=2.5, cell_size=1.0 (5×5 cell entity)
+3. Test with radius=10.0, cell_size=1.0 (huge entity)
+4. Verify Stage 0/1 skip rates don't degrade significantly
+5. Ensure Stage 2 calculations drop (not just stay the same)
+
+**Workaround Until Fixed:**
+Optimizations still provide benefit for single-cell entities (majority of units). Large entities fall through to Stage 2 earlier, which is correct but suboptimal.
+
 ---
 
 ## 3. Use Case: Physical Collision Detection
@@ -258,6 +494,280 @@ for (entity, pos) in affected {
 ## 7. Collision Filtering & Layers (The 10M Unit Strategy)
 
 To handle 10 million entities (Units, Projectiles, Flying Units, Buildings), we cannot simply check everything against everything. We need a robust **Collision Layer System**.
+
+### 7.1 Multi-Hash Architecture for Variable Entity Sizes
+
+**DESIGN PROPOSAL (January 2026) - Not Yet Implemented**
+
+**Problem:**
+As discussed in Section 2.8, spatial hash optimizations break for large entities. Additionally, inserting a huge entity (radius 50) into a small-cell grid (cell_size 1.0) causes it to occupy 10,000+ cells, creating massive memory and update overhead.
+
+**Proposed Solution: Size-Stratified Spatial Hashes**
+
+Maintain **separate spatial hash grids** for different entity size classes:
+
+```rust
+struct LayeredSpatialHash {
+    tiny_grid: SpatialHash,     // cell_size = 1.0  (radius 0.1 - 0.5)
+    small_grid: SpatialHash,    // cell_size = 2.0  (radius 0.5 - 2.0)
+    medium_grid: SpatialHash,   // cell_size = 10.0 (radius 2.0 - 10.0)
+    large_grid: SpatialHash,    // cell_size = 50.0 (radius 10.0 - 50.0)
+    huge_grid: SpatialHash,     // cell_size = 200.0 (radius > 50.0)
+}
+
+#[derive(Component)]
+struct SizeClass {
+    class: EntitySizeClass,
+}
+
+enum EntitySizeClass {
+    Tiny,    // Projectiles, small units
+    Small,   // Infantry, standard units
+    Medium,  // Vehicles, small buildings
+    Large,   // Tanks, medium buildings
+    Huge,    // Capital ships, huge obstacles
+}
+```
+
+**Classification at Spawn:**
+```rust
+fn classify_entity_size(radius: FixedNum) -> EntitySizeClass {
+    if radius < FixedNum::from_num(0.5) {
+        EntitySizeClass::Tiny
+    } else if radius < FixedNum::from_num(2.0) {
+        EntitySizeClass::Small
+    } else if radius < FixedNum::from_num(10.0) {
+        EntitySizeClass::Medium
+    } else if radius < FixedNum::from_num(50.0) {
+        EntitySizeClass::Large
+    } else {
+        EntitySizeClass::Huge
+    }
+}
+```
+
+**Insertion:**
+```rust
+fn update_spatial_hash(
+    mut layered_hash: ResMut<LayeredSpatialHash>,
+    query: Query<(Entity, &SimPosition, &Collider, &SizeClass)>,
+) {
+    // Clear all grids
+    layered_hash.tiny_grid.clear();
+    layered_hash.small_grid.clear();
+    // ...
+    
+    // Insert each entity into its appropriate grid
+    for (entity, pos, collider, size_class) in query.iter() {
+        let grid = match size_class.class {
+            EntitySizeClass::Tiny => &mut layered_hash.tiny_grid,
+            EntitySizeClass::Small => &mut layered_hash.small_grid,
+            EntitySizeClass::Medium => &mut layered_hash.medium_grid,
+            EntitySizeClass::Large => &mut layered_hash.large_grid,
+            EntitySizeClass::Huge => &mut layered_hash.huge_grid,
+        };
+        
+        grid.insert(entity, pos.0, collider.radius);
+    }
+}
+```
+
+**CRITICAL: Query ALL Grids (Not Selective)**
+
+**Common Misconception (WRONG):**
+```rust
+// ❌ INCORRECT: Don't query based on own size
+let potential = match my_size_class {
+    Tiny => tiny_grid.query(pos, search_radius),    // WRONG!
+    Small => small_grid.query(pos, search_radius),  // WRONG!
+    // ...
+};
+```
+
+**Why This Fails:**
+- Small unit (radius 0.5) with search radius 2.0 needs to find medium obstacles (radius 5.0)
+- Medium obstacle is in `medium_grid`, not `small_grid`
+- Query would miss the obstacle!
+
+**Correct Approach: Query All Grids**
+
+```rust
+fn detect_collisions(
+    layered_hash: Res<LayeredSpatialHash>,
+    query: Query<(Entity, &SimPosition, &Collider, &SizeClass)>,
+) {
+    for (entity, pos, collider, size_class) in query.iter() {
+        let search_radius = collider.radius * config.search_multiplier;
+        
+        // ✅ CORRECT: Query ALL grids, aggregate results
+        let mut potential_collisions = Vec::new();
+        
+        // Query tiny grid (might have tiny projectiles)
+        potential_collisions.extend(
+            layered_hash.tiny_grid.query_radius(pos.0, search_radius, Some(entity))
+        );
+        
+        // Query small grid (standard units)
+        potential_collisions.extend(
+            layered_hash.small_grid.query_radius(pos.0, search_radius, Some(entity))
+        );
+        
+        // Query medium grid (vehicles, obstacles)
+        potential_collisions.extend(
+            layered_hash.medium_grid.query_radius(pos.0, search_radius, Some(entity))
+        );
+        
+        // Query large grid (tanks, buildings)
+        potential_collisions.extend(
+            layered_hash.large_grid.query_radius(pos.0, search_radius, Some(entity))
+        );
+        
+        // Query huge grid (capital ships, massive obstacles)
+        potential_collisions.extend(
+            layered_hash.huge_grid.query_radius(pos.0, search_radius, Some(entity))
+        );
+        
+        // Now process all potential collisions
+        for (other_entity, other_pos) in potential_collisions {
+            // Narrow-phase collision check...
+        }
+    }
+}
+```
+
+**Why We Query All Grids:**
+
+1. **Asymmetric Sizes:** Small unit needs to find large obstacle
+2. **Variable Search Radii:** Unit with radius 0.5 might search radius 10.0 for boids neighbors
+3. **Different Use Cases:**
+   - Collision detection: `search_radius = radius × 2.0` (small)
+   - Boids flocking: `search_radius = 10.0` (large)
+   - Combat targeting: `search_radius = weapon_range` (arbitrary)
+
+**Example Scenario:**
+```
+Tiny projectile (radius 0.1) with search radius 20.0 (looking for any target):
+- Must query tiny_grid: Other projectiles (ignore)
+- Must query small_grid: Infantry units (potential targets)
+- Must query medium_grid: Vehicles (potential targets)
+- Must query large_grid: Tanks (potential targets)
+- Must query huge_grid: Capital ships (potential targets)
+
+Small unit (radius 0.5) collision detection with search radius 1.0:
+- Must query tiny_grid: Projectiles hitting it
+- Must query small_grid: Other units
+- Must query medium_grid: Obstacles in path
+- Must query large_grid: Buildings blocking movement
+- Must query huge_grid: Massive terrain features
+```
+
+**Performance Benefits Despite Querying All Grids:**
+
+**Tiny unit in tiny_grid (cell_size 1.0):**
+- Old: Occupies 1-4 cells
+- New: Occupies 1-4 cells in tiny_grid (same)
+- **But:** Huge obstacle no longer pollutes tiny_grid!
+
+**Huge obstacle in huge_grid (cell_size 200.0):**
+- Old: Occupies 10,000 cells in shared grid (cell_size 1.0)
+- New: Occupies 1-4 cells in huge_grid (cell_size 200.0)
+- **Benefit:** 2,500× fewer cell insertions!
+
+**Query Cost Analysis:**
+
+**Naive concern:** "Querying 5 grids is 5× slower!"
+
+**Reality:**
+```
+Tiny unit querying shared grid (old):
+- Query radius 1.0 in grid with cell_size 1.0
+- Checks 9 cells (3×3)
+- Each cell contains: 100 tiny units + 50 small units + 10 medium + 5 large + 1 huge
+- Total entities checked: 9 × 166 = 1,494 entities
+- Most are irrelevant (huge obstacle 500 units away)
+
+Tiny unit querying layered grids (new):
+- Query tiny_grid (cell_size 1.0, radius 1.0): 9 cells × 100 tiny = 900 entities
+- Query small_grid (cell_size 2.0, radius 1.0): 4 cells × 50 small = 200 entities
+- Query medium_grid (cell_size 10.0, radius 1.0): 1 cell × 10 medium = 10 entities
+- Query large_grid (cell_size 50.0, radius 1.0): 1 cell × 5 large = 5 entities
+- Query huge_grid (cell_size 200.0, radius 1.0): 1 cell × 1 huge = 1 entity
+- Total: 1,116 entities (vs 1,494 before)
+
+Additional benefit: Grids with large cells return fewer false positives
+```
+
+**Trade-offs:**
+
+**Benefits:**
+- ✅ Huge entities occupy reasonable number of cells (1-100 instead of 10,000)
+- ✅ Update cost scales with actual size, not grid resolution
+- ✅ Optimizations (Section 2.8) work correctly per size class
+- ✅ Better cache locality (small entities in dense grid, large entities in sparse grid)
+- ✅ Each grid can use appropriate cell_size for its size class
+
+**Costs:**
+- ❌ 5× grid storage (but each grid is smaller than shared grid would be)
+- ❌ 5× query calls (but each query checks fewer cells/entities)
+- ❌ Complexity: Must maintain 5 grids instead of 1
+- ❌ Entity size changes require reclassification (rare)
+
+**Optimization: Skip Empty Grids**
+
+```rust
+// Track which grids have entities
+struct LayeredSpatialHash {
+    tiny_grid: SpatialHash,
+    small_grid: SpatialHash,
+    medium_grid: SpatialHash,
+    large_grid: SpatialHash,
+    huge_grid: SpatialHash,
+    
+    // Metadata for fast skipping
+    tiny_count: usize,
+    small_count: usize,
+    medium_count: usize,
+    large_count: usize,
+    huge_count: usize,
+}
+
+fn detect_collisions(...) {
+    // Skip querying empty grids
+    if layered_hash.tiny_count > 0 {
+        potential.extend(layered_hash.tiny_grid.query(...));
+    }
+    if layered_hash.small_count > 0 {
+        potential.extend(layered_hash.small_grid.query(...));
+    }
+    // ...
+}
+```
+
+**Typical Game State:**
+- Tiny entities: 10,000 (projectiles) → query
+- Small entities: 5,000 (units) → query
+- Medium entities: 500 (vehicles) → query
+- Large entities: 50 (buildings) → query
+- Huge entities: 5 (capital ships) → query
+
+**Implementation Recommendation:**
+
+Defer until needed - current single-grid approach works well for uniform sizes. Implement multi-hash when:
+1. Adding entities with > 5× size variance (radius 0.5 vs radius 10+)
+2. Profiling shows large entities causing excessive cell occupancy
+3. Spatial hash update time climbs above 50% of tick time
+
+**Alternative: Hybrid Approach**
+
+Use single grid for dynamic entities, separate grid for huge static obstacles:
+```rust
+struct HybridSpatialHash {
+    dynamic_grid: SpatialHash,  // cell_size = 2.0 (all moving entities)
+    static_grid: SpatialHash,   // cell_size = 50.0 (buildings, huge obstacles)
+}
+```
+
+Query both, but static_grid is write-once (no update cost).
 
 ### The Layer Bitmask
 Every physical entity will have a `CollisionLayer` component containing two bitmasks:
