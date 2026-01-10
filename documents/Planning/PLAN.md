@@ -112,6 +112,14 @@ Once the RTS Foundation (Milestone 0) is complete, we will iterate on the simula
 
    > **Note:** Before attempting the 10M unit goal, we must replace the $O(N^2)$ collision checks with a Spatial Hash Grid or Quadtree to improve performance.
    > **Note:** HPA* implementation is complete (Level 0, 1, 2). Units now use the hierarchical graph for long-distance planning.
+   > 
+   > **Future Optimization - Proximity Query Abstraction (Post 100K units)**:
+   > Currently we have three separate systems: Grid Update, Neighbor Cache, and Collision Detection. While keeping them separate is valuable for performance profiling, we should eventually add an abstraction layer (`ProximityQuery` trait) so clients don't need to know about caching internals. This keeps:
+   > - Grid Update: O(n) - pure indexing
+   > - Neighbor Cache: O(cache_misses) - scales with movement
+   > - Collision Detection: O(n × neighbors) - uses cached results
+   > 
+   > Separate for profiling visibility, but hidden behind a facade for clean client code. Consider implementing when scaling beyond 100K units and needing fine-grained optimization control.
 
 10. **The "Million" Unit Stress Test**
     - [x] **A. Initial Stress Testing (Jan 5, 2026)**:
