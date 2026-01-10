@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use crate::game::unit::Selected;
 use crate::game::simulation::UnitMoveCommand;
-use crate::game::math::FixedVec2;
+use crate::game::fixed_math::FixedVec2;
 use crate::game::camera::RtsCamera;
 use super::resources::*;
 use super::selection::*;

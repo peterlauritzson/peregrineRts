@@ -5,7 +5,7 @@ pub mod unit;  // Made public for test access to Unit component
 mod control;
 pub mod simulation;
 pub mod config;
-pub mod math;
+pub mod fixed_math;
 pub mod structures;
 pub mod spatial_hash;
 pub mod pathfinding;

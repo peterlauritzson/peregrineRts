@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use crate::game::camera::RtsCamera;
-use crate::game::math::{FixedVec2, FixedNum};
+use crate::game::fixed_math::{FixedVec2, FixedNum};
 use crate::game::simulation::{StaticObstacle, SimPosition, Collider, layers};
 use super::components::*;
 use super::ui::spawn_generation_dialog;

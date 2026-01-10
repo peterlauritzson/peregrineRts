@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use serde::{Serialize, Deserialize};
 use std::collections::BTreeMap;
-use crate::game::math::FixedNum;
+use crate::game::fixed_math::FixedNum;
 use super::types::{CLUSTER_SIZE, Portal};
 use super::cluster::Cluster;
 

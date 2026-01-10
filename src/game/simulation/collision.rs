@@ -6,7 +6,7 @@
 /// - Unit-obstacle collision resolution
 
 use bevy::prelude::*;
-use crate::game::math::{FixedVec2, FixedNum};
+use crate::game::fixed_math::{FixedVec2, FixedNum};
 use crate::game::spatial_hash::SpatialHash;
 use super::components::*;
 use super::resources::*;
@@ -137,6 +137,20 @@ pub fn update_neighbor_cache(
 
 /// Update cached neighbor lists for boids steering.
 /// Runs less frequently than collision cache (every 3-5 frames) since boids is visual-only.
+///
+/// # Performance Strategy
+///
+/// Current: Partial sort with `select_nth_unstable` - O(n) average case
+/// - Finds actual closest N neighbors without sorting all
+/// - Deterministic and unbiased
+/// - Good for up to ~100 neighbors per query
+///
+/// # Alternative for extreme densities (commented below):
+/// Deterministic sampling using entity ID hash
+/// - O(n) but with lower constant factor (no comparisons)
+/// - Unbiased if hash is good
+/// - Trade: neighbors are "random nearby" not "closest nearby"
+/// - Enable if profiling shows this function >5% of frame time
 pub fn update_boids_neighbor_cache(
     mut query: Query<(Entity, &SimPosition, &SimVelocity, &mut BoidsNeighborCache)>,
     spatial_hash: Res<SpatialHash>,
@@ -170,14 +184,65 @@ pub fn update_boids_neighbor_cache(
             // Query spatial hash with boids neighbor radius (5.0 units)
             let nearby = spatial_hash.query_radius(entity, pos.0, sim_config.neighbor_radius);
             
-            // Limit to closest N neighbors (configured max, typically 8)
+            // Get closest N neighbors efficiently using partial sort
+            // Previously we just took the first N from spatial hash which had spatial bias!
+            let mut neighbors_with_dist: Vec<_> = nearby.iter()
+                .filter_map(|(neighbor_entity, neighbor_pos)| {
+                    if let Ok(neighbor_vel) = all_units.get(*neighbor_entity) {
+                        let dist_sq = (pos.0 - *neighbor_pos).length_squared();
+                        Some((*neighbor_entity, *neighbor_pos, neighbor_vel.0, dist_sq))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            
+            // Use partial sort: O(n) average instead of O(n log n) full sort
+            // Only partitions to find the top N closest, doesn't sort the rest
+            let max_neighbors = sim_config.boids_max_neighbors.min(neighbors_with_dist.len());
+            if max_neighbors > 0 && neighbors_with_dist.len() > max_neighbors {
+                neighbors_with_dist.select_nth_unstable_by(
+                    max_neighbors - 1,
+                    |a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal)
+                );
+            }
+            
+            // Take only the closest N neighbors (they're now in the first N slots)
             cache.neighbors.clear();
-            for (neighbor_entity, neighbor_pos) in nearby.iter().take(sim_config.boids_max_neighbors) {
-                // Fetch velocity for this neighbor
-                if let Ok(neighbor_vel) = all_units.get(*neighbor_entity) {
-                    cache.neighbors.push((*neighbor_entity, *neighbor_pos, neighbor_vel.0));
+            for (neighbor_entity, neighbor_pos, neighbor_vel, _dist_sq) in neighbors_with_dist.iter().take(max_neighbors) {
+                cache.neighbors.push((*neighbor_entity, *neighbor_pos, *neighbor_vel));
+            }
+            
+            // ALTERNATIVE: Deterministic sampling (faster for >100 neighbors, commented for reference)
+            // Uncomment if profiling shows this function is bottleneck
+            /*
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            
+            cache.neighbors.clear();
+            let target_count = sim_config.boids_max_neighbors.min(neighbors_with_dist.len());
+            let skip_rate = if target_count > 0 {
+                neighbors_with_dist.len() / target_count
+            } else {
+                1
+            };
+            
+            // Deterministic shuffle using entity ID as seed
+            let mut hasher = DefaultHasher::new();
+            entity.index().hash(&mut hasher);
+            let seed = hasher.finish() as usize;
+            
+            for (i, (neighbor_entity, neighbor_pos, neighbor_vel, _)) in neighbors_with_dist.iter().enumerate() {
+                // Deterministic selection using hash
+                let hash_idx = (i.wrapping_add(seed)) % neighbors_with_dist.len();
+                if hash_idx % skip_rate == 0 && cache.neighbors.len() < target_count {
+                    cache.neighbors.push((*neighbor_entity, *neighbor_pos, *neighbor_vel));
+                }
+                if cache.neighbors.len() >= target_count {
+                    break;
                 }
             }
+            */
             
             total_neighbors += cache.neighbors.len();
             cache.last_query_pos = pos.0;

@@ -10,7 +10,7 @@ use super::types::CLUSTER_SIZE;
 use super::astar::find_path_astar_local;
 use super::cluster_flow::generate_local_flow_field;
 use std::collections::BTreeMap;
-use crate::game::math::FixedNum;
+use crate::game::fixed_math::FixedNum;
 
 #[derive(Resource, Default)]
 pub struct GraphBuildState {

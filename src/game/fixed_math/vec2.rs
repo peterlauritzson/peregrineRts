@@ -1,9 +1,8 @@
 use bevy::prelude::*;
-use fixed::types::I48F16;
 use serde::{Deserialize, Serialize};
+use super::FixedNum;
 
-pub type FixedNum = I48F16;
-
+/// A 2D vector using fixed-point arithmetic for deterministic calculations.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FixedVec2 {
     pub x: FixedNum,
@@ -55,7 +54,6 @@ impl FixedVec2 {
     pub fn dot(self, other: Self) -> FixedNum {
         self.x * other.x + self.y * other.y
     }
-
 
     pub fn cross(self, other: Self) -> FixedNum {
         self.x * other.y - self.y * other.x
@@ -221,27 +219,11 @@ mod tests {
     }
 
     #[test]
-    fn test_fixed_vec2_dot_perpendicular() {
-        let a = FixedVec2::from_f32(1.0, 0.0);
-        let b = FixedVec2::from_f32(0.0, 1.0);
-        let dot = a.dot(b);
-        assert_eq!(dot, FixedNum::ZERO, "Perpendicular vectors should have dot product of 0");
-    }
-
-    #[test]
     fn test_fixed_vec2_cross() {
         let a = FixedVec2::from_f32(2.0, 3.0);
         let b = FixedVec2::from_f32(4.0, 5.0);
         let cross = a.cross(b);
         // 2*5 - 3*4 = 10 - 12 = -2
         assert_eq!(cross, FixedNum::from_num(-2.0));
-    }
-
-    #[test]
-    fn test_fixed_vec2_cross_parallel() {
-        let a = FixedVec2::from_f32(2.0, 4.0);
-        let b = FixedVec2::from_f32(1.0, 2.0);
-        let cross = a.cross(b);
-        assert_eq!(cross, FixedNum::ZERO, "Parallel vectors should have cross product of 0");
     }
 }

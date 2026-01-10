@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use crate::game::simulation::{ForceSource, ForceType, SpawnUnitCommand, SimPosition};
-use crate::game::math::{FixedVec2, FixedNum};
+use crate::game::fixed_math::{FixedVec2, FixedNum};
 use crate::game::camera::RtsCamera;
 use crate::game::config::{GameConfig, GameConfigHandle, InitialConfig};
 use rand::{rng, Rng};

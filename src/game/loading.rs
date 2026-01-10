@@ -146,7 +146,7 @@ fn handle_pending_map_generation(
         return;
     };
     
-    use crate::game::math::{FixedVec2, FixedNum};
+    use crate::game::fixed_math::{FixedVec2, FixedNum};
     use crate::game::structures::{FlowField, CELL_SIZE};
     use crate::game::simulation::{StaticObstacle, SimPosition, Collider, layers};
     use crate::game::pathfinding::GraphBuildStep;

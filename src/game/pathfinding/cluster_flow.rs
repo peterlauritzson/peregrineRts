@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use crate::game::math::{FixedVec2, FixedNum};
+use crate::game::fixed_math::{FixedVec2, FixedNum};
 use super::types::{LocalFlowField, Portal, CLUSTER_SIZE};
 
 pub(super) fn generate_local_flow_field(

@@ -8,7 +8,7 @@
 /// - Map bounds constraints
 
 use bevy::prelude::*;
-use crate::game::math::{FixedVec2, FixedNum};
+use crate::game::fixed_math::{FixedVec2, FixedNum};
 use super::components::*;
 use super::resources::*;
 

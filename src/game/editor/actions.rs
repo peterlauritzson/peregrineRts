@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use crate::game::structures::{FlowField, CELL_SIZE};
-use crate::game::math::{FixedVec2, FixedNum};
+use crate::game::fixed_math::{FixedVec2, FixedNum};
 use crate::game::simulation::{StaticObstacle, SimPosition, Collider, MapFlowField};
 use crate::game::pathfinding::{CLUSTER_SIZE, HierarchicalGraph, GraphBuildState, GraphBuildStep};
 use crate::game::config::{GameConfig, GameConfigHandle};

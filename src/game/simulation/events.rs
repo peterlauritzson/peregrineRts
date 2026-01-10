@@ -4,7 +4,7 @@
 /// including movement commands, spawning, and stopping.
 
 use bevy::prelude::*;
-use crate::game::math::FixedVec2;
+use crate::game::fixed_math::FixedVec2;
 
 // ============================================================================
 // Unit Commands

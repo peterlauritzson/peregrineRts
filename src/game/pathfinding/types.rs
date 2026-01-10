@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use crate::game::math::{FixedVec2, FixedNum};
+use crate::game::fixed_math::{FixedVec2, FixedNum};
 use serde::{Serialize, Deserialize};
 use std::cmp::Ordering;
 

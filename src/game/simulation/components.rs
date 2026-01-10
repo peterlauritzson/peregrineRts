@@ -4,7 +4,7 @@
 /// including position, velocity, collision, and caching components.
 
 use bevy::prelude::*;
-use crate::game::math::{FixedVec2, FixedNum};
+use crate::game::fixed_math::{FixedVec2, FixedNum};
 
 // ============================================================================
 // Position & Physics Components

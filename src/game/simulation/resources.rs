@@ -4,7 +4,7 @@
 /// including configuration and performance tracking.
 
 use bevy::prelude::*;
-use crate::game::math::{FixedNum};
+use crate::game::fixed_math::{FixedNum};
 use crate::game::structures::FlowField;
 use std::time::{Instant, Duration};
 

@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use serde::{Serialize, Deserialize};
-use crate::game::math::{FixedVec2, FixedNum};
+use crate::game::fixed_math::{FixedVec2, FixedNum};
 use crate::game::pathfinding::HierarchicalGraph;
 use std::fs::File;
 use std::io::{BufReader, BufWriter};

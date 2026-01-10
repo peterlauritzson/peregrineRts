@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use bevy::diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin};
 use bevy::window::PrimaryWindow;
 use crate::game::simulation::{SpawnUnitCommand, SimConfig};
-use crate::game::math::{FixedVec2, FixedNum};
+use crate::game::fixed_math::{FixedVec2, FixedNum};
 use crate::game::spatial_hash::SpatialHash;
 use crate::game::camera::RtsCamera;
 use crate::game::config::{GameConfig, GameConfigHandle};

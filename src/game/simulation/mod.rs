@@ -12,7 +12,7 @@
 use bevy::prelude::*;
 use crate::game::GameState;
 use crate::game::spatial_hash::SpatialHash;
-use crate::game::math::FixedNum;
+use crate::game::fixed_math::FixedNum;
 
 // Module declarations
 pub mod components;

@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use std::collections::{BinaryHeap, BTreeMap, BTreeSet, VecDeque};
-use crate::game::math::{FixedVec2, FixedNum};
+use crate::game::fixed_math::{FixedVec2, FixedNum};
 use super::types::{Node, Path, State, GraphState, CLUSTER_SIZE};
 use super::graph::HierarchicalGraph;
 use super::components::ConnectedComponents;

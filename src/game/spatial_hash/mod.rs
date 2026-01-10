@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use crate::game::math::{FixedNum, FixedVec2};
+use crate::game::fixed_math::{FixedNum, FixedVec2};
 
 mod grid;
 mod query;

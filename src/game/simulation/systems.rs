@@ -8,7 +8,7 @@
 /// - Simulation timing/performance tracking
 
 use bevy::prelude::*;
-use crate::game::math::{FixedVec2, FixedNum};
+use crate::game::fixed_math::{FixedVec2, FixedNum};
 use crate::game::config::{GameConfig, GameConfigHandle, InitialConfig};
 use crate::game::pathfinding::{Path, PathRequest, HierarchicalGraph, CLUSTER_SIZE, regenerate_cluster_flow_fields};
 use crate::game::spatial_hash::SpatialHash;

@@ -6,7 +6,7 @@
 /// - Force source visualization
 
 use bevy::prelude::*;
-use crate::game::math::{FixedVec2, FixedNum};
+use crate::game::fixed_math::{FixedVec2, FixedNum};
 use crate::game::config::{GameConfig, GameConfigHandle};
 use crate::game::pathfinding::{Path, HierarchicalGraph, CLUSTER_SIZE};
 use crate::game::structures::CELL_SIZE;

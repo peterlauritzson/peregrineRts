@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use crate::game::math::{FixedVec2, FixedNum};
+use crate::game::fixed_math::{FixedVec2, FixedNum};
 use super::graph::HierarchicalGraph;
 
 /// Tracks connected components in the pathfinding graph to detect unreachable regions.

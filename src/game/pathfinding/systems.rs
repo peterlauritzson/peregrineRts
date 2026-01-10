@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use crate::game::simulation::MapFlowField;
 use crate::game::structures::CELL_SIZE;
-use crate::game::math::{FixedVec2, FixedNum};
+use crate::game::fixed_math::{FixedVec2, FixedNum};
 use super::types::{PathRequest, Node};
 use super::graph::HierarchicalGraph;
 use super::components::ConnectedComponents;

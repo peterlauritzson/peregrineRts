@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use crate::game::GroundPlane;
 use crate::game::structures::{FlowField, CELL_SIZE};
-use crate::game::math::{FixedVec2, FixedNum};
+use crate::game::fixed_math::{FixedVec2, FixedNum};
 use crate::game::simulation::{StaticObstacle, MapFlowField, SimConfig};
 use crate::game::camera::RtsCamera;
 use crate::game::pathfinding::{HierarchicalGraph, GraphBuildState, GraphBuildStep};

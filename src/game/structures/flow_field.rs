@@ -1,4 +1,4 @@
-use crate::game::math::{FixedNum, FixedVec2};
+use crate::game::fixed_math::{FixedNum, FixedVec2};
 use bevy::prelude::*;
 use std::collections::VecDeque;
 use serde::{Serialize, Deserialize};
