@@ -26,19 +26,28 @@ pub const CELL_SIZE: f32 = 1.0;
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust
+/// use peregrine::game::fixed_math::{FixedNum, FixedVec2};
+/// use peregrine::game::structures::FlowField;
+///
+/// let width = 10;
+/// let height = 10;
+/// let cell_size = FixedNum::from_num(1.0);
+/// let origin = FixedVec2::new(FixedNum::from_num(0.0), FixedNum::from_num(0.0));
 /// let mut flow_field = FlowField::new(width, height, cell_size, origin);
 ///
 /// // Mark obstacles
-/// flow_field.set_obstacle(x, y);
+/// flow_field.set_obstacle(5, 5);
 ///
 /// // Generate fields for target
-/// flow_field.generate_integration_field(target_x, target_y);
+/// flow_field.generate_integration_field(8, 8);
 /// flow_field.generate_vector_field();
 ///
 /// // Query direction at world position
+/// let unit_pos = FixedVec2::new(FixedNum::from_num(2.0), FixedNum::from_num(2.0));
 /// if let Some((gx, gy)) = flow_field.world_to_grid(unit_pos) {
 ///     let direction = flow_field.vector_field[flow_field.get_index(gx, gy)];
+///     // Direction now points toward the target at (8, 8)
 /// }
 /// ```
 ///

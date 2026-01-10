@@ -21,7 +21,11 @@ mod tests;
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust
+/// use bevy::prelude::Entity;
+/// use peregrine::game::fixed_math::{FixedNum, FixedVec2};
+/// use peregrine::game::spatial_hash::SpatialHash;
+///
 /// let mut hash = SpatialHash::new(
 ///     FixedNum::from_num(100.0), // map width
 ///     FixedNum::from_num(100.0), // map height  
@@ -29,10 +33,14 @@ mod tests;
 /// );
 ///
 /// // Insert entities
+/// let entity = Entity::PLACEHOLDER;
+/// let pos = FixedVec2::new(FixedNum::from_num(10.0), FixedNum::from_num(20.0));
 /// hash.insert(entity, pos);
 ///
 /// // Query nearby entities within radius (excludes self)
+/// let radius = FixedNum::from_num(5.0);
 /// let nearby = hash.query_radius(entity, pos, radius);
+/// assert_eq!(nearby.len(), 0); // No other entities nearby
 /// ```
 ///
 /// # Performance

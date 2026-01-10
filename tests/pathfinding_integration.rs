@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
-use peregrine::game::math::{FixedVec2, FixedNum};
-use peregrine::game::simulation::{SimulationPlugin, MapFlowField, SimPosition, SimVelocity, SimAcceleration, Collider, StaticObstacle, layers};
+use peregrine::game::fixed_math::{FixedVec2, FixedNum};
+use peregrine::game::simulation::{SimulationPlugin, MapFlowField, SimPosition, SimPositionPrev, SimVelocity, SimAcceleration, Collider, StaticObstacle, CachedNeighbors, BoidsNeighborCache, OccupiedCells, layers};
 use peregrine::game::config::GameConfigPlugin;
 use peregrine::game::pathfinding::{PathfindingPlugin, PathRequest, Path, GraphBuildState, GraphBuildStep};
 use peregrine::game::loading::LoadingProgress;
@@ -56,6 +56,9 @@ fn test_pathfinding_around_wall() {
     app.init_state::<GameState>();
     app.world_mut().resource_mut::<NextState<GameState>>().set(GameState::InGame);
 
+    // Insert LoadingProgress resource (required by incremental_build_graph system)
+    app.world_mut().insert_resource(LoadingProgress::default());
+
     // Initialize (runs Startup systems)
     app.update();
 
@@ -106,9 +109,13 @@ fn test_pathfinding_around_wall() {
     
     let unit_entity = app.world_mut().spawn((
         SimPosition(start_pos),
+        SimPositionPrev(start_pos),
         SimVelocity(FixedVec2::ZERO),
         SimAcceleration::default(),
         Collider::default(),
+        CachedNeighbors::default(),
+        BoidsNeighborCache::default(),
+        OccupiedCells::default(),
     )).id();
 
     // 4. Send Path Request
@@ -189,6 +196,9 @@ fn test_pathfinding_close_target_line_of_sight() {
     app.init_state::<GameState>();
     app.world_mut().resource_mut::<NextState<GameState>>().set(GameState::InGame);
 
+    // Insert LoadingProgress resource (required by incremental_build_graph system)
+    app.world_mut().insert_resource(LoadingProgress::default());
+
     app.update();
 
     // 1. Setup Map (Empty)
@@ -233,9 +243,13 @@ fn test_pathfinding_close_target_line_of_sight() {
     
     let unit_entity = app.world_mut().spawn((
         SimPosition(start_pos),
+        SimPositionPrev(start_pos),
         SimVelocity(FixedVec2::ZERO),
         SimAcceleration::default(),
         Collider::default(),
+        CachedNeighbors::default(),
+        BoidsNeighborCache::default(),
+        OccupiedCells::default(),
     )).id();
 
     app.world_mut().write_message(PathRequest {
@@ -287,6 +301,9 @@ fn test_pathfinding_close_target_obstacle() {
     app.init_state::<GameState>();
     app.world_mut().resource_mut::<NextState<GameState>>().set(GameState::InGame);
 
+    // Insert LoadingProgress resource (required by incremental_build_graph system)
+    app.world_mut().insert_resource(LoadingProgress::default());
+
     app.update();
 
     // 1. Setup Map with Obstacle
@@ -332,9 +349,13 @@ fn test_pathfinding_close_target_obstacle() {
     
     let unit_entity = app.world_mut().spawn((
         SimPosition(start_pos),
+        SimPositionPrev(start_pos),
         SimVelocity(FixedVec2::ZERO),
         SimAcceleration::default(),
         Collider::default(),
+        CachedNeighbors::default(),
+        BoidsNeighborCache::default(),
+        OccupiedCells::default(),
     )).id();
 
     app.world_mut().write_message(PathRequest {

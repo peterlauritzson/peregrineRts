@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use peregrine::game::math::{FixedVec2, FixedNum};
+use peregrine::game::fixed_math::{FixedVec2, FixedNum};
 use peregrine::game::simulation::{SimulationPlugin, MapFlowField, SimPosition, SimPositionPrev, SimVelocity, SimAcceleration, Collider, CachedNeighbors, BoidsNeighborCache};
 use peregrine::game::config::GameConfigPlugin;
 use peregrine::game::pathfinding::PathfindingPlugin;
