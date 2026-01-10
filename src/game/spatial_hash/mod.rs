@@ -97,6 +97,18 @@ impl SpatialHash {
         }
     }
 
+    /// Count the total number of entity entries across all cells.
+    /// Useful for debugging and diagnostics.
+    pub fn total_entries(&self) -> usize {
+        self.cells.iter().map(|cell| cell.len()).sum()
+    }
+
+    /// Count the number of non-empty cells.
+    /// Useful for debugging and diagnostics.
+    pub fn non_empty_cells(&self) -> usize {
+        self.cells.iter().filter(|cell| !cell.is_empty()).count()
+    }
+
     // Getters for grid parameters
     pub fn cell_size(&self) -> FixedNum { self.cell_size }
     pub fn map_width(&self) -> FixedNum { self.map_width }

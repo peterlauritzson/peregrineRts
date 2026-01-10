@@ -89,10 +89,11 @@ impl SpatialHash {
         let max_y = pos.y + radius + half_h;
         
         // Convert to grid coordinates, clamped to valid range
+        // IMPORTANT: Must clamp to 0 AFTER min() to avoid usize underflow!
         let min_col = (min_x / self.cell_size()).floor().to_num::<isize>().max(0) as usize;
-        let max_col = (max_x / self.cell_size()).floor().to_num::<isize>().min((self.cols() as isize) - 1) as usize;
+        let max_col = (max_x / self.cell_size()).floor().to_num::<isize>().min((self.cols() as isize) - 1).max(0) as usize;
         let min_row = (min_y / self.cell_size()).floor().to_num::<isize>().max(0) as usize;
-        let max_row = (max_y / self.cell_size()).floor().to_num::<isize>().min((self.rows() as isize) - 1) as usize;
+        let max_row = (max_y / self.cell_size()).floor().to_num::<isize>().min((self.rows() as isize) - 1).max(0) as usize;
         
         // Generate all cells in the bounding box
         for row in min_row..=max_row {
