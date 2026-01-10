@@ -172,17 +172,27 @@ impl Default for BoidsNeighborCache {
 /// Without multi-cell storage, large entities can be invisible to queries from
 /// nearby small entities, causing collision detection failures.
 ///
+/// # Performance Optimization
+///
+/// To avoid expensive division operations every tick, we cache the world position
+/// of the entity's cell center. We can then do a fast comparison (just subtractions)
+/// to check if the entity is still within the same cell before doing expensive
+/// cell calculations.
+///
 /// See SPATIAL_PARTITIONING.md Section 2.2 for detailed explanation.
 #[derive(Component, Debug, Clone)]
 pub struct OccupiedCells {
     /// All (col, row) pairs this entity currently occupies in the spatial hash
     pub cells: Vec<(usize, usize)>,
+    /// Cached world position of the center of the primary cell (for fast path check)
+    pub last_cell_center: FixedVec2,
 }
 
 impl Default for OccupiedCells {
     fn default() -> Self {
         Self {
             cells: Vec::new(),
+            last_cell_center: FixedVec2::ZERO,
         }
     }
 }

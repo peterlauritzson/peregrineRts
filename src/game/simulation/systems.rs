@@ -286,6 +286,11 @@ pub fn update_spatial_hash(
     let mut new_count = 0;
     let mut new_obstacles = 0;
     let mut multi_cell_count = 0;
+    let mut fast_path_hits = 0;  // Track how often fast path succeeds
+    
+    // Cache cell size and half cell for fast path checks
+    let cell_size = spatial_hash.cell_size();
+    let half_cell = cell_size * FixedNum::from_num(0.5);
     
     // Handle entities that don't have OccupiedCells yet (first time in spatial hash)
     for (entity, pos, collider) in new_entities.iter() {
@@ -302,9 +307,13 @@ pub fn update_spatial_hash(
             multi_cell_count += 1;
         }
         
+        // Calculate and cache the cell center
+        let cell_center = spatial_hash.calculate_cell_center(pos.0);
+        
         // Track which cells this entity occupies
         commands.entity(entity).insert(OccupiedCells {
             cells: occupied,
+            last_cell_center: cell_center,
         });
         
         new_count += 1;
@@ -319,6 +328,19 @@ pub fn update_spatial_hash(
     
     // Handle dynamic entities - only update if position changed significantly
     for (entity, pos, collider, mut occupied_cells) in query.iter_mut() {
+        // FAST PATH: Check if entity is still within same cell using cached center
+        // This avoids expensive division operations for 90%+ of entities
+        let dx = (pos.0.x - occupied_cells.last_cell_center.x).abs();
+        let dy = (pos.0.y - occupied_cells.last_cell_center.y).abs();
+        
+        if dx <= half_cell && dy <= half_cell {
+            // Entity is still in the same cell - no update needed!
+            unchanged += 1;
+            fast_path_hits += 1;
+            continue;
+        }
+        
+        // SLOW PATH: Entity may have changed cells - do full calculation
         // Calculate what cells this entity should now occupy
         let new_cells = spatial_hash.calculate_occupied_cells(pos.0, collider.radius);
         
@@ -339,6 +361,9 @@ pub fn update_spatial_hash(
             // Actually, let's use insert_multi_cell for simplicity
             spatial_hash.insert_multi_cell(entity, pos.0, collider.radius);
             
+            // Update cached cell center
+            occupied_cells.last_cell_center = spatial_hash.calculate_cell_center(pos.0);
+            
             // Update tracked cells
             occupied_cells.cells = new_cells;
             updates += 1;
@@ -355,8 +380,9 @@ pub fn update_spatial_hash(
     let tick = (time.elapsed_secs() * 30.0) as u64;
     if duration.as_millis() > 2 || tick % 100 == 0 || new_obstacles > 0 {
         let total = new_count + updates + unchanged;
-        info!("[SPATIAL_HASH_UPDATE] {:?} | Entities: {} (new: {} [{} obstacles], updated: {}, unchanged: {}, multi-cell: {})", 
-              duration, total, new_count, new_obstacles, updates, unchanged, multi_cell_count);
+        let fast_path_percent = if total > 0 { (fast_path_hits as f32 / total as f32) * 100.0 } else { 0.0 };
+        info!("[SPATIAL_HASH_UPDATE] {:?} | Entities: {} (new: {} [{} obstacles], updated: {}, unchanged: {}, multi-cell: {}) | Fast path: {}%", 
+              duration, total, new_count, new_obstacles, updates, unchanged, multi_cell_count, fast_path_percent as u32);
     }
 }
 

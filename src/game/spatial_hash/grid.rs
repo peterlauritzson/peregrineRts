@@ -105,6 +105,36 @@ impl SpatialHash {
         cells
     }
 
+    /// Calculate the world position of the center of the cell containing the given position.
+    /// This is used for fast-path cell change detection without expensive division operations.
+    ///
+    /// # Performance Optimization
+    ///
+    /// By caching the cell center position, we can check if an entity has changed cells
+    /// using only subtractions and comparisons, avoiding expensive divisions on every tick.
+    pub fn calculate_cell_center(&self, pos: FixedVec2) -> FixedVec2 {
+        let half_w = self.map_width() / FixedNum::from_num(2.0);
+        let half_h = self.map_height() / FixedNum::from_num(2.0);
+        
+        // Convert to grid coordinates
+        let x = pos.x + half_w;
+        let y = pos.y + half_h;
+        
+        let col = (x / self.cell_size()).floor().to_num::<isize>().max(0) as usize;
+        let row = (y / self.cell_size()).floor().to_num::<isize>().max(0) as usize;
+        
+        // Calculate cell center in grid space
+        let col_fixed = FixedNum::from_num(col);
+        let row_fixed = FixedNum::from_num(row);
+        let half = FixedNum::from_num(0.5);
+        
+        let center_x = (col_fixed + half) * self.cell_size();
+        let center_y = (row_fixed + half) * self.cell_size();
+        
+        // Convert back to world coordinates (centered at 0,0)
+        FixedVec2::new(center_x - half_w, center_y - half_h)
+    }
+
     /// Insert an entity into all cells its radius overlaps.
     /// Returns the list of cells the entity was inserted into.
     ///
