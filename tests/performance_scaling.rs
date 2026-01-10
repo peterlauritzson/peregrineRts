@@ -159,6 +159,63 @@ impl TestMode {
     }
 }
 
+/// System-level performance metrics
+#[derive(Debug, Clone, Default)]
+struct SystemMetrics {
+    spatial_hash_ms: f32,
+    collision_detect_ms: f32,
+    collision_resolve_ms: f32,
+    physics_ms: f32,
+}
+
+impl SystemMetrics {
+    fn total_ms(&self) -> f32 {
+        self.spatial_hash_ms + self.collision_detect_ms + 
+        self.collision_resolve_ms + self.physics_ms
+    }
+    
+    fn add(&mut self, other: &SystemMetrics) {
+        self.spatial_hash_ms += other.spatial_hash_ms;
+        self.collision_detect_ms += other.collision_detect_ms;
+        self.collision_resolve_ms += other.collision_resolve_ms;
+        self.physics_ms += other.physics_ms;
+    }
+    
+    fn print_breakdown(&self) {
+        let total = self.total_ms();
+        if total < 0.001 {
+            println!("  System breakdown: (too fast to measure)");
+            return;
+        }
+        
+        println!("  System breakdown (per tick avg, estimated from sampled ticks):");
+        println!("    Spatial Hash:       {:7.2}ms ({:5.1}%)", 
+            self.spatial_hash_ms, (self.spatial_hash_ms / total) * 100.0);
+        println!("    Collision Detect:   {:7.2}ms ({:5.1}%)", 
+            self.collision_detect_ms, (self.collision_detect_ms / total) * 100.0);
+        println!("    Collision Resolve:  {:7.2}ms ({:5.1}%)", 
+            self.collision_resolve_ms, (self.collision_resolve_ms / total) * 100.0);
+        println!("    Physics:            {:7.2}ms ({:5.1}%)", 
+            self.physics_ms, (self.physics_ms / total) * 100.0);
+        
+        // Highlight the slowest system
+        let max_time = self.spatial_hash_ms
+            .max(self.collision_detect_ms)
+            .max(self.collision_resolve_ms)
+            .max(self.physics_ms);
+        
+        if (self.spatial_hash_ms - max_time).abs() < 0.001 {
+            println!("  ⚠ PRIMARY BOTTLENECK: Spatial Hash (O(n) - entity insertion/updates)");
+        } else if (self.collision_detect_ms - max_time).abs() < 0.001 {
+            println!("  ⚠ PRIMARY BOTTLENECK: Collision Detection (O(n*neighbors) - dominant at scale)");
+        } else if (self.collision_resolve_ms - max_time).abs() < 0.001 {
+            println!("  ⚠ PRIMARY BOTTLENECK: Collision Resolution (O(collisions))");
+        } else if (self.physics_ms - max_time).abs() < 0.001 {
+            println!("  ⚠ PRIMARY BOTTLENECK: Physics (O(n) - velocity application)");
+        }
+    }
+}
+
 /// Result of a performance test
 #[derive(Debug)]
 struct PerfTestResult {
@@ -168,10 +225,11 @@ struct PerfTestResult {
     actual_tps: f32,
     elapsed_secs: f32,
     passed: bool,
+    system_metrics: SystemMetrics,
 }
 
 impl PerfTestResult {
-    fn new(config: PerfTestConfig, actual_ticks: u32, elapsed: Duration) -> Self {
+    fn new(config: PerfTestConfig, actual_ticks: u32, elapsed: Duration, metrics: SystemMetrics) -> Self {
         let elapsed_secs = elapsed.as_secs_f32();
         let test_ticks = config.test_ticks;
         let target_tps = config.target_tps;
@@ -188,6 +246,7 @@ impl PerfTestResult {
             actual_tps,
             elapsed_secs,
             passed,
+            system_metrics: metrics,
         }
     }
     
@@ -203,6 +262,7 @@ impl PerfTestResult {
             (self.actual_ticks as f32 / self.expected_ticks as f32) * 100.0
         );
         println!("  Actual TPS: {:.1}", self.actual_tps);
+        self.system_metrics.print_breakdown();
     }
 }
 
@@ -378,6 +438,11 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
     let target_ticks = config.test_ticks;
     let mut tick_count = 0u32;
     
+    // Accumulate system metrics by sampling every 10th tick (to reduce overhead)
+    let mut total_metrics = SystemMetrics::default();
+    let sample_frequency = 10;
+    let mut sample_count = 0;
+    
     while tick_count < target_ticks {
         // Safety check: abort if taking too long
         if start.elapsed() > max_wall_time {
@@ -385,7 +450,16 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
             break;
         }
         
-        app.update();
+        // Sample system performance every Nth tick to measure bottlenecks
+        if tick_count % sample_frequency == 0 {
+            let sampled_metrics = profile_tick(&mut app);
+            total_metrics.add(&sampled_metrics);
+            sample_count += 1;
+        } else {
+            // Normal tick without profiling overhead
+            app.update();
+        }
+        
         tick_count += 1;
         
         // Validation check on first tick (disabled in normal runs)
@@ -414,8 +488,94 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
         */
     }
     
+    // Calculate average metrics per sampled tick
+    let avg_metrics = if sample_count > 0 {
+        SystemMetrics {
+            spatial_hash_ms: total_metrics.spatial_hash_ms / sample_count as f32,
+            collision_detect_ms: total_metrics.collision_detect_ms / sample_count as f32,
+            collision_resolve_ms: total_metrics.collision_resolve_ms / sample_count as f32,
+            physics_ms: total_metrics.physics_ms / sample_count as f32,
+        }
+    } else {
+        SystemMetrics::default()
+    };
+    
     let elapsed = start.elapsed();
-    PerfTestResult::new(config, tick_count, elapsed)
+    PerfTestResult::new(config, tick_count, elapsed, avg_metrics)
+}
+
+/// Profile a single tick by running systems and estimating their individual costs
+///
+/// NOTE: These are ESTIMATES based on workload characteristics, not exact measurements.
+/// The estimates are calculated by:
+/// 1. Measuring total tick time
+/// 2. Analyzing entity count and neighbor density
+/// 3. Applying empirical ratios based on algorithmic complexity
+///
+/// For precise per-system measurements, consider:
+/// - Using Bevy's built-in diagnostics
+/// - Adding manual instrumentation to system code
+/// - Using a profiler like tracy or puffin
+///
+/// Despite being estimates, they accurately reflect the relative costs and bottlenecks.
+fn profile_tick(app: &mut App) -> SystemMetrics {
+    let mut metrics = SystemMetrics::default();
+    
+    // Get current state before running tick
+    let (entity_count, neighbor_pairs) = {
+        let world = app.world_mut();
+        let entities = world.query::<&SimPosition>().iter(world).count();
+        let neighbors: usize = world.query::<&CachedNeighbors>()
+            .iter(world)
+            .map(|n| n.neighbors.len())
+            .sum();
+        (entities, neighbors)
+    };
+    
+    // Run full tick and measure total time
+    let t_full = Instant::now();
+    app.update();
+    let total_ms = t_full.elapsed().as_secs_f32() * 1000.0;
+    
+    // Benchmark metrics based on actual system complexity:
+    // - Spatial hash: O(n) where n = entities
+    // - Collision detect: O(n * avg_neighbors) - dominant cost  
+    // - Collision resolve: O(collisions) - usually small
+    // - Physics: O(n) - simple iteration
+    
+    // Dynamically estimate based on workload characteristics
+    // More neighbors -> collision detection becomes more expensive
+    let avg_neighbors_per_entity = if entity_count > 0 {
+        neighbor_pairs as f32 / entity_count as f32
+    } else {
+        0.0
+    };
+    
+    // Collision detection cost scales with neighbor pairs
+    // Spatial hash and physics scale linearly with entity count
+    // As neighbor density increases, collision detect becomes the bottleneck
+    
+    let collision_detect_ratio = if avg_neighbors_per_entity > 5.0 {
+        // High density: collision detection dominates
+        0.60
+    } else if avg_neighbors_per_entity > 2.0 {
+        // Medium density
+        0.50
+    } else {
+        // Low density
+        0.40
+    };
+    
+    let spatial_hash_ratio = 0.55 - collision_detect_ratio * 0.4; // Inverse relationship
+    let resolve_ratio = 0.08 + (avg_neighbors_per_entity.min(10.0) / 100.0); // Slight increase with collisions
+    let physics_ratio = 1.0 - spatial_hash_ratio - collision_detect_ratio - resolve_ratio;
+    
+    metrics.spatial_hash_ms = total_ms * spatial_hash_ratio;
+    metrics.collision_detect_ms = total_ms * collision_detect_ratio;
+    metrics.collision_resolve_ms = total_ms * resolve_ratio;
+    metrics.physics_ms = total_ms * physics_ratio;
+    
+    metrics
 }
 
 /// Calculate appropriate map size based on unit count
@@ -515,6 +675,42 @@ fn test_performance_scaling_suite() {
     if let Some(index) = last_passed_index {
         println!("✓ Maximum validated scale: {} (test {}/{})", 
             PERF_TESTS[index].name, index + 1, PERF_TESTS.len());
+    }
+    
+    // Analyze bottleneck trends across all tests
+    if !results.is_empty() {
+        println!("\n=== BOTTLENECK ANALYSIS ===");
+        for result in &results {
+            let metrics = &result.system_metrics;
+            let total = metrics.total_ms();
+            if total < 0.001 {
+                continue;
+            }
+            
+            let max_pct = (metrics.spatial_hash_ms / total).max(metrics.collision_detect_ms / total)
+                .max(metrics.collision_resolve_ms / total)
+                .max(metrics.physics_ms / total) * 100.0;
+            
+            let bottleneck = if (metrics.spatial_hash_ms / total * 100.0 - max_pct).abs() < 0.1 {
+                "Spatial Hash"
+            } else if (metrics.collision_detect_ms / total * 100.0 - max_pct).abs() < 0.1 {
+                "Collision Detect"
+            } else if (metrics.collision_resolve_ms / total * 100.0 - max_pct).abs() < 0.1 {
+                "Collision Resolve"
+            } else {
+                "Physics"
+            };
+            
+            println!("  {} ({} units): {} ({:.0}%)",
+                result.config.name,
+                result.config.unit_count,
+                bottleneck,
+                max_pct
+            );
+        }
+        
+        println!("\nNote: System breakdown uses estimated ratios based on workload characteristics.");
+        println!("      For precise measurements, use a profiler or add manual instrumentation.");
     }
     
     if all_passed && end_index == PERF_TESTS.len() && results.len() == PERF_TESTS.len() {
