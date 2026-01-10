@@ -1,6 +1,14 @@
-# Stress Test Findings - January 5, 2026
+# Active Map Editor Issues
+**Last Updated:** January 10, 2026  
+**Project:** Peregrine RTS - Map editor bugs and improvements
 
-## Critical Bug: Map Resize Crash
+---
+
+## ✅ FIXED: Critical Bug - Map Resize Crash
+**Status:** FIXED  
+**Priority:** Critical  
+**Reported:** January 5, 2026  
+**Fixed:** January 5, 2026
 
 ### What Happened
 During stress testing with a larger map (450x450 vs 300x300), the game crashed with a panic:
@@ -20,12 +28,12 @@ no entry found for key
 
 **The Bug:** Array index out of bounds in flow field access
 
-**Location:** [pathfinding.rs:463](../src/game/pathfinding.rs#L463)
+**Location:** [pathfinding.rs:463](../../src/game/pathfinding.rs#L463)
 ```rust
 if map_flow_field.cost_field[map_flow_field.get_index(gx, gy)] == 255 {
 ```
 
-**Why it happens:**
+**Why it happened:**
 
 1. **Map Generation Process:**
    - Editor clears old obstacles (50 items)
@@ -106,9 +114,9 @@ if map_flow_field.cost_field[map_flow_field.get_index(gx, gy)] == 255 {
 }
 ```
 
-### Implementation Plan
+### Implementation Details
 
-**File:** [editor.rs](../src/game/editor.rs) (Map generation function)
+**File:** [editor.rs](../../src/game/editor.rs) (Map generation function)
 
 **Change:** After creating the new flow field and before spawning obstacles:
 
@@ -130,7 +138,7 @@ info!("Graph built in {:?} - {} clusters, {} portals",
 // Then spawn obstacles...
 ```
 
-**File:** [pathfinding.rs](../src/game/pathfinding.rs#L463)
+**File:** [pathfinding.rs](../../src/game/pathfinding.rs#L463)
 
 **Change:** Add bounds checking before flow field access:
 
@@ -196,10 +204,6 @@ All tests should complete without panic and maintain stable tick times.
 
 ---
 
-## Next Steps
-
-1. ✅ Identify root cause (DONE - documented above)
-2. ⏭️ Implement fix (graph rebuild + bounds checking)
-3. ⏭️ Verify with test suite
-4. ⏭️ Continue stress testing with units
-5. ⏭️ Profile performance at scale (10k, 100k, 1M units)
+## Related Documentation
+- [SPATIAL_PARTITIONING.md](../Design%20docs/SPATIAL_PARTITIONING.md) - Spatial hash architecture
+- [PATHFINDING.md](../Design%20docs/PATHFINDING.md) - Pathfinding system design

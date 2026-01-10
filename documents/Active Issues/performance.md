@@ -1,7 +1,6 @@
-# Performance Bottlenecks Analysis
-**Date:** January 9, 2026  
-**Test Scenario:** 10,200 units on 500x500 map with pathfinding commands  
-**Log Source:** peregrine_20260109_230728.log
+# Active Performance Issues
+**Last Updated:** January 10, 2026  
+**Project:** Peregrine RTS - Performance optimization for 10M+ unit goal
 
 ## Performance Goals vs Current State
 
@@ -21,6 +20,7 @@
 ## Critical Bottlenecks (Ordered by Impact)
 
 ### 1. BOIDS_CACHE - CRITICAL (65-85% of tick time)
+**Status:** Active - Needs Investigation  
 **Time per tick:** 11-17ms (most commonly 13-14ms)  
 **Impact:** This is the single largest bottleneck
 
@@ -44,12 +44,16 @@
 - [ ] Implement spatial coherence optimizations
 - [ ] Use dirty flagging to skip static entities
 
+**Related Code:**
+- [src/game/unit/boids.rs](../../src/game/unit/boids.rs)
+- [src/game/simulation/collision.rs](../../src/game/simulation/collision.rs)
+
 ---
 
 ### 2. Collision Detection - HIGH (7ms every 5 ticks)
+**Status:** Active - Needs Optimization  
 **Time per run:** 4.7-7.1ms  
 **Frequency:** Runs every ~5 simulation ticks  
-**Impact:** Moderate but still significant
 
 **Metrics:**
 - Entities: 10,200
@@ -73,11 +77,14 @@
 - [ ] Consider separating broad-phase and narrow-phase
 - [ ] Add layer-based early rejection (currently 0 filtered)
 
+**Related Documentation:**
+- See [SPATIAL_PARTITIONING.md](../Design%20docs/SPATIAL_PARTITIONING.md) Section 9.1 for detailed analysis
+
 ---
 
 ### 3. Spatial Hash Update - MEDIUM (1.7-3ms per tick)
+**Status:** Active - Optimization Needed  
 **Time per tick:** 1.7-3.0ms  
-**Impact:** Moderate, runs every tick
 
 **Metrics:**
 - Total entities: 10,200
@@ -98,11 +105,14 @@
 - [ ] Consider lockless data structures
 - [ ] Profile grid insertion/removal operations
 
+**Related Code:**
+- [src/game/spatial_hash/grid.rs](../../src/game/spatial_hash/grid.rs)
+
 ---
 
 ### 4. Boids Steering - MEDIUM (~2.3ms)
+**Status:** Active - Could be Optimized  
 **Time per tick:** 2.263ms  
-**Impact:** Moderate
 
 **Metrics:**
 - Units: 10,200
@@ -118,11 +128,14 @@
 - [ ] Level-of-detail system (simplified steering for background units)
 - [ ] Parallel processing with rayon
 
+**Related Code:**
+- [src/game/unit/boids.rs](../../src/game/unit/boids.rs)
+
 ---
 
-### 5. Pathfinding - LOW to MEDIUM
+### 5. Pathfinding Queue Buildup - LOW to MEDIUM
+**Status:** Active - Needs Monitoring  
 **Direct Time:** ~471µs for FOLLOW_PATH system  
-**Impact:** Low direct cost, but indirect issues detected
 
 **Metrics:**
 - Active paths: 1,678-3,315 units following paths
@@ -142,17 +155,8 @@
 - [ ] Cache common paths
 - [ ] Reduce path recalculation frequency
 
----
-
-### 6. Other Systems - LOW
-**Obstacle Resolve:** 2.3-3.9ms (every 5 ticks)  
-**Apply Forces:** 25µs  
-**Apply Friction:** 48µs  
-**Apply Velocity:** 105µs  
-**Collision Resolve:** 288µs  
-**Process Input:** 1.4µs  
-
-These are all relatively efficient and not primary bottlenecks.
+**Related Code:**
+- [src/game/pathfinding/systems.rs](../../src/game/pathfinding/systems.rs)
 
 ---
 
@@ -190,28 +194,24 @@ These are all relatively efficient and not primary bottlenecks.
 
 ## Scaling Path to 10M Entities
 
-To reach 10M entities at 100 tps:
-
 ### Phase 1: Optimize Current Systems (Target: 100K entities @ 100 tps)
 - Fix BOIDS_CACHE performance (13ms → 1ms for 10K entities)
 - Parallelize all major systems
 - Implement basic LOD
 
 ### Phase 2: Architectural Shift (Target: 1M entities @ 100 tps)
-- Move to GPU compute for boids/collision
-- Implement spatial chunking
-- Async pathfinding
+- GPU compute shaders for collision and boids
+- Spatial chunking for world updates
+- Dedicated pathfinding thread pool
 
-### Phase 3: Extreme Scale (Target: 10M entities @ 100 tps)
+### Phase 3: Extreme Optimization (Target: 10M entities @ 100 tps)
 - Full GPU simulation pipeline
-- Multi-level LOD system
-- Distributed processing if needed
-- Aggressive culling and approximations
+- Hierarchical LOD system
+- Distributed processing across cores
 
 ---
 
-## Notes
-- Test was performed on RTX 3090 (powerful GPU available but not utilized)
-- Bevy ECS should support parallel queries but they're not being used
-- Most time is in neighbor queries and cache lookups, not actual physics
-- The foundation is good, needs optimization focus on hot paths
+## Test Data Source
+- **Log File:** peregrine_20260109_230728.log
+- **Test Scenario:** 10,200 units on 500x500 map with pathfinding commands
+- **Date:** January 9, 2026
