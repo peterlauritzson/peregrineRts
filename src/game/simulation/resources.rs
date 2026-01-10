@@ -109,6 +109,10 @@ pub struct SimConfig {
     pub black_hole_strength: FixedNum,
     pub wind_spot_strength: FixedNum,
     pub force_source_radius: FixedNum,
+    
+    // Spatial Hash Optimization
+    pub spatial_hash_max_ticks_without_update: u8,
+    pub spatial_hash_velocity_estimate_scale: FixedNum,
 }
 
 impl Default for SimConfig {
@@ -146,6 +150,8 @@ impl Default for SimConfig {
             black_hole_strength: FixedNum::from_num(50.0),
             wind_spot_strength: FixedNum::from_num(-50.0),
             force_source_radius: FixedNum::from_num(10.0),
+            spatial_hash_max_ticks_without_update: 8,
+            spatial_hash_velocity_estimate_scale: FixedNum::from_num(1.0),
         }
     }
 }

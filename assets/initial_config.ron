@@ -56,4 +56,8 @@
     
     // Pathfinding
     pathfinding_build_batch_size: 5,
+    
+    // Spatial Hash Optimization
+    spatial_hash_max_ticks_without_update: 8,  // Force update at least every N ticks
+    spatial_hash_velocity_estimate_scale: 1.0, // Scale factor for estimated ticks_to_wall (1.0 = no margin)
 )

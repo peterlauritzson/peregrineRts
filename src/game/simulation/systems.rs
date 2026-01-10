@@ -270,12 +270,84 @@ pub fn follow_path(
 // Spatial Hash
 // ============================================================================
 
+/// Calculate estimated ticks until entity exits current cell based on velocity.
+///
+/// Returns a conservative estimate by checking both X and Y components independently
+/// and using the minimum (entity will exit when the first dimension crosses the boundary).
+///
+/// # Arguments
+/// * `pos` - Current entity position
+/// * `vel` - Current entity velocity
+/// * `cell_center` - World position of the cell center
+/// * `cell_size` - Size of spatial hash cells
+/// * `scale` - Scale factor for conservative estimation (typically 1.0)
+///
+/// # Returns
+/// Estimated ticks until wall collision, capped at u8::MAX for very slow entities
+fn calculate_ticks_to_wall(
+    pos: FixedVec2,
+    vel: FixedVec2,
+    cell_center: FixedVec2,
+    cell_size: FixedNum,
+    scale: FixedNum,
+) -> u8 {
+    let half_cell = cell_size * FixedNum::from_num(0.5);
+    let epsilon = FixedNum::from_num(0.0001);
+    
+    // Distance from center in each dimension
+    let dx_from_center = pos.x - cell_center.x;
+    let dy_from_center = pos.y - cell_center.y;
+    
+    // Calculate distance to wall in direction of travel
+    let dist_to_wall_x = if vel.x > epsilon {
+        half_cell - dx_from_center  // Moving right/positive
+    } else if vel.x < -epsilon {
+        half_cell + dx_from_center  // Moving left/negative
+    } else {
+        FixedNum::MAX  // Stationary in X
+    };
+    
+    let dist_to_wall_y = if vel.y > epsilon {
+        half_cell - dy_from_center  // Moving up/positive
+    } else if vel.y < -epsilon {
+        half_cell + dy_from_center  // Moving down/negative
+    } else {
+        FixedNum::MAX  // Stationary in Y
+    };
+    
+    // Calculate ticks to reach wall in each dimension
+    let ticks_x = if vel.x.abs() > epsilon {
+        (dist_to_wall_x / vel.x.abs()) * scale
+    } else {
+        FixedNum::MAX
+    };
+    
+    let ticks_y = if vel.y.abs() > epsilon {
+        (dist_to_wall_y / vel.y.abs()) * scale
+    } else {
+        FixedNum::MAX
+    };
+    
+    // Take minimum - entity exits when FIRST dimension crosses boundary
+    let min_ticks = ticks_x.min(ticks_y);
+    
+    // Clamp to u8 range
+    if min_ticks >= FixedNum::from_num(255) {
+        255
+    } else if min_ticks < FixedNum::ZERO {
+        0  // Already outside cell (shouldn't happen, but be safe)
+    } else {
+        min_ticks.floor().to_num::<i32>().clamp(0, 255) as u8
+    }
+}
+
 /// Update spatial hash with entity positions
 pub fn update_spatial_hash(
     mut spatial_hash: ResMut<SpatialHash>,
-    mut query: Query<(Entity, &SimPosition, &Collider, &mut OccupiedCells), Without<StaticObstacle>>,
+    mut query: Query<(Entity, &SimPosition, &SimVelocity, &Collider, &mut OccupiedCells), Without<StaticObstacle>>,
     new_entities: Query<(Entity, &SimPosition, &Collider), Without<OccupiedCells>>,
     obstacles_query: Query<Entity, With<StaticObstacle>>,
+    sim_config: Res<SimConfig>,
     mut commands: Commands,
     time: Res<Time<Fixed>>,
 ) {
@@ -286,11 +358,18 @@ pub fn update_spatial_hash(
     let mut new_count = 0;
     let mut new_obstacles = 0;
     let mut multi_cell_count = 0;
-    let mut fast_path_hits = 0;  // Track how often fast path succeeds
+    let mut super_fast_path_hits = 0; // Stage 0: Velocity-based skip
+    let mut fast_path_hits = 0;       // Stage 1: Distance check success
+    let mut slow_path_no_change = 0;  // Stage 3: Calculated but cells unchanged
+    let mut forced_updates = 0;       // Forced by max ticks threshold
     
-    // Cache cell size and half cell for fast path checks
+    // Cache cell size and thresholds for fast path checks
     let cell_size = spatial_hash.cell_size();
     let half_cell = cell_size * FixedNum::from_num(0.5);
+    
+    // Velocity-based skip parameters from config
+    let max_ticks_without_update = sim_config.spatial_hash_max_ticks_without_update;
+    let velocity_estimate_scale = sim_config.spatial_hash_velocity_estimate_scale;
     
     // Handle entities that don't have OccupiedCells yet (first time in spatial hash)
     for (entity, pos, collider) in new_entities.iter() {
@@ -310,10 +389,16 @@ pub fn update_spatial_hash(
         // Calculate and cache the cell center
         let cell_center = spatial_hash.calculate_cell_center(pos.0);
         
+        // For new entities, compute ticks_to_wall (they don't have velocity yet, so assume stationary)
+        // This will be updated on first position change
+        let ticks_to_wall = 255;  // Max value for new entities without velocity data
+        
         // Track which cells this entity occupies
         commands.entity(entity).insert(OccupiedCells {
             cells: occupied,
             last_cell_center: cell_center,
+            ticks_since_update: 0,
+            ticks_to_wall,
         });
         
         new_count += 1;
@@ -327,9 +412,30 @@ pub fn update_spatial_hash(
     // (They were already inserted in the new_entities pass above)
     
     // Handle dynamic entities - only update if position changed significantly
-    for (entity, pos, collider, mut occupied_cells) in query.iter_mut() {
-        // FAST PATH: Check if entity is still within same cell using cached center
-        // This avoids expensive division operations for 90%+ of entities
+    for (entity, pos, vel, collider, mut occupied_cells) in query.iter_mut() {
+        // STAGE 0: SUPER FAST PATH - Velocity-based skip heuristic
+        // 
+        // Skip if we haven't exceeded our estimated ticks_to_wall AND haven't hit max tick limit
+        let should_skip_via_velocity = occupied_cells.ticks_since_update < occupied_cells.ticks_to_wall
+            && occupied_cells.ticks_since_update < max_ticks_without_update;
+        
+        if should_skip_via_velocity {
+            occupied_cells.ticks_since_update = occupied_cells.ticks_since_update.saturating_add(1);
+            super_fast_path_hits += 1;
+            unchanged += 1;
+            continue;
+        }
+        
+        // Track if we're forcing an update due to tick threshold
+        if occupied_cells.ticks_since_update >= max_ticks_without_update {
+            forced_updates += 1;
+        }
+        
+        // Reset tick counter - we're doing a check now
+        occupied_cells.ticks_since_update = 0;
+        
+        // STAGE 1: FAST PATH - Check if entity is still within same cell using cached center
+        // This avoids expensive division operations
         let dx = (pos.0.x - occupied_cells.last_cell_center.x).abs();
         let dy = (pos.0.y - occupied_cells.last_cell_center.y).abs();
         
@@ -340,7 +446,7 @@ pub fn update_spatial_hash(
             continue;
         }
         
-        // SLOW PATH: Entity may have changed cells - do full calculation
+        // STAGE 2: SLOW PATH - Entity may have changed cells - do full calculation
         // Calculate what cells this entity should now occupy
         let new_cells = spatial_hash.calculate_occupied_cells(pos.0, collider.radius);
         
@@ -361,10 +467,18 @@ pub fn update_spatial_hash(
             // Actually, let's use insert_multi_cell for simplicity
             spatial_hash.insert_multi_cell(entity, pos.0, collider.radius);
             
-            // Update cached cell center
-            occupied_cells.last_cell_center = spatial_hash.calculate_cell_center(pos.0);
+            // Update cached cell center and compute new ticks_to_wall estimate
+            let new_cell_center = spatial_hash.calculate_cell_center(pos.0);
+            let new_ticks_to_wall = calculate_ticks_to_wall(
+                pos.0,
+                vel.0,
+                new_cell_center,
+                cell_size,
+                velocity_estimate_scale,
+            );
             
-            // Update tracked cells
+            occupied_cells.last_cell_center = new_cell_center;
+            occupied_cells.ticks_to_wall = new_ticks_to_wall;
             occupied_cells.cells = new_cells;
             updates += 1;
             
@@ -372,6 +486,8 @@ pub fn update_spatial_hash(
                 multi_cell_count += 1;
             }
         } else {
+            // STAGE 3 SUCCESS: Cells didn't change (entity moved but stayed in same cells)
+            slow_path_no_change += 1;
             unchanged += 1;
         }
     }
@@ -380,9 +496,22 @@ pub fn update_spatial_hash(
     let tick = (time.elapsed_secs() * 30.0) as u64;
     if duration.as_millis() > 2 || tick % 100 == 0 || new_obstacles > 0 {
         let total = new_count + updates + unchanged;
+        let super_fast_pct = if total > 0 { (super_fast_path_hits as f32 / total as f32) * 100.0 } else { 0.0 };
         let fast_path_percent = if total > 0 { (fast_path_hits as f32 / total as f32) * 100.0 } else { 0.0 };
-        info!("[SPATIAL_HASH_UPDATE] {:?} | Entities: {} (new: {} [{} obstacles], updated: {}, unchanged: {}, multi-cell: {}) | Fast path: {}%", 
-              duration, total, new_count, new_obstacles, updates, unchanged, multi_cell_count, fast_path_percent as u32);
+        let slow_path_count = total - super_fast_path_hits - fast_path_hits - new_count;
+        let slow_no_change_percent = if slow_path_count > 0 { 
+            (slow_path_no_change as f32 / slow_path_count as f32) * 100.0 
+        } else { 0.0 };
+        
+        info!("[SPATIAL_HASH_UPDATE] {:?} | Entities: {} (new: {} [{} obstacles], updated: {}, unchanged: {}, multi-cell: {})", 
+              duration, total, new_count, new_obstacles, updates, unchanged, multi_cell_count);
+        info!("  Stage 0 (velocity skip): {}/{} ({}%) | Stage 1 (distance): {}/{} ({}%)",
+              super_fast_path_hits, total, super_fast_pct as u32,
+              fast_path_hits, total, fast_path_percent as u32);
+        info!("  Stage 2 (slow path): {} | Stage 3 (no change): {}/{} ({}%) | Forced: {}",
+              slow_path_count,
+              slow_path_no_change, slow_path_count, slow_no_change_percent as u32,
+              forced_updates);
     }
 }
 

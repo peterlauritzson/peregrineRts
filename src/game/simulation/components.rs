@@ -186,6 +186,10 @@ pub struct OccupiedCells {
     pub cells: Vec<(usize, usize)>,
     /// Cached world position of the center of the primary cell (for fast path check)
     pub last_cell_center: FixedVec2,
+    /// Ticks since last full cell calculation (for velocity-based skip optimization)
+    pub ticks_since_update: u8,
+    /// Estimated ticks until entity exits current cell (based on velocity)
+    pub ticks_to_wall: u8,
 }
 
 impl Default for OccupiedCells {
@@ -193,6 +197,8 @@ impl Default for OccupiedCells {
         Self {
             cells: Vec::new(),
             last_cell_center: FixedVec2::ZERO,
+            ticks_since_update: 255,  // Force update on first tick
+            ticks_to_wall: 0,  // Will be computed on first update
         }
     }
 }
