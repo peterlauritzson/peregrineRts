@@ -7,7 +7,7 @@ use super::graph::HierarchicalGraph;
 use super::components::ConnectedComponents;
 use super::astar::find_path_hierarchical;
 
-pub(super) fn process_path_requests(
+pub fn process_path_requests(
     mut path_requests: MessageReader<PathRequest>,
     mut commands: Commands,
     map_flow_field: Res<MapFlowField>,
@@ -37,6 +37,7 @@ pub(super) fn process_path_requests(
     }
 
     for (_i, request) in path_requests.read().enumerate() {
+        
         let start_node_opt = flow_field.world_to_grid(request.start);
         let goal_node_opt = flow_field.world_to_grid(request.goal);
 

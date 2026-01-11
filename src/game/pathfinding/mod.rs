@@ -14,6 +14,7 @@ pub use graph::HierarchicalGraph;
 pub use components::ConnectedComponents;
 pub use graph_build::{GraphBuildState, GraphBuildStep, regenerate_cluster_flow_fields};
 pub use astar::find_path_hierarchical;
+pub use systems::process_path_requests;
 
 use bevy::prelude::*;
 use crate::game::GameState;

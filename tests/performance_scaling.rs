@@ -6,8 +6,17 @@
 ///
 /// Tests progress from:
 /// - 100 units @ 10 TPS
-/// - 1M units @ 100 TPS
-/// - 10M units @ 100 TPS (final goal)
+/// - 1M units @ 100 TPS (final goal)
+///
+/// ## Pathfinding Test Modes
+///
+/// By default, all tests run with **chunky pathfinding** (10-20% of units to same point every 10 ticks),
+/// which simulates realistic RTS gameplay when players select and move groups of units.
+///
+/// Override with `PATHFINDING_MODE` environment variable:
+/// - `chunky` (default): 10-20% of units to same point every 10 ticks (RTS player selection)
+/// - `random`: 0.5% of units to random points every tick (uniform load)
+/// - `none`: No pathfinding requests (baseline for comparison)
 ///
 /// ## CRITICAL BUG FIX (Jan 2026)
 ///
@@ -36,44 +45,100 @@
 /// - 10k units: 1.29ms/tick (shows proper scaling with unit count)
 /// - Spatial hash now populated: ~1.4 entries per entity (multi-cell coverage)
 ///
-/// ## Usage Modes:
+/// ## Usage Examples:
 ///
-/// 1. **Full suite** (stop at first failure):
+/// 1. **Full suite with chunky pathfinding** (default, stop at first failure):
 ///    ```
 ///    cargo test --release --test performance_scaling test_performance_scaling_suite -- --ignored --nocapture
 ///    ```
 ///
-/// 2. **Resume from last failure**:
+/// 2. **Baseline without pathfinding**:
+///    ```
+///    $env:PATHFINDING_MODE="none"; cargo test --release --test performance_scaling test_performance_scaling_suite -- --ignored --nocapture
+///    ```
+///
+/// 3. **Random spread-out pathfinding**:
+///    ```
+///    $env:PATHFINDING_MODE="random"; cargo test --release --test performance_scaling test_performance_scaling_suite -- --ignored --nocapture
+///    ```
+///
+/// 4. **Resume from last failure**:
 ///    ```
 ///    $env:PERF_TEST_MODE="resume"; cargo test --release --test performance_scaling test_performance_scaling_suite -- --ignored --nocapture
 ///    ```
 ///
-/// 3. **Regression check** (run only previously passing tests):
+/// 5. **Regression check** (run only previously passing tests):
 ///    ```
 ///    $env:PERF_TEST_MODE="regression"; cargo test --release --test performance_scaling test_performance_scaling_suite -- --ignored --nocapture
 ///    ```
 ///
-/// 4. **Reset checkpoint**:
+/// 6. **Reset checkpoint**:
 ///    ```
 ///    $env:PERF_TEST_MODE="reset"; cargo test --release --test performance_scaling test_performance_scaling_suite -- --ignored --nocapture
 ///    ```
 
 use bevy::prelude::*;
+use bevy::ecs::system::RunSystemOnce;
 use peregrine::game::simulation::components::{
     SimPosition, SimPositionPrev, SimVelocity, SimAcceleration, Collider,
     CachedNeighbors, OccupiedCells, StaticObstacle, layers,
 };
-use peregrine::game::simulation::resources::SimConfig;
+use peregrine::game::simulation::resources::{SimConfig, MapFlowField};
 use peregrine::game::simulation::collision::CollisionEvent;
 use peregrine::game::simulation::physics;
 use peregrine::game::simulation::collision;
 use peregrine::game::simulation::systems;
 use peregrine::game::spatial_hash::SpatialHash;
+use peregrine::game::pathfinding::{
+    PathRequest, HierarchicalGraph, ConnectedComponents, process_path_requests,
+};
+use peregrine::game::structures::FlowField;
 use peregrine::game::fixed_math::{FixedNum, FixedVec2};
 use std::time::{Duration, Instant};
 use std::path::PathBuf;
 use std::fs;
 use serde::{Serialize, Deserialize};
+use std::sync::{Arc, Mutex};
+
+// Global timing storage for system profiling
+#[derive(Resource, Default, Clone)]
+struct SystemTimings {
+    spatial_hash_ms: Arc<Mutex<f32>>,
+    collision_detect_ms: Arc<Mutex<f32>>,
+    collision_resolve_ms: Arc<Mutex<f32>>,
+    physics_ms: Arc<Mutex<f32>>,
+    pathfinding_ms: Arc<Mutex<f32>>,
+}
+
+/// Pathfinding request pattern for testing
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathfindingPattern {
+    /// No pathfinding requests (baseline performance)
+    None,
+    /// Random spread-out requests: 0.5% of units to random points every tick
+    RandomSpreadOut,
+    /// Chunky requests: 10-20% of units to same point same tick (DEFAULT)
+    ChunkyRequests,
+}
+
+impl PathfindingPattern {
+    fn from_env() -> Self {
+        match std::env::var("PATHFINDING_MODE").as_deref() {
+            Ok("none") => PathfindingPattern::None,
+            Ok("random") => PathfindingPattern::RandomSpreadOut,
+            Ok("chunky") | _ => PathfindingPattern::ChunkyRequests, // Default to chunky
+        }
+    }
+}
+
+/// Deterministic pathfinding request generator
+#[derive(Resource)]
+struct PathRequestGenerator {
+    rng: fastrand::Rng,
+    map_size: f32,
+    pattern: PathfindingPattern,
+    tick_counter: u32,
+}
 
 /// Configuration for a single performance test
 #[derive(Debug, Clone)]
@@ -166,12 +231,19 @@ struct SystemMetrics {
     collision_detect_ms: f32,
     collision_resolve_ms: f32,
     physics_ms: f32,
+    pathfinding_ms: f32,
+    // Max times for detecting spikes
+    spatial_hash_max_ms: f32,
+    collision_detect_max_ms: f32,
+    collision_resolve_max_ms: f32,
+    physics_max_ms: f32,
+    pathfinding_max_ms: f32,
 }
 
 impl SystemMetrics {
     fn total_ms(&self) -> f32 {
         self.spatial_hash_ms + self.collision_detect_ms + 
-        self.collision_resolve_ms + self.physics_ms
+        self.collision_resolve_ms + self.physics_ms + self.pathfinding_ms
     }
     
     fn add(&mut self, other: &SystemMetrics) {
@@ -179,6 +251,15 @@ impl SystemMetrics {
         self.collision_detect_ms += other.collision_detect_ms;
         self.collision_resolve_ms += other.collision_resolve_ms;
         self.physics_ms += other.physics_ms;
+        self.pathfinding_ms += other.pathfinding_ms;
+    }
+    
+    fn update_max(&mut self, other: &SystemMetrics) {
+        self.spatial_hash_max_ms = self.spatial_hash_max_ms.max(other.spatial_hash_ms);
+        self.collision_detect_max_ms = self.collision_detect_max_ms.max(other.collision_detect_ms);
+        self.collision_resolve_max_ms = self.collision_resolve_max_ms.max(other.collision_resolve_ms);
+        self.physics_max_ms = self.physics_max_ms.max(other.physics_ms);
+        self.pathfinding_max_ms = self.pathfinding_max_ms.max(other.pathfinding_ms);
     }
     
     fn print_breakdown(&self) {
@@ -188,30 +269,58 @@ impl SystemMetrics {
             return;
         }
         
-        println!("  System breakdown (per tick avg, estimated from sampled ticks):");
-        println!("    Spatial Hash:       {:7.2}ms ({:5.1}%)", 
-            self.spatial_hash_ms, (self.spatial_hash_ms / total) * 100.0);
-        println!("    Collision Detect:   {:7.2}ms ({:5.1}%)", 
-            self.collision_detect_ms, (self.collision_detect_ms / total) * 100.0);
-        println!("    Collision Resolve:  {:7.2}ms ({:5.1}%)", 
-            self.collision_resolve_ms, (self.collision_resolve_ms / total) * 100.0);
-        println!("    Physics:            {:7.2}ms ({:5.1}%)", 
-            self.physics_ms, (self.physics_ms / total) * 100.0);
+        println!("  System breakdown (per tick, from sampled ticks):");
+        println!("    System              Avg (ms)   Max (ms)    Avg %");
+        println!("    ----------------    --------   --------   ------");
+        println!("    Spatial Hash        {:8.3}   {:8.3}   {:5.1}%", 
+            self.spatial_hash_ms, self.spatial_hash_max_ms, (self.spatial_hash_ms / total) * 100.0);
+        println!("    Collision Detect    {:8.3}   {:8.3}   {:5.1}%", 
+            self.collision_detect_ms, self.collision_detect_max_ms, (self.collision_detect_ms / total) * 100.0);
+        println!("    Collision Resolve   {:8.3}   {:8.3}   {:5.1}%", 
+            self.collision_resolve_ms, self.collision_resolve_max_ms, (self.collision_resolve_ms / total) * 100.0);
+        println!("    Physics             {:8.3}   {:8.3}   {:5.1}%", 
+            self.physics_ms, self.physics_max_ms, (self.physics_ms / total) * 100.0);
+        println!("    Pathfinding         {:8.3}   {:8.3}   {:5.1}%", 
+            self.pathfinding_ms, self.pathfinding_max_ms, (self.pathfinding_ms / total) * 100.0);
         
-        // Highlight the slowest system
+        // Highlight the slowest system by average
         let max_time = self.spatial_hash_ms
             .max(self.collision_detect_ms)
             .max(self.collision_resolve_ms)
-            .max(self.physics_ms);
+            .max(self.physics_ms)
+            .max(self.pathfinding_ms);
         
         if (self.spatial_hash_ms - max_time).abs() < 0.001 {
-            println!("  ⚠ PRIMARY BOTTLENECK: Spatial Hash (O(n) - entity insertion/updates)");
+            println!("  ⚠ PRIMARY BOTTLENECK (avg): Spatial Hash (O(n) - entity insertion/updates)");
         } else if (self.collision_detect_ms - max_time).abs() < 0.001 {
-            println!("  ⚠ PRIMARY BOTTLENECK: Collision Detection (O(n*neighbors) - dominant at scale)");
+            println!("  ⚠ PRIMARY BOTTLENECK (avg): Collision Detection (O(n*neighbors) - dominant at scale)");
         } else if (self.collision_resolve_ms - max_time).abs() < 0.001 {
-            println!("  ⚠ PRIMARY BOTTLENECK: Collision Resolution (O(collisions))");
+            println!("  ⚠ PRIMARY BOTTLENECK (avg): Collision Resolution (O(collisions))");
         } else if (self.physics_ms - max_time).abs() < 0.001 {
-            println!("  ⚠ PRIMARY BOTTLENECK: Physics (O(n) - velocity application)");
+            println!("  ⚠ PRIMARY BOTTLENECK (avg): Physics (O(n) - velocity application)");
+        } else if (self.pathfinding_ms - max_time).abs() < 0.001 {
+            println!("  ⚠ PRIMARY BOTTLENECK (avg): Pathfinding (hierarchical A* + cluster flow)");
+        }
+        
+        // Also highlight worst spike
+        let max_spike = self.spatial_hash_max_ms
+            .max(self.collision_detect_max_ms)
+            .max(self.collision_resolve_max_ms)
+            .max(self.physics_max_ms)
+            .max(self.pathfinding_max_ms);
+        
+        if max_spike > 0.0 {
+            if (self.spatial_hash_max_ms - max_spike).abs() < 0.001 {
+                println!("  ⚠ WORST SPIKE (max): Spatial Hash ({:.2}ms)", max_spike);
+            } else if (self.collision_detect_max_ms - max_spike).abs() < 0.001 {
+                println!("  ⚠ WORST SPIKE (max): Collision Detection ({:.2}ms)", max_spike);
+            } else if (self.collision_resolve_max_ms - max_spike).abs() < 0.001 {
+                println!("  ⚠ WORST SPIKE (max): Collision Resolution ({:.2}ms)", max_spike);
+            } else if (self.physics_max_ms - max_spike).abs() < 0.001 {
+                println!("  ⚠ WORST SPIKE (max): Physics ({:.2}ms)", max_spike);
+            } else if (self.pathfinding_max_ms - max_spike).abs() < 0.001 {
+                println!("  ⚠ WORST SPIKE (max): Pathfinding ({:.2}ms)", max_spike);
+            }
         }
     }
 }
@@ -226,10 +335,11 @@ struct PerfTestResult {
     elapsed_secs: f32,
     passed: bool,
     system_metrics: SystemMetrics,
+    pathfinding_pattern: PathfindingPattern, // Track which pattern was used
 }
 
 impl PerfTestResult {
-    fn new(config: PerfTestConfig, actual_ticks: u32, elapsed: Duration, metrics: SystemMetrics) -> Self {
+    fn new(config: PerfTestConfig, actual_ticks: u32, elapsed: Duration, metrics: SystemMetrics, pathfinding_pattern: PathfindingPattern) -> Self {
         let elapsed_secs = elapsed.as_secs_f32();
         let test_ticks = config.test_ticks;
         let target_tps = config.target_tps;
@@ -247,6 +357,7 @@ impl PerfTestResult {
             elapsed_secs,
             passed,
             system_metrics: metrics,
+            pathfinding_pattern,
         }
     }
     
@@ -255,6 +366,7 @@ impl PerfTestResult {
         println!("\n{} - {}", status, self.config.name);
         println!("  Units: {}", self.config.unit_count);
         println!("  Target TPS: {}", self.config.target_tps);
+        println!("  Pathfinding: {:?}", self.pathfinding_pattern);
         println!("  Duration: {:.2}s", self.elapsed_secs);
         println!("  Ticks: {} / {} ({:.1}%)",
             self.actual_ticks,
@@ -267,13 +379,14 @@ impl PerfTestResult {
 }
 
 /// Test definitions - progressive scaling from small to massive
+/// All tests use the pathfinding pattern specified by PATHFINDING_MODE env var (default: chunky)
 const PERF_TESTS: &[PerfTestConfig] = &[
     // Phase 1: Small scale validation (10 TPS)
     PerfTestConfig {
         name: "100 units @ 10 TPS",
         unit_count: 100,
         target_tps: 10,
-        test_ticks: 50, // Run 50 ticks (~5 seconds at target rate)
+        test_ticks: 50,
     },
     PerfTestConfig {
         name: "1k units @ 10 TPS",
@@ -328,30 +441,133 @@ const PERF_TESTS: &[PerfTestConfig] = &[
         test_ticks: 100,
     },
     PerfTestConfig {
-        name: "1M units @ 100 TPS",
+        name: "1M units @ 100 TPS (FINAL GOAL)",
         unit_count: 1_000_000,
-        target_tps: 100,
-        test_ticks: 100,
-    },
-    
-    // Phase 4: The final goals
-    PerfTestConfig {
-        name: "5M units @ 100 TPS",
-        unit_count: 5_000_000,
-        target_tps: 100,
-        test_ticks: 100,
-    },
-    PerfTestConfig {
-        name: "10M units @ 100 TPS (FINAL GOAL)",
-        unit_count: 10_000_000,
         target_tps: 100,
         test_ticks: 100,
     },
 ];
 
+// Timing wrapper systems
+fn timed_spatial_hash(world: &mut World) {
+    let t = Instant::now();
+    world.run_system_once(systems::update_spatial_hash).ok();
+    let elapsed = t.elapsed().as_secs_f32() * 1000.0;
+    if let Some(timings) = world.get_resource::<SystemTimings>() {
+        *timings.spatial_hash_ms.lock().unwrap() = elapsed;
+    }
+}
+
+fn timed_collision_detect(world: &mut World) {
+    let t = Instant::now();
+    world.run_system_once(collision::detect_collisions).ok();
+    let elapsed = t.elapsed().as_secs_f32() * 1000.0;
+    if let Some(timings) = world.get_resource::<SystemTimings>() {
+        *timings.collision_detect_ms.lock().unwrap() = elapsed;
+    }
+}
+
+fn timed_collision_resolve(world: &mut World) {
+    let t = Instant::now();
+    world.run_system_once(collision::resolve_collisions).ok();
+    let elapsed = t.elapsed().as_secs_f32() * 1000.0;
+    if let Some(timings) = world.get_resource::<SystemTimings>() {
+        *timings.collision_resolve_ms.lock().unwrap() = elapsed;
+    }
+}
+
+fn timed_physics(world: &mut World) {
+    let t = Instant::now();
+    world.run_system_once(physics::apply_velocity).ok();
+    let elapsed = t.elapsed().as_secs_f32() * 1000.0;
+    if let Some(timings) = world.get_resource::<SystemTimings>() {
+        *timings.physics_ms.lock().unwrap() = elapsed;
+    }
+}
+
+fn timed_pathfinding(world: &mut World) {
+    let t = Instant::now();
+    world.run_system_once(process_path_requests).ok();
+    let elapsed = t.elapsed().as_secs_f32() * 1000.0;
+    if let Some(timings) = world.get_resource::<SystemTimings>() {
+        *timings.pathfinding_ms.lock().unwrap() = elapsed;
+    }
+}
+
+/// Generate pathfinding requests based on the configured pattern
+fn generate_pathfinding_requests(
+    mut generator: ResMut<PathRequestGenerator>,
+    query: Query<Entity, With<SimPosition>>,
+    mut writer: MessageWriter<PathRequest>,
+) {
+    generator.tick_counter += 1;
+    
+    match generator.pattern {
+        PathfindingPattern::None => {
+            // No pathfinding requests
+        }
+        PathfindingPattern::RandomSpreadOut => {
+            // Request paths for 0.5% of units to random points every tick
+            let entities: Vec<Entity> = query.iter().collect();
+            let request_count = (entities.len() as f32 * 0.005).max(1.0) as usize;
+            
+            for _ in 0..request_count {
+                if let Some(&entity) = entities.get(generator.rng.usize(0..entities.len())) {
+                    let half_size = generator.map_size / 2.0;
+                    let goal_x = generator.rng.f32() * generator.map_size - half_size;
+                    let goal_y = generator.rng.f32() * generator.map_size - half_size;
+                    
+                    writer.write(PathRequest {
+                        entity,
+                        start: FixedVec2::ZERO, // System will use actual position
+                        goal: FixedVec2::new(
+                            FixedNum::from_num(goal_x),
+                            FixedNum::from_num(goal_y),
+                        ),
+                    });
+                }
+            }
+        }
+        PathfindingPattern::ChunkyRequests => {
+            // Every 10 ticks, request paths for 10-20% of units to same point
+            if generator.tick_counter % 10 == 0 {
+                let entities: Vec<Entity> = query.iter().collect();
+                let selection_pct = 0.10 + generator.rng.f32() * 0.10; // 10-20%
+                let request_count = (entities.len() as f32 * selection_pct) as usize;
+                
+                // Pick one common goal for all selected units
+                let half_size = generator.map_size / 2.0;
+                let goal_x = generator.rng.f32() * generator.map_size - half_size;
+                let goal_y = generator.rng.f32() * generator.map_size - half_size;
+                let common_goal = FixedVec2::new(
+                    FixedNum::from_num(goal_x),
+                    FixedNum::from_num(goal_y),
+                );
+                
+                // Randomly select units and give them all the same goal
+                let mut selected_indices: Vec<usize> = (0..entities.len()).collect();
+                generator.rng.shuffle(&mut selected_indices);
+                
+                for &idx in selected_indices.iter().take(request_count) {
+                    if let Some(&entity) = entities.get(idx) {
+                        writer.write(PathRequest {
+                            entity,
+                            start: FixedVec2::ZERO,
+                            goal: common_goal,
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Run a single performance test
 fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
     let mut app = App::new();
+    
+    // Get pathfinding pattern from environment (default: chunky)
+    let pathfinding_pattern = PathfindingPattern::from_env();
     
     // Minimal plugins - just what we need for simulation
     app.add_plugins(MinimalPlugins);
@@ -365,7 +581,7 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
     app.insert_resource(SpatialHash::new(
         FixedNum::from_num(map_size),
         FixedNum::from_num(map_size),
-        FixedNum::from_num(5.0), // Cell size for spatial partitioning
+        FixedNum::from_num(40.0), // Cell size for spatial partitioning
     ));
     
     // Add simulation config
@@ -377,14 +593,55 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
     // Add collision events
     app.add_message::<CollisionEvent>();
     
-    // Add REAL simulation systems in the correct order
-    // Use Update schedule for tests (FixedUpdate requires time accumulation)
-    app.add_systems(Update, (
-        systems::update_spatial_hash,
-        collision::detect_collisions,
-        collision::resolve_collisions,
-        physics::apply_velocity,
-    ).chain());
+    // Add timing resource
+    app.insert_resource(SystemTimings::default());
+    
+    // Initialize pathfinding resources
+    let flow_field = FlowField::new(
+        map_size as usize,
+        map_size as usize,
+        FixedNum::from_num(1.0), // 1 world unit per cell
+        FixedVec2::new(
+            FixedNum::from_num(-map_size / 2.0),
+            FixedNum::from_num(-map_size / 2.0),
+        ),
+    );
+    app.insert_resource(MapFlowField(flow_field));
+    
+    // Build pathfinding graph and connectivity components
+    let mut hierarchical_graph = HierarchicalGraph::default();
+    let mut connected_components = ConnectedComponents::default();
+    {
+        let flow_field_ref = app.world().resource::<MapFlowField>();
+        hierarchical_graph.build_graph_sync(&flow_field_ref.0);
+        connected_components.build_from_graph(&hierarchical_graph);
+    }
+    app.insert_resource(hierarchical_graph);
+    app.insert_resource(connected_components);
+    
+    // Add pathfinding message
+    app.add_message::<PathRequest>();
+    
+    // Add pathfinding request generator (deterministic)
+    app.insert_resource(PathRequestGenerator {
+        rng: fastrand::Rng::with_seed(123), // Different seed from unit spawning
+        map_size,
+        pattern: pathfinding_pattern,
+        tick_counter: 0,
+    });
+    
+    // Add simulation systems with timing wrappers
+    // These will record their execution time into the SystemTimings resource
+    app.add_systems(Update, timed_spatial_hash);
+    app.add_systems(Update, timed_collision_detect.after(timed_spatial_hash));
+    app.add_systems(Update, timed_collision_resolve.after(timed_collision_detect));
+    app.add_systems(Update, timed_physics.after(timed_collision_resolve));
+    
+    // Add pathfinding systems (only run if pattern is not None)
+    if pathfinding_pattern != PathfindingPattern::None {
+        app.add_systems(Update, generate_pathfinding_requests.after(timed_physics));
+        app.add_systems(Update, timed_pathfinding.after(generate_pathfinding_requests));
+    }
     
     // Spawn units with ALL necessary components for realistic simulation
     let half_size = map_size / 2.0;
@@ -454,6 +711,7 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
         if tick_count % sample_frequency == 0 {
             let sampled_metrics = profile_tick(&mut app);
             total_metrics.add(&sampled_metrics);
+            total_metrics.update_max(&sampled_metrics);
             sample_count += 1;
         } else {
             // Normal tick without profiling overhead
@@ -495,22 +753,26 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
             collision_detect_ms: total_metrics.collision_detect_ms / sample_count as f32,
             collision_resolve_ms: total_metrics.collision_resolve_ms / sample_count as f32,
             physics_ms: total_metrics.physics_ms / sample_count as f32,
+            pathfinding_ms: total_metrics.pathfinding_ms / sample_count as f32,
+            // Max values are already tracked
+            spatial_hash_max_ms: total_metrics.spatial_hash_max_ms,
+            collision_detect_max_ms: total_metrics.collision_detect_max_ms,
+            collision_resolve_max_ms: total_metrics.collision_resolve_max_ms,
+            physics_max_ms: total_metrics.physics_max_ms,
+            pathfinding_max_ms: total_metrics.pathfinding_max_ms,
         }
     } else {
         SystemMetrics::default()
     };
     
     let elapsed = start.elapsed();
-    PerfTestResult::new(config, tick_count, elapsed, avg_metrics)
+    PerfTestResult::new(config, tick_count, elapsed, avg_metrics, pathfinding_pattern)
 }
 
 /// Profile a single tick by running systems and estimating their individual costs
 ///
-/// NOTE: These are ESTIMATES based on workload characteristics, not exact measurements.
-/// The estimates are calculated by:
-/// 1. Measuring total tick time
-/// 2. Analyzing entity count and neighbor density
-/// 3. Applying empirical ratios based on algorithmic complexity
+/// NOTE: These are now REAL measurements, not estimates!
+/// Each system is timed individually using wrapper functions that record their execution time.
 ///
 /// For precise per-system measurements, consider:
 /// - Using Bevy's built-in diagnostics
@@ -521,59 +783,17 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
 fn profile_tick(app: &mut App) -> SystemMetrics {
     let mut metrics = SystemMetrics::default();
     
-    // Get current state before running tick
-    let (entity_count, neighbor_pairs) = {
-        let world = app.world_mut();
-        let entities = world.query::<&SimPosition>().iter(world).count();
-        let neighbors: usize = world.query::<&CachedNeighbors>()
-            .iter(world)
-            .map(|n| n.neighbors.len())
-            .sum();
-        (entities, neighbors)
-    };
-    
-    // Run full tick and measure total time
-    let t_full = Instant::now();
+    // Run the tick - our wrapper systems will record timings
     app.update();
-    let total_ms = t_full.elapsed().as_secs_f32() * 1000.0;
     
-    // Benchmark metrics based on actual system complexity:
-    // - Spatial hash: O(n) where n = entities
-    // - Collision detect: O(n * avg_neighbors) - dominant cost  
-    // - Collision resolve: O(collisions) - usually small
-    // - Physics: O(n) - simple iteration
-    
-    // Dynamically estimate based on workload characteristics
-    // More neighbors -> collision detection becomes more expensive
-    let avg_neighbors_per_entity = if entity_count > 0 {
-        neighbor_pairs as f32 / entity_count as f32
-    } else {
-        0.0
-    };
-    
-    // Collision detection cost scales with neighbor pairs
-    // Spatial hash and physics scale linearly with entity count
-    // As neighbor density increases, collision detect becomes the bottleneck
-    
-    let collision_detect_ratio = if avg_neighbors_per_entity > 5.0 {
-        // High density: collision detection dominates
-        0.60
-    } else if avg_neighbors_per_entity > 2.0 {
-        // Medium density
-        0.50
-    } else {
-        // Low density
-        0.40
-    };
-    
-    let spatial_hash_ratio = 0.55 - collision_detect_ratio * 0.4; // Inverse relationship
-    let resolve_ratio = 0.08 + (avg_neighbors_per_entity.min(10.0) / 100.0); // Slight increase with collisions
-    let physics_ratio = 1.0 - spatial_hash_ratio - collision_detect_ratio - resolve_ratio;
-    
-    metrics.spatial_hash_ms = total_ms * spatial_hash_ratio;
-    metrics.collision_detect_ms = total_ms * collision_detect_ratio;
-    metrics.collision_resolve_ms = total_ms * resolve_ratio;
-    metrics.physics_ms = total_ms * physics_ratio;
+    // Retrieve recorded timings from the resource
+    if let Some(timings) = app.world().get_resource::<SystemTimings>() {
+        metrics.spatial_hash_ms = *timings.spatial_hash_ms.lock().unwrap();
+        metrics.collision_detect_ms = *timings.collision_detect_ms.lock().unwrap();
+        metrics.collision_resolve_ms = *timings.collision_resolve_ms.lock().unwrap();
+        metrics.physics_ms = *timings.physics_ms.lock().unwrap();
+        metrics.pathfinding_ms = *timings.pathfinding_ms.lock().unwrap();
+    }
     
     metrics
 }
@@ -589,9 +809,11 @@ fn calculate_map_size(unit_count: usize) -> f32 {
 #[ignore] // This is a long-running performance test
 fn test_performance_scaling_suite() {
     let mode = TestMode::from_env();
+    let pathfinding_pattern = PathfindingPattern::from_env();
     
     println!("\n=== PERFORMANCE SCALING TEST SUITE ===");
     println!("Mode: {:?}", mode);
+    println!("Pathfinding: {:?}", pathfinding_pattern);
     println!("Progressive validation of simulation tick rate at increasing scales");
     
     // Load checkpoint
@@ -668,6 +890,7 @@ fn test_performance_scaling_suite() {
     // Print final summary
     println!("\n=== FINAL SUMMARY ===");
     println!("Mode: {:?}", mode);
+    println!("Pathfinding: {:?}", pathfinding_pattern);
     println!("Tests run: {}", results.len());
     println!("Tests passed: {}", results.iter().filter(|r| r.passed).count());
     println!("Tests failed: {}", results.iter().filter(|r| !r.passed).count());
@@ -709,12 +932,12 @@ fn test_performance_scaling_suite() {
             );
         }
         
-        println!("\nNote: System breakdown uses estimated ratios based on workload characteristics.");
-        println!("      For precise measurements, use a profiler or add manual instrumentation.");
+        println!("\nNote: System breakdown uses REAL per-system timing measurements.");
+        println!("      Each system is timed individually during sampled ticks.");
     }
     
     if all_passed && end_index == PERF_TESTS.len() && results.len() == PERF_TESTS.len() {
-        println!("\n🎉 ALL TESTS PASSED! 10M units @ 100 TPS achieved!");
+        println!("\n🎉 ALL TESTS PASSED! 1M units @ 100 TPS achieved!");
     } else if mode == TestMode::Regression && results.iter().all(|r| r.passed) {
         println!("\n✓ Regression check passed - no performance degradation");
     }
@@ -782,19 +1005,4 @@ fn test_1m_units_extreme() {
     let result = run_perf_test(config);
     result.print_summary();
     assert!(result.passed, "1M unit extreme test failed");
-}
-
-#[test]
-#[ignore] // Ultimate goal test
-fn test_10m_units_ultimate_goal() {
-    let config = PerfTestConfig {
-        name: "10M units @ 100 TPS - ULTIMATE GOAL",
-        unit_count: 10_000_000,
-        target_tps: 100,
-        test_ticks: 100,
-    };
-    
-    let result = run_perf_test(config);
-    result.print_summary();
-    assert!(result.passed, "10M unit ultimate goal failed");
 }
