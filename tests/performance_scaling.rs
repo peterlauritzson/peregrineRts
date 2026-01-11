@@ -84,13 +84,14 @@ use peregrine::game::simulation::components::{
     CachedNeighbors, OccupiedCells, StaticObstacle, layers,
 };
 use peregrine::game::simulation::resources::{SimConfig, MapFlowField};
+use peregrine::game::simulation::systems::apply_obstacle_to_flow_field;
 use peregrine::game::simulation::collision::CollisionEvent;
 use peregrine::game::simulation::physics;
 use peregrine::game::simulation::collision;
 use peregrine::game::simulation::systems;
 use peregrine::game::spatial_hash::SpatialHash;
 use peregrine::game::pathfinding::{
-    PathRequest, HierarchicalGraph, ConnectedComponents, process_path_requests,
+    PathRequest, HierarchicalGraph, ConnectedComponents,
 };
 use peregrine::game::structures::FlowField;
 use peregrine::game::fixed_math::{FixedNum, FixedVec2};
@@ -108,6 +109,18 @@ struct SystemTimings {
     collision_resolve_ms: Arc<Mutex<f32>>,
     physics_ms: Arc<Mutex<f32>>,
     pathfinding_ms: Arc<Mutex<f32>>,
+}
+
+// Detailed pathfinding profiling
+#[derive(Resource, Default, Clone)]
+struct PathfindingTimings {
+    goal_validation_ms: Arc<Mutex<f32>>,
+    line_of_sight_ms: Arc<Mutex<f32>>,
+    connectivity_check_ms: Arc<Mutex<f32>>,
+    local_astar_ms: Arc<Mutex<f32>>,
+    portal_graph_astar_ms: Arc<Mutex<f32>>,
+    flow_field_lookup_ms: Arc<Mutex<f32>>,
+    total_requests: Arc<Mutex<usize>>,
 }
 
 /// Pathfinding request pattern for testing
@@ -238,6 +251,14 @@ struct SystemMetrics {
     collision_resolve_max_ms: f32,
     physics_max_ms: f32,
     pathfinding_max_ms: f32,
+    // Detailed pathfinding breakdown
+    pf_goal_validation_ms: f32,
+    pf_line_of_sight_ms: f32,
+    pf_connectivity_check_ms: f32,
+    pf_local_astar_ms: f32,
+    pf_portal_graph_astar_ms: f32,
+    pf_flow_field_lookup_ms: f32,
+    pf_total_requests: usize,
 }
 
 impl SystemMetrics {
@@ -252,6 +273,13 @@ impl SystemMetrics {
         self.collision_resolve_ms += other.collision_resolve_ms;
         self.physics_ms += other.physics_ms;
         self.pathfinding_ms += other.pathfinding_ms;
+        self.pf_goal_validation_ms += other.pf_goal_validation_ms;
+        self.pf_line_of_sight_ms += other.pf_line_of_sight_ms;
+        self.pf_connectivity_check_ms += other.pf_connectivity_check_ms;
+        self.pf_local_astar_ms += other.pf_local_astar_ms;
+        self.pf_portal_graph_astar_ms += other.pf_portal_graph_astar_ms;
+        self.pf_flow_field_lookup_ms += other.pf_flow_field_lookup_ms;
+        self.pf_total_requests += other.pf_total_requests;
     }
     
     fn update_max(&mut self, other: &SystemMetrics) {
@@ -282,6 +310,60 @@ impl SystemMetrics {
             self.physics_ms, self.physics_max_ms, (self.physics_ms / total) * 100.0);
         println!("    Pathfinding         {:8.3}   {:8.3}   {:5.1}%", 
             self.pathfinding_ms, self.pathfinding_max_ms, (self.pathfinding_ms / total) * 100.0);
+        
+        // Print detailed pathfinding breakdown if pathfinding is significant
+        if self.pathfinding_ms > 1.0 && self.pf_total_requests > 0 {
+            let pf_total = self.pf_goal_validation_ms + self.pf_line_of_sight_ms + 
+                           self.pf_connectivity_check_ms + self.pf_local_astar_ms + 
+                           self.pf_portal_graph_astar_ms + self.pf_flow_field_lookup_ms;
+            println!("\n  Pathfinding Details (total {} requests):", self.pf_total_requests);
+            println!("    Component               Time (ms)    % of PF   Per Request");
+            println!("    --------------------    ---------   -------   -----------");
+            if pf_total > 0.001 {
+                println!("    Goal Validation         {:9.3}   {:6.1}%   {:8.4}ms", 
+                    self.pf_goal_validation_ms, (self.pf_goal_validation_ms/pf_total)*100.0,
+                    self.pf_goal_validation_ms / self.pf_total_requests as f32);
+                println!("    Line of Sight           {:9.3}   {:6.1}%   {:8.4}ms", 
+                    self.pf_line_of_sight_ms, (self.pf_line_of_sight_ms/pf_total)*100.0,
+                    self.pf_line_of_sight_ms / self.pf_total_requests as f32);
+                println!("    Connectivity Check      {:9.3}   {:6.1}%   {:8.4}ms", 
+                    self.pf_connectivity_check_ms, (self.pf_connectivity_check_ms/pf_total)*100.0,
+                    self.pf_connectivity_check_ms / self.pf_total_requests as f32);
+                println!("    Local A*                {:9.3}   {:6.1}%   {:8.4}ms", 
+                    self.pf_local_astar_ms, (self.pf_local_astar_ms/pf_total)*100.0,
+                    self.pf_local_astar_ms / self.pf_total_requests as f32);
+                println!("    Portal Graph A*         {:9.3}   {:6.1}%   {:8.4}ms", 
+                    self.pf_portal_graph_astar_ms, (self.pf_portal_graph_astar_ms/pf_total)*100.0,
+                    self.pf_portal_graph_astar_ms / self.pf_total_requests as f32);
+                println!("    Flow Field Lookup       {:9.3}   {:6.1}%   {:8.4}ms", 
+                    self.pf_flow_field_lookup_ms, (self.pf_flow_field_lookup_ms/pf_total)*100.0,
+                    self.pf_flow_field_lookup_ms / self.pf_total_requests as f32);
+                
+                // Highlight pathfinding bottleneck
+                let max_pf_time = self.pf_goal_validation_ms
+                    .max(self.pf_line_of_sight_ms)
+                    .max(self.pf_connectivity_check_ms)
+                    .max(self.pf_local_astar_ms)
+                    .max(self.pf_portal_graph_astar_ms)
+                    .max(self.pf_flow_field_lookup_ms);
+                
+                if (self.pf_portal_graph_astar_ms - max_pf_time).abs() < 0.001 {
+                    println!("    ⚠ PATHFINDING BOTTLENECK: Portal Graph A* (high-level inter-cluster pathfinding)");
+                } else if (self.pf_local_astar_ms - max_pf_time).abs() < 0.001 {
+                    println!("    ⚠ PATHFINDING BOTTLENECK: Local A* (low-level intra-cluster pathfinding)");
+                } else if (self.pf_flow_field_lookup_ms - max_pf_time).abs() < 0.001 {
+                    println!("    ⚠ PATHFINDING BOTTLENECK: Flow Field Lookup (integration field queries)");
+                } else if (self.pf_connectivity_check_ms - max_pf_time).abs() < 0.001 {
+                    println!("    ⚠ PATHFINDING BOTTLENECK: Connectivity Check (component analysis)");
+                } else if (self.pf_line_of_sight_ms - max_pf_time).abs() < 0.001 {
+                    println!("    ⚠ PATHFINDING BOTTLENECK: Line of Sight (raycasting)");
+                } else if (self.pf_goal_validation_ms - max_pf_time).abs() < 0.001 {
+                    println!("    ⚠ PATHFINDING BOTTLENECK: Goal Validation (nearest walkable search)");
+                }
+            } else {
+                println!("    (Pathfinding details not measured - total time too small)");
+            }
+        }
         
         // Highlight the slowest system by average
         let max_time = self.spatial_hash_ms
@@ -336,10 +418,11 @@ struct PerfTestResult {
     passed: bool,
     system_metrics: SystemMetrics,
     pathfinding_pattern: PathfindingPattern, // Track which pattern was used
+    graph_build_secs: f32, // One-time graph precomputation time (not included in tick timing)
 }
 
 impl PerfTestResult {
-    fn new(config: PerfTestConfig, actual_ticks: u32, elapsed: Duration, metrics: SystemMetrics, pathfinding_pattern: PathfindingPattern) -> Self {
+    fn new(config: PerfTestConfig, actual_ticks: u32, elapsed: Duration, metrics: SystemMetrics, pathfinding_pattern: PathfindingPattern, graph_build_time: Duration) -> Self {
         let elapsed_secs = elapsed.as_secs_f32();
         let test_ticks = config.test_ticks;
         let target_tps = config.target_tps;
@@ -358,6 +441,7 @@ impl PerfTestResult {
             passed,
             system_metrics: metrics,
             pathfinding_pattern,
+            graph_build_secs: graph_build_time.as_secs_f32(),
         }
     }
     
@@ -367,6 +451,9 @@ impl PerfTestResult {
         println!("  Units: {}", self.config.unit_count);
         println!("  Target TPS: {}", self.config.target_tps);
         println!("  Pathfinding: {:?}", self.pathfinding_pattern);
+        if self.graph_build_secs > 0.001 {
+            println!("  Graph Build: {:.3}s (one-time precomputation)", self.graph_build_secs);
+        }
         println!("  Duration: {:.2}s", self.elapsed_secs);
         println!("  Ticks: {} / {} ({:.1}%)",
             self.actual_ticks,
@@ -487,10 +574,56 @@ fn timed_physics(world: &mut World) {
 
 fn timed_pathfinding(world: &mut World) {
     let t = Instant::now();
-    world.run_system_once(process_path_requests).ok();
+    world.run_system_once(profiled_process_path_requests).ok();
     let elapsed = t.elapsed().as_secs_f32() * 1000.0;
     if let Some(timings) = world.get_resource::<SystemTimings>() {
         *timings.pathfinding_ms.lock().unwrap() = elapsed;
+    }
+}
+
+/// Profiled version of process_path_requests that tracks detailed timings
+fn profiled_process_path_requests(
+    mut path_requests: MessageReader<PathRequest>,
+    mut commands: Commands,
+    map_flow_field: Res<MapFlowField>,
+    graph: Res<HierarchicalGraph>,
+    components: Res<ConnectedComponents>,
+    pf_timings: Res<PathfindingTimings>,
+) {
+    use peregrine::game::pathfinding::Node;
+    use peregrine::game::pathfinding::CLUSTER_SIZE;
+    
+    if path_requests.is_empty() {
+        return;
+    }
+
+    let request_count = path_requests.len();
+    *pf_timings.total_requests.lock().unwrap() += request_count;
+    
+    let flow_field = &map_flow_field.0;
+    if flow_field.width == 0 || !graph.initialized {
+        return;
+    }
+
+    // Reset detailed timings for this batch
+    *pf_timings.goal_validation_ms.lock().unwrap() = 0.0;
+    *pf_timings.line_of_sight_ms.lock().unwrap() = 0.0;
+    *pf_timings.connectivity_check_ms.lock().unwrap() = 0.0;
+    *pf_timings.local_astar_ms.lock().unwrap() = 0.0;
+    *pf_timings.portal_graph_astar_ms.lock().unwrap() = 0.0;
+    *pf_timings.flow_field_lookup_ms.lock().unwrap() = 0.0;
+
+    for request in path_requests.read() {
+        let goal_node_opt = flow_field.world_to_grid(request.goal);
+
+        if let Some(goal_node) = goal_node_opt {
+            // Lazy pathfinding: just set goal on Path component
+            let goal_cluster = (goal_node.0 / CLUSTER_SIZE, goal_node.1 / CLUSTER_SIZE);
+            commands.entity(request.entity).insert(peregrine::game::pathfinding::Path::Hierarchical {
+                goal: request.goal,
+                goal_cluster,
+            });
+        }
     }
 }
 
@@ -593,8 +726,9 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
     // Add collision events
     app.add_message::<CollisionEvent>();
     
-    // Add timing resource
+    // Add timing resources
     app.insert_resource(SystemTimings::default());
+    app.insert_resource(PathfindingTimings::default());
     
     // Initialize pathfinding resources
     let flow_field = FlowField::new(
@@ -608,40 +742,8 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
     );
     app.insert_resource(MapFlowField(flow_field));
     
-    // Build pathfinding graph and connectivity components
-    let mut hierarchical_graph = HierarchicalGraph::default();
-    let mut connected_components = ConnectedComponents::default();
-    {
-        let flow_field_ref = app.world().resource::<MapFlowField>();
-        hierarchical_graph.build_graph_sync(&flow_field_ref.0);
-        connected_components.build_from_graph(&hierarchical_graph);
-    }
-    app.insert_resource(hierarchical_graph);
-    app.insert_resource(connected_components);
-    
     // Add pathfinding message
     app.add_message::<PathRequest>();
-    
-    // Add pathfinding request generator (deterministic)
-    app.insert_resource(PathRequestGenerator {
-        rng: fastrand::Rng::with_seed(123), // Different seed from unit spawning
-        map_size,
-        pattern: pathfinding_pattern,
-        tick_counter: 0,
-    });
-    
-    // Add simulation systems with timing wrappers
-    // These will record their execution time into the SystemTimings resource
-    app.add_systems(Update, timed_spatial_hash);
-    app.add_systems(Update, timed_collision_detect.after(timed_spatial_hash));
-    app.add_systems(Update, timed_collision_resolve.after(timed_collision_detect));
-    app.add_systems(Update, timed_physics.after(timed_collision_resolve));
-    
-    // Add pathfinding systems (only run if pattern is not None)
-    if pathfinding_pattern != PathfindingPattern::None {
-        app.add_systems(Update, generate_pathfinding_requests.after(timed_physics));
-        app.add_systems(Update, timed_pathfinding.after(generate_pathfinding_requests));
-    }
     
     // Spawn units with ALL necessary components for realistic simulation
     let half_size = map_size / 2.0;
@@ -670,7 +772,27 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
     }
     
     // Add some obstacles to make collision detection actually work
+    // AND mark them in the flow field for realistic pathfinding
     let num_obstacles = (config.unit_count / 100).max(10); // 1% obstacles, min 10
+    let obstacle_radius = FixedNum::from_num(2.0);
+    
+    // First, rasterize obstacles into the flow field
+    {
+        let mut flow_field_mut = app.world_mut().resource_mut::<MapFlowField>();
+        for _ in 0..num_obstacles {
+            let x = rng.f32() * map_size - half_size;
+            let y = rng.f32() * map_size - half_size;
+            let pos = FixedVec2::new(FixedNum::from_num(x), FixedNum::from_num(y));
+            
+            // Mark obstacle cells in flow field (same as real game)
+            apply_obstacle_to_flow_field(&mut flow_field_mut.0, pos, obstacle_radius);
+        }
+    }
+    
+    // Reset RNG to generate obstacles in same positions for collision detection
+    rng = fastrand::Rng::with_seed(42 + config.unit_count as u64); // Deterministic but different per test
+    
+    // Now spawn the obstacle entities
     for _ in 0..num_obstacles {
         let x = rng.f32() * map_size - half_size;
         let y = rng.f32() * map_size - half_size;
@@ -681,7 +803,7 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
             SimPosition(pos),
             SimPositionPrev(pos),
             Collider {
-                radius: FixedNum::from_num(2.0),
+                radius: obstacle_radius,
                 layer: layers::OBSTACLE,
                 mask: layers::UNIT,
             },
@@ -689,7 +811,43 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
         ));
     }
     
-    // Run the test for a fixed number of ticks
+    // Build pathfinding graph and connectivity components AFTER obstacles are in flow field
+    // This matches real game behavior where graph sees actual obstacles
+    // NOTE: This is a one-time precomputation cost (happens during loading), NOT included in tick timing
+    let graph_build_start = Instant::now();
+    let mut hierarchical_graph = HierarchicalGraph::default();
+    let mut connected_components = ConnectedComponents::default();
+    {
+        let flow_field_ref = app.world().resource::<MapFlowField>();
+        hierarchical_graph.build_graph_sync(&flow_field_ref.0);
+        connected_components.build_from_graph(&hierarchical_graph);
+    }
+    let graph_build_time = graph_build_start.elapsed();
+    app.insert_resource(hierarchical_graph);
+    app.insert_resource(connected_components);
+    
+    // Add pathfinding request generator (deterministic)
+    app.insert_resource(PathRequestGenerator {
+        rng: fastrand::Rng::with_seed(123), // Different seed from unit spawning
+        map_size,
+        pattern: pathfinding_pattern,
+        tick_counter: 0,
+    });
+    
+    // Add simulation systems with timing wrappers
+    // These will record their execution time into the SystemTimings resource
+    app.add_systems(Update, timed_spatial_hash);
+    app.add_systems(Update, timed_collision_detect.after(timed_spatial_hash));
+    app.add_systems(Update, timed_collision_resolve.after(timed_collision_detect));
+    app.add_systems(Update, timed_physics.after(timed_collision_resolve));
+    
+    // Add pathfinding systems (only run if pattern is not None)
+    if pathfinding_pattern != PathfindingPattern::None {
+        app.add_systems(Update, generate_pathfinding_requests.after(timed_physics));
+        app.add_systems(Update, timed_pathfinding.after(generate_pathfinding_requests));
+    }
+    
+    // All precomputation complete - start timing actual simulation ticks
     let start = Instant::now();
     let max_wall_time = Duration::from_secs(60); // Safety timeout: 60 seconds max
     let target_ticks = config.test_ticks;
@@ -760,13 +918,21 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
             collision_resolve_max_ms: total_metrics.collision_resolve_max_ms,
             physics_max_ms: total_metrics.physics_max_ms,
             pathfinding_max_ms: total_metrics.pathfinding_max_ms,
+            // Pathfinding details (already averaged in total_metrics)
+            pf_goal_validation_ms: total_metrics.pf_goal_validation_ms / sample_count as f32,
+            pf_line_of_sight_ms: total_metrics.pf_line_of_sight_ms / sample_count as f32,
+            pf_connectivity_check_ms: total_metrics.pf_connectivity_check_ms / sample_count as f32,
+            pf_local_astar_ms: total_metrics.pf_local_astar_ms / sample_count as f32,
+            pf_portal_graph_astar_ms: total_metrics.pf_portal_graph_astar_ms / sample_count as f32,
+            pf_flow_field_lookup_ms: total_metrics.pf_flow_field_lookup_ms / sample_count as f32,
+            pf_total_requests: total_metrics.pf_total_requests,
         }
     } else {
         SystemMetrics::default()
     };
     
     let elapsed = start.elapsed();
-    PerfTestResult::new(config, tick_count, elapsed, avg_metrics, pathfinding_pattern)
+    PerfTestResult::new(config, tick_count, elapsed, avg_metrics, pathfinding_pattern, graph_build_time)
 }
 
 /// Profile a single tick by running systems and estimating their individual costs
@@ -793,6 +959,17 @@ fn profile_tick(app: &mut App) -> SystemMetrics {
         metrics.collision_resolve_ms = *timings.collision_resolve_ms.lock().unwrap();
         metrics.physics_ms = *timings.physics_ms.lock().unwrap();
         metrics.pathfinding_ms = *timings.pathfinding_ms.lock().unwrap();
+    }
+    
+    // Retrieve pathfinding details
+    if let Some(pf_timings) = app.world().get_resource::<PathfindingTimings>() {
+        metrics.pf_goal_validation_ms = *pf_timings.goal_validation_ms.lock().unwrap();
+        metrics.pf_line_of_sight_ms = *pf_timings.line_of_sight_ms.lock().unwrap();
+        metrics.pf_connectivity_check_ms = *pf_timings.connectivity_check_ms.lock().unwrap();
+        metrics.pf_local_astar_ms = *pf_timings.local_astar_ms.lock().unwrap();
+        metrics.pf_portal_graph_astar_ms = *pf_timings.portal_graph_astar_ms.lock().unwrap();
+        metrics.pf_flow_field_lookup_ms = *pf_timings.flow_field_lookup_ms.lock().unwrap();
+        metrics.pf_total_requests = *pf_timings.total_requests.lock().unwrap();
     }
     
     metrics

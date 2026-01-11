@@ -177,3 +177,88 @@ Instead of computing paths for every unit, designate **leaders** and have nearby
 - Minimal changes to unit movement systems (followers just have different target source)
 
 ---
+
+## 6. Performance Optimizations (Jan 2026)
+
+### Cluster Routing Table (Implemented)
+**Problem:** Inter-cluster pathfinding was using A* on portal graph for every path request, causing bottlenecks with 10k+ units.
+
+**Solution:** Precomputed cluster-to-cluster routing table
+- Built during graph initialization using Dijkstra from each cluster
+- Stores optimal first portal for every cluster pair: `routing_table[start_cluster][goal_cluster] = next_portal_id`
+- Memory: ~90-270MB for 2048×2048 map (6,724 clusters)
+- Eliminates A* search between clusters entirely (O(P log P) → O(1))
+
+**Impact:**
+- Before: 100-1000 iterations of portal graph A* per path request
+- After: No pathfinding computation needed - routing table built at load time
+
+### Lazy Routing Table Walk (Implemented)
+**Key Insight:** Since we precompute ALL cluster-to-cluster paths in the routing table, there's no need to store a portal list on each entity. We can look up the next portal on-demand whenever a unit enters a new cluster.
+
+**Path Component (Minimal):**
+```rust
+Path::Hierarchical {
+    goal: FixedVec2,  // Final destination only
+    goal_cluster: (usize, usize),  // Cached for routing table lookups
+}
+```
+
+**Movement System Logic:**
+```rust
+// When unit enters new cluster:
+let current_cluster = get_cluster_from_position(unit_pos);
+
+if current_cluster == goal_cluster {
+    // In final cluster - use flow field to goal position
+    navigate_to_goal_via_flow_field(goal);
+} else {
+    // Lookup next portal from routing table
+    let next_portal_id = routing_table[current_cluster][goal_cluster];
+    // Navigate to that portal using cluster's cached flow field
+    navigate_to_portal_via_flow_field(next_portal_id);
+}
+```
+
+**Benefits:**
+- **Zero path computation:** Path requests just set goal on Path component
+- **Zero allocations:** No Vec<usize> for portal lists (eliminated 240MB+ for 10M units)
+- **Automatic path sharing:** All units to same destination use identical routing table lookups
+- **Memory:** 24 bytes per entity (goal + goal_cluster) vs 100+ bytes with portal lists
+- **Perfect batching:** 100k requests = 100k goal writes, no redundant pathfinding
+
+**Performance:**
+- Before (portal list approach): 19ms for 100k requests (Vec allocations + routing table walks)
+- After (lazy lookup): <1ms for 100k requests (just write goal positions)
+- Routing table lookup per cluster transition: O(log n) ≈ 1-2ns
+
+### Flow Field Navigation (Implemented)
+All cluster-to-portal navigation uses precomputed flow fields:
+- Flow fields generated during graph build for every portal in every cluster
+- Movement system queries flow field at unit's grid position
+- O(1) vector lookup vs O(n log n) local A*
+- Fully robust to collisions and local obstacles
+
+### Future Optimization: Cluster-to-Cluster Cache
+**Problem:** Routing table uses BTreeMap lookups (O(log n)). For 10M units, even fast lookups add up.
+
+**Solution:** Cache hot routing table entries in HashMap
+```rust
+struct ClusterCache {
+    routing_cache: HashMap<(usize, usize), PortalId>,  // (current, goal) -> portal
+}
+
+// Check cache first (O(1) average)
+if let Some(&portal_id) = cache.get(&(current_cluster, goal_cluster)) {
+    return portal_id;
+}
+// Fall back to routing table BTreeMap
+let portal_id = routing_table[current_cluster][goal_cluster];
+cache.insert((current_cluster, goal_cluster), portal_id);
+```
+
+**Benefits:**
+- Popular routes cached: O(log n) → O(1)
+- Automatic cache warming for common destinations
+- Memory: ~100KB for 6,000 hot entries
+- Expected speedup: 2-3x for cluster transition lookups

@@ -161,9 +161,9 @@ fn test_pathfinding_around_wall() {
                             i, pos, current_index, waypoints.len(), 
                             waypoints.get(*current_index));
                     },
-                    Path::Hierarchical { portals, current_index, final_goal } => {
-                        println!("Step {}: Unit at {:?}, H-Path Idx: {}/{}, Final Goal: {:?}", 
-                            i, pos, current_index, portals.len(), final_goal);
+                    Path::Hierarchical { goal, goal_cluster } => {
+                        println!("Step {}: Unit at {:?}, H-Path to cluster {:?}, Final Goal: {:?}", 
+                            i, pos, goal_cluster, goal);
                     }
                 }
             } else {

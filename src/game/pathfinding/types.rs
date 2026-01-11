@@ -22,9 +22,8 @@ pub enum Path {
     Direct(FixedVec2),
     LocalAStar { waypoints: Vec<FixedVec2>, current_index: usize },
     Hierarchical {
-        portals: Vec<usize>,
-        final_goal: FixedVec2,
-        current_index: usize,
+        goal: FixedVec2,
+        goal_cluster: (usize, usize),
     }
 }
 

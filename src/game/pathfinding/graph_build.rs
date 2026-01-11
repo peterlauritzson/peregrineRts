@@ -31,6 +31,7 @@ pub enum GraphBuildStep {
     FindingHorizontalPortals,
     ConnectingIntraCluster,
     PrecomputingFlowFields,
+    BuildingRoutingTable,
 }
 
 pub(super) fn start_graph_build(
@@ -256,11 +257,9 @@ pub(super) fn incremental_build_graph(
                     components.build_from_graph(&graph);
                     info!("Connected components built in {:?}", conn_start.elapsed());
                     
-                    build_state.step = GraphBuildStep::Done;
-                    loading_progress.progress = 1.0;
-                    let total_cached = graph.clusters.values().map(|c| c.flow_field_cache.len()).sum::<usize>();
-                    info!("=== GRAPH BUILD COMPLETE ===");
-                    info!("incremental_build_graph: Graph build COMPLETE! ({} cached flow fields)", total_cached);
+                    // Move to routing table build step
+                    build_state.step = GraphBuildStep::BuildingRoutingTable;
+                    loading_progress.progress = 0.95;
                     break;
                 }
             }
@@ -270,7 +269,20 @@ pub(super) fn incremental_build_graph(
                 info!("  Precomputed flow fields for {}/{} clusters - batch of {} took {:?}", 
                       end_idx, build_state.cluster_keys.len(), end_idx - start_idx, batch_duration);
             }
-            loading_progress.progress = 0.75 + 0.25 * (build_state.current_cluster_idx as f32 / build_state.cluster_keys.len() as f32);
+            loading_progress.progress = 0.75 + 0.20 * (build_state.current_cluster_idx as f32 / build_state.cluster_keys.len() as f32);
+        }
+        GraphBuildStep::BuildingRoutingTable => {
+            // Build cluster routing table for O(1) pathfinding between clusters
+            loading_progress.task = "Building Routing Table...".to_string();
+            info!("Building cluster routing table...");
+            graph.build_routing_table();
+            
+            build_state.step = GraphBuildStep::Done;
+            loading_progress.progress = 1.0;
+            loading_progress.task = "Done".to_string();
+            let total_cached = graph.clusters.values().map(|c| c.flow_field_cache.len()).sum::<usize>();
+            info!("=== GRAPH BUILD COMPLETE ===");
+            info!("incremental_build_graph: Graph build COMPLETE! ({} cached flow fields)", total_cached);
         }
         GraphBuildStep::Done => {}
     }

@@ -13,7 +13,7 @@ pub use types::{Path, PathRequest, Node, CLUSTER_SIZE, LocalFlowField, Portal};
 pub use graph::HierarchicalGraph;
 pub use components::ConnectedComponents;
 pub use graph_build::{GraphBuildState, GraphBuildStep, regenerate_cluster_flow_fields};
-pub use astar::find_path_hierarchical;
+// find_path_hierarchical is deprecated - use lazy routing table walk instead
 pub use systems::process_path_requests;
 
 use bevy::prelude::*;

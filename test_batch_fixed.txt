@@ -1,0 +1,7 @@
+﻿cargo :    Compiling peregrine v0.1.0 (C:\BevyGames\peregrine)
+At line:1 char:1
++ cargo test --release test_100k_units_stress -- --nocapture --test-thr ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling pe...ames\peregrine):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 

@@ -180,75 +180,63 @@ pub fn follow_path(
                 }
                 seek(pos.0, target, vel.0, &mut acc.0, speed, max_force);
             },
-            Path::Hierarchical { portals, final_goal, current_index } => {
-                if *current_index >= portals.len() {
-                     let delta = *final_goal - pos.0;
-                     if delta.length_squared() < threshold_sq {
-                         commands.entity(entity).remove::<Path>();
-                         acc.0 = acc.0 - vel.0 * sim_config.braking_force;
-                         continue;
-                     }
-                     seek(pos.0, *final_goal, vel.0, &mut acc.0, speed, max_force);
-                     continue;
-                }
-
-                let target_portal_id = portals[*current_index];
-                
+            Path::Hierarchical { goal, goal_cluster } => {
+                // Lazy routing table walk: lookup next portal on-demand
                 let current_grid = flow_field.world_to_grid(pos.0);
                 if let Some((gx, gy)) = current_grid {
                     let cx = gx / CLUSTER_SIZE;
                     let cy = gy / CLUSTER_SIZE;
-                    let current_cluster_id = (cx, cy);
+                    let current_cluster = (cx, cy);
                     
-                    if let Some(portal) = graph.nodes.get(target_portal_id) {
-                        if current_cluster_id != portal.cluster {
-                            if *current_index + 1 < portals.len() {
-                                let next_portal_id = portals[*current_index + 1];
-                                if let Some(next_portal) = graph.nodes.get(next_portal_id) {
-                                    if next_portal.cluster == current_cluster_id {
-                                        *current_index += 1;
+                    if current_cluster == *goal_cluster {
+                        // In final cluster - navigate directly to goal
+                        let delta = *goal - pos.0;
+                        if delta.length_squared() < threshold_sq {
+                            commands.entity(entity).remove::<Path>();
+                            acc.0 = acc.0 - vel.0 * sim_config.braking_force;
+                            continue;
+                        }
+                        seek(pos.0, *goal, vel.0, &mut acc.0, speed, max_force);
+                    } else {
+                        // Lookup next portal from routing table
+                        if let Some(next_portal_id) = graph.get_next_portal(current_cluster, *goal_cluster) {
+                            if let Some(portal) = graph.nodes.get(next_portal_id).cloned() {
+                                // Navigate to portal using cluster's flow field
+                                if let Some(cluster) = graph.clusters.get_mut(&current_cluster) {
+                                    let local_field = cluster.get_or_generate_flow_field(next_portal_id, &portal, flow_field);
+                                    
+                                    let min_x = cx * CLUSTER_SIZE;
+                                    let min_y = cy * CLUSTER_SIZE;
+                                    
+                                    if gx >= min_x && gy >= min_y {
+                                        let lx = gx - min_x;
+                                        let ly = gy - min_y;
+                                        let idx = ly * local_field.width + lx;
+                                        
+                                        if idx < local_field.vectors.len() {
+                                            let dir = local_field.vectors[idx];
+                                            if dir != FixedVec2::ZERO {
+                                                let desired_vel = dir * speed;
+                                                let steer = desired_vel - vel.0;
+                                                let steer_len_sq = steer.length_squared();
+                                                let final_steer = if steer_len_sq > max_force * max_force {
+                                                    steer.normalize() * max_force
+                                                } else {
+                                                    steer
+                                                };
+                                                acc.0 = acc.0 + final_steer;
+                                            } else {
+                                                let target_pos = flow_field.grid_to_world(portal.node.x, portal.node.y);
+                                                seek(pos.0, target_pos, vel.0, &mut acc.0, speed, max_force);
+                                            }
+                                        }
                                     }
+                                } else {
+                                    // Fallback: seek directly to portal
+                                    let target_pos = flow_field.grid_to_world(portal.node.x, portal.node.y);
+                                    seek(pos.0, target_pos, vel.0, &mut acc.0, speed, max_force);
                                 }
                             }
-                        }
-                        
-                        let target_portal_id = portals[*current_index];
-                        let portal = graph.nodes[target_portal_id].clone(); 
-                        
-                        if current_cluster_id == portal.cluster {
-                             if let Some(cluster) = graph.clusters.get_mut(&current_cluster_id) {
-                                 let local_field = cluster.get_or_generate_flow_field(target_portal_id, &portal, flow_field);
-                                 
-                                 let min_x = cx * CLUSTER_SIZE;
-                                 let min_y = cy * CLUSTER_SIZE;
-                                 
-                                 if gx >= min_x && gy >= min_y {
-                                     let lx = gx - min_x;
-                                     let ly = gy - min_y;
-                                     let idx = ly * local_field.width + lx;
-                                     
-                                     if idx < local_field.vectors.len() {
-                                         let dir = local_field.vectors[idx];
-                                         if dir != FixedVec2::ZERO {
-                                             let desired_vel = dir * speed;
-                                             let steer = desired_vel - vel.0;
-                                             let steer_len_sq = steer.length_squared();
-                                             let final_steer = if steer_len_sq > max_force * max_force {
-                                                 steer.normalize() * max_force
-                                             } else {
-                                                 steer
-                                             };
-                                             acc.0 = acc.0 + final_steer;
-                                         } else {
-                                             let target_pos = flow_field.grid_to_world(portal.node.x, portal.node.y);
-                                             seek(pos.0, target_pos, vel.0, &mut acc.0, speed, max_force);
-                                         }
-                                     }
-                                 }
-                             }
-                        } else {
-                            let target_pos = flow_field.grid_to_world(portal.node.x, portal.node.y);
-                            seek(pos.0, target_pos, vel.0, &mut acc.0, speed, max_force);
                         }
                     }
                 }

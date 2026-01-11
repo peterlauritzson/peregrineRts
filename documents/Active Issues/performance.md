@@ -103,6 +103,144 @@ Based on current scaling WITH REAL MEASUREMENTS:
 
 ---
 
+## 🔥 Pathfinding Bottleneck Analysis (Jan 11, 2026)
+
+### Performance Crisis at 100K Units
+
+**Test Configuration:** 100k units @ 50 TPS with chunky pathfinding (10-20% of units to same point every 10 ticks)
+
+#### Test Results
+
+| Scale | Target TPS | Actual TPS | Status | Pathfinding Time | Total Requests |
+|-------|------------|------------|--------|------------------|----------------|
+| 10k units | 50 | 163.6 | ✅ PASS | 14.4ms avg | 199,384 |
+| 100k units | 50 | 3.1 | ❌ FAIL | **1003ms avg** (4235ms spike!) | 2,089,498 |
+
+**Scaling Problem:** 71x increase in pathfinding time for only 10x increase in units = **super-linear scaling**
+
+#### Pathfinding System Breakdown
+
+Detailed profiling of individual path requests revealed:
+
+**Time Distribution (per path request @ 10k scale):**
+- **Portal Graph A*: ~9.4ms (100%)** ← PRIMARY BOTTLENECK
+- Goal Validation: <0.01ms (negligible)
+- Line of Sight: <0.01ms (negligible)
+- Connectivity Check: <0.01ms (negligible)
+- Local A* (intra-cluster): <0.01ms (negligible)
+- Flow Field Lookup: <0.01ms (negligible)
+
+**Root Cause: Portal Graph A* Dominates**
+
+The hierarchical pathfinding spends virtually ALL its time in the portal graph search phase - the high-level pathfinding between clusters.
+
+#### Why Portal Graph A* is Slow
+
+1. **Graph Size Scales with Map Size**
+   - Larger maps = more clusters = more portals
+   - 100k units requires ~632×632 map = massive portal graph
+   - Each path search explores many portals
+
+2. **No Path Caching**
+   - 10-20% of 100k units = 10k-20k requests to SAME GOAL every 10 ticks
+   - Every unit recalculates the same high-level path independently
+   - Massive redundant work in chunky scenarios
+
+3. **Potential Graph Structure Issues**
+   - May be exploring too many portals per search
+   - Heuristic might not be tight enough
+   - Closed set/visited checking overhead
+
+#### Request Volume Analysis
+
+**100k units test generated 2,089,498 total path requests:**
+- Test ran 100 ticks
+- Chunky requests every 10 ticks = 10 request waves
+- ~10-20k requests per wave (10-20% of 100k)
+- Expected: ~100k-200k total requests
+- **Actual: 2M+ requests** (10-20x higher than expected!)
+
+This suggests units are re-requesting paths frequently, possibly due to:
+- Path invalidation when goals change
+- Units reaching waypoints and requesting next segment
+- Path timeout/expiration causing re-requests
+
+### Optimization Strategies
+
+#### HIGH PRIORITY - Path Caching for Same Goals
+
+When many units request paths to the same destination:
+
+1. **Cache Portal Routes**
+   - Hash (start_cluster, goal_cluster) → portal_path
+   - Reuse high-level portal graph results
+   - Only compute local A* per unit (cheap)
+
+2. **Batch Path Requests**
+   - Group requests by goal cluster
+   - Compute portal path once per goal cluster
+   - Apply to all units in batch
+
+**Expected Impact:** Could reduce 10k-20k redundant searches to ~100 unique cluster-pair searches
+
+#### MEDIUM PRIORITY - Reduce Request Volume
+
+1. **Path Following Improvements**
+   - Increase path waypoint lookahead
+   - Reduce path invalidation triggers
+   - Add path replanning cooldown
+
+2. **Goal Stability**
+   - Deduplicate requests for same entity
+   - Filter out redundant re-requests
+
+#### LOW PRIORITY - Portal Graph Optimizations
+
+1. **Better Heuristic**
+   - Tighter underestimate for A* guidance
+   - Reduce portal exploration
+
+2. **Graph Pruning**
+   - Remove redundant portals
+   - Simplify portal connections
+
+3. **Parallel Pathfinding**
+   - Process multiple requests concurrently
+   - Use thread pool for pathfinding
+
+### Performance Projections
+
+**Current State (100k @ 50 TPS):**
+- 1003ms pathfinding per tick = 99.1% of total time
+- Actual: 3.1 TPS (failed - needs 50 TPS)
+
+**With Path Caching (estimated):**
+- Reduce 20k redundant searches to ~100 unique → 200x reduction
+- 1003ms / 200 = ~5ms per tick
+- New total tick time: ~9ms
+- Projected: **111 TPS** ✅ (passes 50 TPS target!)
+
+**Required for 1M units @ 100 TPS:**
+- Even with caching, need additional optimizations:
+  - Async pathfinding (separate thread pool)
+  - Portal graph simplification
+  - Request throttling/prioritization
+
+### Action Items
+
+- [ ] **CRITICAL:** Implement portal route caching for same-goal batches
+- [ ] Add path request deduplication
+- [ ] Investigate why 2M+ requests for 100k units (10-20x higher than expected)
+- [ ] Add pathfinding performance metrics to game logs
+- [ ] Profile portal graph search internals (iteration count, closed set size)
+- [ ] Consider async pathfinding thread pool for large batches
+
+**Related Code:**
+- [src/game/pathfinding/astar.rs](../../src/game/pathfinding/astar.rs) - `find_path_hierarchical` portal graph search
+- [src/game/pathfinding/systems.rs](../../src/game/pathfinding/systems.rs) - `process_path_requests` batch processing
+
+---
+
 ## 🔬 Spatial Hash Cell Size Impact Analysis (Jan 11, 2026)
 
 ### Test Configuration

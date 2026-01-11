@@ -241,100 +241,15 @@ pub fn draw_unit_paths(
                     current_pos = next_pos;
                 }
             },
-            Path::Hierarchical { portals, final_goal, current_index } => {
-                let mut trace_pos = FixedVec2::from_f32(current_pos.x, current_pos.z);
-                
-                for i in *current_index..portals.len() {
-                    let portal_id = portals[i];
-                    if let Some(portal) = nodes.get(portal_id) {
-                        // Handle cluster transition if needed
-                        let grid_pos_opt = flow_field.world_to_grid(trace_pos);
-                        if let Some((gx, gy)) = grid_pos_opt {
-                            let cx = gx / CLUSTER_SIZE;
-                            let cy = gy / CLUSTER_SIZE;
-                            
-                            if (cx, cy) != portal.cluster {
-                                // We are not in the correct cluster. Snap to entry portal if possible.
-                                if i > 0 {
-                                    let prev_id = portals[i-1];
-                                    if let Some(prev_portal) = nodes.get(prev_id) {
-                                        if prev_portal.cluster == portal.cluster {
-                                            let snap_pos = flow_field.grid_to_world(prev_portal.node.x, prev_portal.node.y);
-                                            gizmos.line(
-                                                Vec3::new(trace_pos.x.to_num(), 0.6, trace_pos.y.to_num()),
-                                                Vec3::new(snap_pos.x.to_num(), 0.6, snap_pos.y.to_num()),
-                                                Color::srgb(0.0, 1.0, 0.0)
-                                            );
-                                            trace_pos = snap_pos;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Get flow field for this portal
-                        if let Some(cluster) = graph.clusters.get(&portal.cluster) {
-                            let Some(ff) = cluster.get_flow_field(portal_id) else {
-                                // Flow field not available, skip visualization for this portal
-                                // (We don't generate on-demand for visualization to avoid mutations)
-                                continue;
-                            };
-                            
-                            // Trace
-                            let mut steps = 0;
-                            let max_steps = config.debug_path_trace_max_steps;
-                            let step_size = FixedNum::from_num(0.5);
-                            
-                            while steps < max_steps {
-                                let grid_pos_opt = flow_field.world_to_grid(trace_pos);
-                                if let Some((gx, gy)) = grid_pos_opt {
-                                    let cx = gx / CLUSTER_SIZE;
-                                    let cy = gy / CLUSTER_SIZE;
-                                    
-                                    if (cx, cy) != portal.cluster {
-                                        break;
-                                    }
-                                    
-                                    let min_x = portal.cluster.0 * CLUSTER_SIZE;
-                                    let min_y = portal.cluster.1 * CLUSTER_SIZE;
-                                    let lx = gx - min_x;
-                                    let ly = gy - min_y;
-                                    
-                                    if lx >= ff.width || ly >= ff.height { break; }
-                                    
-                                    let idx = ly * ff.width + lx;
-                                    let dir = ff.vectors[idx];
-                                    
-                                    if dir == FixedVec2::ZERO {
-                                        break;
-                                    }
-                                    
-                                    let next_trace_pos = trace_pos + dir * step_size;
-                                    
-                                    gizmos.line(
-                                        Vec3::new(trace_pos.x.to_num(), 0.6, trace_pos.y.to_num()),
-                                        Vec3::new(next_trace_pos.x.to_num(), 0.6, next_trace_pos.y.to_num()),
-                                        Color::srgb(0.0, 1.0, 0.0)
-                                    );
-                                    
-                                    trace_pos = next_trace_pos;
-                                } else {
-                                    break;
-                                }
-                                steps += 1;
-                            }
-                        }
-                    }
-                }
-                
-                // Draw line to final goal
-                let final_pos_vec = Vec3::new(final_goal.x.to_num(), 0.6, final_goal.y.to_num());
-                gizmos.line(
-                    Vec3::new(trace_pos.x.to_num(), 0.6, trace_pos.y.to_num()),
-                    final_pos_vec,
-                    Color::srgb(0.0, 1.0, 0.0)
+            Path::Hierarchical { goal, goal_cluster: _ } => {
+                // Just draw a line to the goal since we don't store portal list
+                let goal_pos_3d = Vec3::new(
+                    goal.x.to_num(),
+                    0.5,
+                    goal.y.to_num()
                 );
-                gizmos.sphere(final_pos_vec, 0.2, Color::srgb(0.0, 1.0, 0.0));
+                gizmos.line(current_pos, goal_pos_3d, Color::srgb(0.0, 1.0, 1.0));
+                gizmos.sphere(goal_pos_3d, 0.3, Color::srgb(0.0, 1.0, 1.0));
             }
         }
     }

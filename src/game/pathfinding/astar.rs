@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use std::collections::{BinaryHeap, BTreeMap, BTreeSet, VecDeque};
 use crate::game::fixed_math::{FixedVec2, FixedNum};
-use super::types::{Node, Path, State, GraphState, CLUSTER_SIZE};
+use super::types::{Node, Path, State, CLUSTER_SIZE};
 use super::graph::HierarchicalGraph;
 use super::components::ConnectedComponents;
 
@@ -290,134 +290,81 @@ pub fn find_path_hierarchical(
          }
     }
 
-    let mut open_set = BinaryHeap::new();
-    let mut came_from: BTreeMap<usize, usize> = BTreeMap::new();
-    let mut g_score: BTreeMap<usize, FixedNum> = BTreeMap::new();
-    let mut closed_set: BTreeSet<usize> = BTreeSet::new(); // Track visited portals to prevent cycles
-    
-    const MAX_PORTAL_ITERATIONS: usize = 1000; // Safety limit for portal graph A*
-    let mut iterations = 0;
-
-    // Add start node connections to graph
-    // Find portals in start cluster
-    let mut start_portals = Vec::new();
-    if let Some(cluster) = graph.clusters.get(&start_cluster) {
-        for &portal_id in &cluster.portals {
-            let portal_node = graph.nodes[portal_id].node;
-            
-            let mut cost = None;
-
-            // Try to use cached flow field
-            if let Some(local_field) = cluster.flow_field_cache.get(&portal_id) {
-                let lx = start.x.wrapping_sub(start_cluster.0 * CLUSTER_SIZE);
-                let ly = start.y.wrapping_sub(start_cluster.1 * CLUSTER_SIZE);
-                
-                if lx < local_field.width && ly < local_field.height {
-                    let idx = ly * local_field.width + lx;
-                    if let Some(&c) = local_field.integration_field.get(idx) {
-                        if c != u32::MAX {
-                            cost = Some(FixedNum::from_num(c));
-                        }
-                    }
-                }
+    // Use precomputed routing table to find path between clusters
+    // This replaces the A* search with O(1) lookups
+    let _portals = if start_cluster == actual_goal_cluster {
+        // Same cluster - find any portal in goal cluster to complete path
+        if let Some(cluster) = graph.clusters.get(&actual_goal_cluster) {
+            if let Some(&portal_id) = cluster.portals.first() {
+                vec![portal_id]
+            } else {
+                return None;
             }
-
-            // Fallback to A*
-            if cost.is_none() {
-                let min_x = start_cluster.0 * CLUSTER_SIZE;
-                let max_x = ((start_cluster.0 + 1) * CLUSTER_SIZE).min(flow_field.width) - 1;
-                let min_y = start_cluster.1 * CLUSTER_SIZE;
-                let max_y = ((start_cluster.1 + 1) * CLUSTER_SIZE).min(flow_field.height) - 1;
-
-                if let Some(path) = find_path_astar_local(start, portal_node, flow_field, min_x, max_x, min_y, max_y) {
-                    cost = Some(FixedNum::from_num(path.len() as f64));
-                }
-            }
-
-            if let Some(c) = cost {
-                g_score.insert(portal_id, c);
-                let h = heuristic(portal_node.x, portal_node.y, actual_goal.x, actual_goal.y, flow_field.cell_size);
-                open_set.push(GraphState { cost: c + h, portal_id });
-                start_portals.push(portal_id);
-            }
+        } else {
+            return None;
         }
-    }
-
-    let mut goal_portals = BTreeSet::new();
-    if let Some(cluster) = graph.clusters.get(&actual_goal_cluster) {
-        for &portal_id in &cluster.portals {
-            goal_portals.insert(portal_id);
-        }
-    }
-
-    let mut final_portal = None;
-
-    while let Some(GraphState { cost: _, portal_id: current_id }) = open_set.pop() {
-        iterations += 1;
+    } else {
+        // Different clusters - use routing table
+        let mut path_portals = Vec::new();
+        let mut current_cluster = start_cluster;
         
-        // Safety check
-        if iterations > MAX_PORTAL_ITERATIONS {
-            error!("[PATHFINDING] Portal graph A* exceeded max iterations ({}) - possible infinite loop!", MAX_PORTAL_ITERATIONS);
-            error!("  Start cluster: {:?}, Goal cluster: {:?}, Total portals: {}", start_cluster, goal_cluster, graph.nodes.len());
+        // Walk the routing table from start to goal
+        const MAX_HOPS: usize = 200; // Safety limit
+        for _ in 0..MAX_HOPS {
+            if current_cluster == actual_goal_cluster {
+                break;
+            }
+            
+            // Look up next portal to take from current cluster
+            if let Some(route_map) = graph.cluster_routing_table.get(&current_cluster) {
+                if let Some(&next_portal_id) = route_map.get(&actual_goal_cluster) {
+                    path_portals.push(next_portal_id);
+                    
+                    // This portal is in current_cluster. Find its connected portal in another cluster.
+                    // The edge from this portal leads to a portal in the next cluster.
+                    if let Some(edges) = graph.edges.get(&next_portal_id) {
+                        // Find an edge that takes us closer to goal
+                        let mut moved = false;
+                        for &(connected_portal_id, _cost) in edges {
+                            let connected_cluster = graph.nodes[connected_portal_id].cluster;
+                            if connected_cluster != current_cluster {
+                                // Move to this new cluster
+                                current_cluster = connected_cluster;
+                                moved = true;
+                                break;
+                            }
+                        }
+                        if !moved {
+                            warn!("[PATHFINDING] Portal {} has no edges to other clusters", next_portal_id);
+                            return None;
+                        }
+                    } else {
+                        warn!("[PATHFINDING] Portal {} has no edges", next_portal_id);
+                        return None;
+                    }
+                } else {
+                    // No route in table - clusters might be disconnected
+                    warn!("[PATHFINDING] No route in table from cluster {:?} to {:?}", current_cluster, actual_goal_cluster);
+                    return None;
+                }
+            } else {
+                warn!("[PATHFINDING] Cluster {:?} not found in routing table", current_cluster);
+                return None;
+            }
+        }
+        
+        if current_cluster != actual_goal_cluster {
+            error!("[PATHFINDING] Routing table walk exceeded MAX_HOPS ({}) - possible cycle!", MAX_HOPS);
             return None;
         }
         
-        // CRITICAL FIX: Skip if already visited (prevents cycles and re-processing)
-        if closed_set.contains(&current_id) {
-            continue;
-        }
-        closed_set.insert(current_id);
-        
-        if goal_portals.contains(&current_id) {
-            let portal_node = graph.nodes[current_id].node;
-            let min_x = actual_goal_cluster.0 * CLUSTER_SIZE;
-            let max_x = ((actual_goal_cluster.0 + 1) * CLUSTER_SIZE).min(flow_field.width) - 1;
-            let min_y = actual_goal_cluster.1 * CLUSTER_SIZE;
-            let max_y = ((actual_goal_cluster.1 + 1) * CLUSTER_SIZE).min(flow_field.height) - 1;
+        path_portals
+    };
 
-            if let Some(_) = find_path_astar_local(portal_node, actual_goal, flow_field, min_x, max_x, min_y, max_y) {
-                final_portal = Some(current_id);
-                break;
-            }
-        }
-
-        if let Some(neighbors) = graph.edges.get(&current_id) {
-            for &(neighbor_id, edge_cost) in neighbors {
-                // Skip if already visited
-                if closed_set.contains(&neighbor_id) {
-                    continue;
-                }
-                
-                let tentative_g = g_score[&current_id] + edge_cost;
-                if tentative_g < *g_score.get(&neighbor_id).unwrap_or(&FixedNum::MAX) {
-                    g_score.insert(neighbor_id, tentative_g);
-                    came_from.insert(neighbor_id, current_id);
-                    
-                    let neighbor_node = graph.nodes[neighbor_id].node;
-                    let h = heuristic(neighbor_node.x, neighbor_node.y, actual_goal.x, actual_goal.y, flow_field.cell_size);
-                    open_set.push(GraphState { cost: tentative_g + h, portal_id: neighbor_id });
-                }
-            }
-        }
-    }
-
-    if let Some(end_portal) = final_portal {
-        let mut portals = Vec::new();
-        let mut curr = end_portal;
-        portals.push(curr);
-        
-        while let Some(&prev) = came_from.get(&curr) {
-            curr = prev;
-            portals.push(curr);
-        }
-        portals.reverse();
-        
-        return Some(Path::Hierarchical {
-            portals,
-            final_goal: flow_field.grid_to_world(actual_goal.x, actual_goal.y),
-            current_index: 0,
-        });
-    }
-
-    None
+    // Return path - lazy routing table walk means we don't build portal list
+    // Just return the goal - movement system will look up portals on-demand
+    Some(Path::Hierarchical {
+        goal: flow_field.grid_to_world(actual_goal.x, actual_goal.y),
+        goal_cluster: (actual_goal.x / CLUSTER_SIZE, actual_goal.y / CLUSTER_SIZE),
+    })
 }
