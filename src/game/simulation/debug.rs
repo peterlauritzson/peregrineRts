@@ -205,19 +205,11 @@ fn should_draw_cluster(cluster_center: Vec2, camera_center: Vec2, view_radius: f
 pub fn draw_unit_paths(
     query: Query<(&Transform, &Path), With<crate::game::unit::Selected>>,
     debug_config: Res<DebugConfig>,
-    config_handle: Res<GameConfigHandle>,
-    game_configs: Res<Assets<GameConfig>>,
     mut gizmos: Gizmos,
-    map_flow_field: Res<MapFlowField>,
-    graph: Res<HierarchicalGraph>,
 ) {
     if !debug_config.show_paths {
         return;
     }
-    
-    let Some(config) = game_configs.get(&config_handle.0) else { return };
-    let flow_field = &map_flow_field.0;
-    let nodes = graph.nodes.clone();
 
     // Only visualize paths for selected units to avoid performance issues
     // With 10K units, drawing all paths would be 10K * max_steps iterations per frame
