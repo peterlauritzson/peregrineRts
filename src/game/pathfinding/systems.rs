@@ -2,14 +2,12 @@ use bevy::prelude::*;
 use crate::game::simulation::MapFlowField;
 use super::types::{PathRequest, CLUSTER_SIZE};
 use super::graph::HierarchicalGraph;
-use super::components::ConnectedComponents;
 
 pub fn process_path_requests(
     mut path_requests: MessageReader<PathRequest>,
     mut commands: Commands,
     map_flow_field: Res<MapFlowField>,
     graph: Res<HierarchicalGraph>,
-    _components: Res<ConnectedComponents>,
 ) {
     if path_requests.is_empty() {
         return;

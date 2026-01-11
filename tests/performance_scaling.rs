@@ -587,10 +587,8 @@ fn profiled_process_path_requests(
     mut commands: Commands,
     map_flow_field: Res<MapFlowField>,
     graph: Res<HierarchicalGraph>,
-    components: Res<ConnectedComponents>,
     pf_timings: Res<PathfindingTimings>,
 ) {
-    use peregrine::game::pathfinding::Node;
     use peregrine::game::pathfinding::CLUSTER_SIZE;
     
     if path_requests.is_empty() {

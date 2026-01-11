@@ -232,6 +232,58 @@ if current_cluster == goal_cluster {
 - After (lazy lookup): <1ms for 100k requests (just write goal positions)
 - Routing table lookup per cluster transition: O(log n) ≈ 1-2ns
 
+**⚠️ KNOWN LIMITATION: Unreachable Targets**
+
+**Current Behavior (Undefined):**
+If `routing_table[current_cluster][goal_cluster]` has no entry (clusters not connected), the movement system has undefined behavior. Units may:
+- Get stuck with no path
+- Panic if routing table lookup fails
+- Wander aimlessly
+- Continue trying to path forever
+
+**Why This Happens:**
+- Goal is on an island cut off by obstacles
+- Goal is inside an unwalkable obstacle
+- Map has disconnected regions (e.g., separate landmasses)
+- Dynamic obstacles created unreachable zones
+
+**Potential Solutions (Not Yet Implemented):**
+
+1. **Fail Gracefully (Simplest)**
+   - Return `None` from routing table lookup if no path exists
+   - Unit stops moving and clears Path component
+   - Pro: Simple, no unexpected behavior
+   - Con: Units give up rather than trying alternatives
+
+2. **ConnectedComponents Validation (Pre-check)**
+   - Use existing `ConnectedComponents` resource in `process_path_requests`
+   - Check if start and goal clusters are in same component before setting Path
+   - If unreachable, don't set Path component at all
+   - Pro: Fails fast, prevents wasted movement
+   - Con: Adds O(log n) lookup per path request
+
+3. **"Get As Close As Possible" Fallback**
+   - Use `ConnectedComponents::closest_cross_component` to find nearest reachable portal
+   - Redirect goal to closest point we CAN reach
+   - Pro: Units make progress toward unreachable goals
+   - Con: More complex, may confuse players when units stop short
+
+4. **Lazy Validation (On Movement)**
+   - Allow Path to be set even if unreachable
+   - Movement system detects missing routing table entry at cluster transition
+   - Fallback to direct navigation or stop with error message
+   - Pro: Zero cost until problem actually encountered
+   - Con: Units waste movement before discovering unreachability
+
+**Recommendation:**
+Start with **#1 (Fail Gracefully)** for robustness, then add **#2 (ConnectedComponents Pre-check)** if unreachable targets become a frequent issue. Option #3 could be added later for better UX in scenarios with dynamic obstacles.
+
+**TODO:**
+- [ ] Implement graceful failure when routing table has no entry
+- [ ] Add ConnectedComponents validation in process_path_requests (optional)
+- [ ] Test behavior with disconnected map regions
+- [ ] Consider player feedback for unreachable targets (UI indicator?)
+
 ### Flow Field Navigation (Implemented)
 All cluster-to-portal navigation uses precomputed flow fields:
 - Flow fields generated during graph build for every portal in every cluster
