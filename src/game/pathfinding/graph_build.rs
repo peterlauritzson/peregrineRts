@@ -19,6 +19,9 @@ pub struct GraphBuildState {
     pub cy: usize,
     pub cluster_keys: Vec<(usize, usize)>,
     pub current_cluster_idx: usize,
+    // Routing table build state
+    pub routing_source_clusters: Vec<(usize, usize)>,
+    pub routing_current_source_idx: usize,
 }
 
 #[derive(Default, PartialEq, Eq, Debug, Clone, Copy)]
@@ -233,7 +236,7 @@ pub(super) fn incremental_build_graph(
                 info!("  Connected {}/{} clusters - batch of {} took {:?}", 
                       end_idx, build_state.cluster_keys.len(), end_idx - start_idx, batch_duration);
             }
-            loading_progress.progress = 0.5 + 0.25 * (build_state.current_cluster_idx as f32 / build_state.cluster_keys.len() as f32);
+            loading_progress.progress = 0.40 + 0.20 * (build_state.current_cluster_idx as f32 / build_state.cluster_keys.len() as f32);
         }
         GraphBuildStep::PrecomputingFlowFields => {
             loading_progress.task = "Precomputing Flow Fields...".to_string();
@@ -257,9 +260,9 @@ pub(super) fn incremental_build_graph(
                     components.build_from_graph(&graph);
                     info!("Connected components built in {:?}", conn_start.elapsed());
                     
-                    // Move to routing table build step
+                    // Move to routing table build step (starts at 80%)
                     build_state.step = GraphBuildStep::BuildingRoutingTable;
-                    loading_progress.progress = 0.95;
+                    loading_progress.progress = 0.80;
                     break;
                 }
             }
@@ -269,20 +272,53 @@ pub(super) fn incremental_build_graph(
                 info!("  Precomputed flow fields for {}/{} clusters - batch of {} took {:?}", 
                       end_idx, build_state.cluster_keys.len(), end_idx - start_idx, batch_duration);
             }
-            loading_progress.progress = 0.75 + 0.20 * (build_state.current_cluster_idx as f32 / build_state.cluster_keys.len() as f32);
+            loading_progress.progress = 0.60 + 0.20 * (build_state.current_cluster_idx as f32 / build_state.cluster_keys.len() as f32);
         }
         GraphBuildStep::BuildingRoutingTable => {
-            // Build cluster routing table for O(1) pathfinding between clusters
+            // Build cluster routing table incrementally to avoid blocking
             loading_progress.task = "Building Routing Table...".to_string();
-            info!("Building cluster routing table...");
-            graph.build_routing_table();
             
-            build_state.step = GraphBuildStep::Done;
-            loading_progress.progress = 1.0;
-            loading_progress.task = "Done".to_string();
-            let total_cached = graph.clusters.values().map(|c| c.flow_field_cache.len()).sum::<usize>();
-            info!("=== GRAPH BUILD COMPLETE ===");
-            info!("incremental_build_graph: Graph build COMPLETE! ({} cached flow fields)", total_cached);
+            // Initialize routing table source cluster list on first entry
+            if build_state.routing_source_clusters.is_empty() {
+                build_state.routing_source_clusters = graph.clusters.keys().cloned().collect();
+                build_state.routing_current_source_idx = 0;
+                graph.cluster_routing_table.clear();
+                info!("Building cluster routing table for {} clusters...", build_state.routing_source_clusters.len());
+            }
+            
+            // Process routing table in batches to stay responsive
+            let batch_size = initial_config.pathfinding_build_batch_size;
+            let start_idx = build_state.routing_current_source_idx;
+            let batch_start = std::time::Instant::now();
+            
+            for _ in 0..batch_size {
+                if build_state.routing_current_source_idx < build_state.routing_source_clusters.len() {
+                    let source_cluster = build_state.routing_source_clusters[build_state.routing_current_source_idx];
+                    graph.build_routing_table_for_source(source_cluster);
+                    build_state.routing_current_source_idx += 1;
+                } else {
+                    // Routing table complete!
+                    build_state.step = GraphBuildStep::Done;
+                    loading_progress.progress = 1.0;
+                    loading_progress.task = "Done".to_string();
+                    
+                    let total_cached = graph.clusters.values().map(|c| c.flow_field_cache.len()).sum::<usize>();
+                    let total_routes: usize = graph.cluster_routing_table.values().map(|m| m.len()).sum();
+                    info!("=== GRAPH BUILD COMPLETE ===");
+                    info!("incremental_build_graph: Graph build COMPLETE! ({} cached flow fields, {} routing table entries)", total_cached, total_routes);
+                    break;
+                }
+            }
+            
+            let end_idx = build_state.routing_current_source_idx;
+            let batch_duration = batch_start.elapsed();
+            if end_idx > start_idx && end_idx % 50 == 0 {
+                info!("  Built routing table for {}/{} clusters - batch of {} took {:?}", 
+                      end_idx, build_state.routing_source_clusters.len(), end_idx - start_idx, batch_duration);
+            }
+            
+            // Progress: 80% to 100% during routing table build (20% of total)
+            loading_progress.progress = 0.80 + 0.20 * (build_state.routing_current_source_idx as f32 / build_state.routing_source_clusters.len() as f32);
         }
         GraphBuildStep::Done => {}
     }

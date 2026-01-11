@@ -181,28 +181,22 @@ impl HierarchicalGraph {
         self.initialized = true;
     }
 
-    /// Build cluster-to-cluster routing table using all-pairs shortest path.
-    /// For each cluster pair, stores the first portal to take from start toward goal.
-    /// This eliminates A* search between clusters at pathfinding time.
-    pub fn build_routing_table(&mut self) {
+    /// Build cluster-to-cluster routing table for a single source cluster.
+    /// Called incrementally during graph build to avoid blocking the UI.
+    /// For incremental building, call this once per source cluster across multiple frames.
+    pub fn build_routing_table_for_source(&mut self, source_cluster: (usize, usize)) {
         use std::collections::BinaryHeap;
-        
-        self.cluster_routing_table.clear();
         
         if self.clusters.is_empty() {
             return;
         }
         
-        info!("[ROUTING TABLE] Building cluster routing table for {} clusters...", self.clusters.len());
-        let start_time = std::time::Instant::now();
+        // Run Dijkstra from this source cluster to all other clusters
+        let mut distances: BTreeMap<(usize, usize), FixedNum> = BTreeMap::new();
+        let mut first_portal: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+        let mut open_set = BinaryHeap::new();
         
-        // For each source cluster, run Dijkstra to all other clusters
-        for &source_cluster in self.clusters.keys() {
-            let mut distances: BTreeMap<(usize, usize), FixedNum> = BTreeMap::new();
-            let mut first_portal: BTreeMap<(usize, usize), usize> = BTreeMap::new();
-            let mut open_set = BinaryHeap::new();
-            
-            distances.insert(source_cluster, FixedNum::ZERO);
+        distances.insert(source_cluster, FixedNum::ZERO);
             
             // Add all portals from source cluster to open set
             if let Some(cluster) = self.clusters.get(&source_cluster) {
@@ -275,14 +269,38 @@ impl HierarchicalGraph {
                 }
             }
             
-            // Store routing decisions for this source cluster
-            let mut route_map = BTreeMap::new();
-            for (dest_cluster, portal) in first_portal {
-                if dest_cluster != source_cluster {
-                    route_map.insert(dest_cluster, portal);
-                }
+        // Store routing decisions for this source cluster
+        let mut route_map = BTreeMap::new();
+        for (dest_cluster, portal) in first_portal {
+            if dest_cluster != source_cluster {
+                route_map.insert(dest_cluster, portal);
             }
-            self.cluster_routing_table.insert(source_cluster, route_map);
+        }
+        self.cluster_routing_table.insert(source_cluster, route_map);
+    }
+    
+    /// Build cluster-to-cluster routing table using all-pairs shortest path.
+    /// For each cluster pair, stores the first portal to take from start toward goal.
+    /// This eliminates A* search between clusters at pathfinding time.
+    /// 
+    /// NOTE: This is the synchronous version - only use for tests or small maps.
+    /// For loading screens, use build_routing_table_for_source() incrementally.
+    pub fn build_routing_table(&mut self) {
+        self.cluster_routing_table.clear();
+        
+        if self.clusters.is_empty() {
+            return;
+        }
+        
+        info!("[ROUTING TABLE] Building cluster routing table for {} clusters...", self.clusters.len());
+        let start_time = std::time::Instant::now();
+        
+        // Collect cluster keys to avoid borrow checker issues
+        let cluster_keys: Vec<_> = self.clusters.keys().cloned().collect();
+        
+        // For each source cluster, run Dijkstra to all other clusters
+        for &source_cluster in &cluster_keys {
+            self.build_routing_table_for_source(source_cluster);
         }
         
         let total_entries: usize = self.cluster_routing_table.values().map(|m| m.len()).sum();
