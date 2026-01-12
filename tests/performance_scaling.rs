@@ -1010,15 +1010,17 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
                     println!("    Position: ({:.2}, {:.2})", pos.0.x.to_num::<f32>(), pos.0.y.to_num::<f32>());
                     println!("    Radius: {:.2}", collider.radius.to_num::<f32>());
                     println!("    Cell size: {:.2}", spatial_hash.cell_size().to_num::<f32>());
-                    println!("    Occupies {} cells: {:?}", occupied.cells.len(), occupied.cells);
+                    println!("    Occupies {} cells: {:?}", occupied.cells.len(), 
+                        occupied.cells.iter().map(|&(c, r, _)| (c, r)).collect::<Vec<_>>());
                     
                     // Calculate expected cells
                     let expected_cells = spatial_hash.calculate_occupied_cells(pos.0, collider.radius);
                     println!("    Expected cells (recalculated): {}", expected_cells.len());
                     
-                    if expected_cells != occupied.cells {
+                    let occupied_coords: Vec<_> = occupied.cells.iter().map(|&(c, r, _)| (c, r)).collect();
+                    if expected_cells != occupied_coords {
                         println!("    ⚠ MISMATCH! Entity stored cells are STALE!");
-                        println!("    Stored cells: {:?}", occupied.cells);
+                        println!("    Stored cells: {:?}", occupied_coords);
                         println!("    Actual cells (fresh calc): {:?}", expected_cells);
                     }
                     
@@ -1136,7 +1138,10 @@ fn run_spatial_hash_diagnostics(app: &mut App, unit_count: usize, obstacle_count
         // Compare stored vs actual for each entity
         let mut query = world.query::<(Entity, &OccupiedCells)>();
         for (entity, occupied_cells) in query.iter(world) {
-            let stored_cells: std::collections::HashSet<_> = occupied_cells.cells.iter().copied().collect();
+            // Extract (col, row) from (col, row, vec_idx) for comparison
+            let stored_cells: std::collections::HashSet<_> = occupied_cells.cells.iter()
+                .map(|&(col, row, _)| (col, row))
+                .collect();
             let actual_cells = entity_to_actual_cells.get(&entity).cloned().unwrap_or_default();
             
             if stored_cells != actual_cells {

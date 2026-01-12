@@ -281,6 +281,7 @@ pub fn update_spatial_hash(
         let is_obstacle = obstacles_query.contains(entity);
         
         // Insert into all cells the entity's radius overlaps
+        // Now returns Vec<(col, row, vec_index)> for O(1) removal later
         let occupied = if is_obstacle {
             spatial_hash.insert_multi_cell_with_log(entity, pos.0, collider.radius, true)
         } else {
@@ -294,7 +295,7 @@ pub fn update_spatial_hash(
         // Calculate and cache the grid bounding box
         let grid_box = spatial_hash.calculate_grid_box(pos.0, collider.radius);
         
-        // Track which cells this entity occupies
+        // Track which cells this entity occupies (now with Vec indices)
         commands.entity(entity).insert(OccupiedCells {
             cells: occupied,
             last_grid_box: grid_box,
@@ -310,6 +311,9 @@ pub fn update_spatial_hash(
     // Handle static obstacles - they never move, so skip them entirely
     // (They were already inserted in the new_entities pass above)
     
+    // Collect index updates needed for swapped entities (avoid double-borrow)
+    let mut pending_index_updates: Vec<(Entity, usize, usize, usize)> = Vec::new();
+    
     // Handle dynamic entities - SC2 approach: only update if grid box changed
     for (entity, pos, collider, mut occupied_cells) in query.iter_mut() {
         // Calculate what the grid bounding box should be now
@@ -323,40 +327,47 @@ pub fn update_spatial_hash(
             continue;
         }
         
-        // Grid box changed - recalculate occupied cells
-        let new_cells = spatial_hash.calculate_occupied_cells(pos.0, collider.radius);
+        // Grid box changed - recalculate which cells the entity should be in
+        let new_cell_coords = spatial_hash.calculate_occupied_cells(pos.0, collider.radius);
         
-        // OPTIMIZATION: Compute symmetric difference to only update cells that changed
-        // Many cells may overlap (especially for large multi-cell entities)
-        // Only remove from old cells NOT in new cells
-        // Only insert into new cells NOT in old cells
+        // SIMPLIFIED: Just remove from all old cells and insert into all new cells
+        // No symmetric difference - simpler and avoids sorting overhead
         
-        let old_set: std::collections::HashSet<_> = occupied_cells.cells.iter().copied().collect();
-        let new_set: std::collections::HashSet<_> = new_cells.iter().copied().collect();
+        // Remove from ALL old cells using O(1) swap_remove
+        let swapped_entities = spatial_hash.remove_multi_cell(&occupied_cells.cells);
         
-        // Cells to remove from: old - new
-        let cells_to_remove: Vec<_> = old_set.difference(&new_set).copied().collect();
-        
-        // Cells to add to: new - old
-        let cells_to_add: Vec<_> = new_set.difference(&old_set).copied().collect();
-        
-        // Only remove from cells that entity is leaving
-        if !cells_to_remove.is_empty() {
-            spatial_hash.remove_multi_cell(entity, &cells_to_remove);
+        // Queue index updates for swapped entities (will apply in second pass)
+        for (col, row, swapped_entity) in swapped_entities {
+            // Find which index the removed entity was at (now where swapped entity is)
+            if let Some(&(_, _, removed_idx)) = occupied_cells.cells.iter()
+                .find(|&&(c, r, _)| c == col && r == row) {
+                pending_index_updates.push((swapped_entity, col, row, removed_idx));
+            }
         }
         
-        // Only insert into cells that entity is entering
-        if !cells_to_add.is_empty() {
-            spatial_hash.insert_into_cells(entity, &cells_to_add);
-        }
+        // Insert into ALL new cells and get back the Vec indices
+        let new_cells_with_indices = spatial_hash.insert_into_cells(entity, &new_cell_coords);
         
         // Update cached grid box and cells
         occupied_cells.last_grid_box = new_grid_box;
-        occupied_cells.cells = new_cells;
+        occupied_cells.cells = new_cells_with_indices;
         updates += 1;
         
         if occupied_cells.cells.len() > 1 {
             multi_cell_count += 1;
+        }
+    }
+    
+    // Second pass: Apply pending index updates to swapped entities
+    for (swapped_entity, col, row, new_idx) in pending_index_updates {
+        if let Ok((_, _, _, mut swapped_occupied)) = query.get_mut(swapped_entity) {
+            // Find this (col, row) in swapped entity's cells and update its vec_idx
+            for cell_entry in &mut swapped_occupied.cells {
+                if cell_entry.0 == col && cell_entry.1 == row {
+                    cell_entry.2 = new_idx;
+                    break;
+                }
+            }
         }
     }
     

@@ -1,6 +1,5 @@
 use bevy::prelude::*;
 use crate::game::fixed_math::FixedNum;
-use rustc_hash::FxHashSet;
 
 mod grid;
 mod query;
@@ -53,14 +52,15 @@ mod tests;
 /// # Implementation Notes
 ///
 /// - Uses fixed-point math for deterministic cross-platform behavior
-/// - Cells use `Vec` instead of `HashSet` for better cache locality
+/// - Cells use `Vec<Entity>` for cache locality and O(1) indexed removal
+/// - OccupiedCells component tracks Vec indices for O(1) removal via swap_remove
 /// - Origin is at bottom-left corner of map (-width/2, -height/2)
 #[derive(Resource)]
 pub struct SpatialHash {
     cell_size: FixedNum,
     cols: usize,
     rows: usize,
-    cells: Vec<FxHashSet<Entity>>,
+    cells: Vec<Vec<Entity>>,
     map_width: FixedNum,
     map_height: FixedNum,
 }
@@ -74,7 +74,7 @@ impl SpatialHash {
             cell_size,
             cols,
             rows,
-            cells: vec![FxHashSet::default(); cols * rows],
+            cells: vec![Vec::new(); cols * rows],
             map_width,
             map_height,
         }
@@ -89,7 +89,7 @@ impl SpatialHash {
         self.cell_size = cell_size;
         self.cols = cols;
         self.rows = rows;
-        self.cells = vec![FxHashSet::default(); cols * rows];
+        self.cells = vec![Vec::new(); cols * rows];
     }
 
     pub fn clear(&mut self) {
@@ -111,14 +111,14 @@ impl SpatialHash {
     }
 
     /// Iterate over all cells and their contents for diagnostics.
-    /// Returns an iterator over references to FxHashSet<Entity>.
-    pub fn iter_cells(&self) -> impl Iterator<Item = &FxHashSet<Entity>> + '_ {
+    /// Returns an iterator over references to Vec<Entity>.
+    pub fn iter_cells(&self) -> impl Iterator<Item = &Vec<Entity>> + '_ {
         self.cells.iter()
     }
 
     /// Iterate over all cells with their (row, col) coordinates for diagnostics.
-    /// Returns tuples of (row, col, &FxHashSet<Entity>).
-    pub fn iter_cells_with_coords(&self) -> impl Iterator<Item = (usize, usize, &FxHashSet<Entity>)> + '_ {
+    /// Returns tuples of (row, col, &Vec<Entity>).
+    pub fn iter_cells_with_coords(&self) -> impl Iterator<Item = (usize, usize, &Vec<Entity>)> + '_ {
         self.cells.iter().enumerate().map(move |(idx, cell)| {
             let row = idx / self.cols;
             let col = idx % self.cols;
@@ -134,11 +134,11 @@ impl SpatialHash {
     pub fn rows(&self) -> usize { self.rows }
 
     // Internal accessor for submodules
-    pub(crate) fn cells(&self) -> &Vec<FxHashSet<Entity>> {
+    pub(crate) fn cells(&self) -> &Vec<Vec<Entity>> {
         &self.cells
     }
 
-    pub(crate) fn cells_mut(&mut self) -> &mut Vec<FxHashSet<Entity>> {
+    pub(crate) fn cells_mut(&mut self) -> &mut Vec<Vec<Entity>> {
         &mut self.cells
     }
 }

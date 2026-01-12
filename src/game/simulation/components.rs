@@ -188,8 +188,9 @@ impl Default for BoidsNeighborCache {
 /// See SPATIAL_PARTITIONING.md Section 2.2 for detailed explanation.
 #[derive(Component, Debug, Clone)]
 pub struct OccupiedCells {
-    /// All (col, row) pairs this entity currently occupies in the spatial hash
-    pub cells: Vec<(usize, usize)>,
+    /// All (col, row, vec_index) tuples this entity currently occupies in the spatial hash
+    /// vec_index is the index in the cell's Vec<Entity> for O(1) removal via swap_remove
+    pub cells: Vec<(usize, usize, usize)>,
     /// Cached grid bounding box: (min_col, min_row, max_col, max_row)
     /// If this doesn't change, the occupied cells haven't changed
     pub last_grid_box: (usize, usize, usize, usize),

@@ -26,40 +26,66 @@ impl SpatialHash {
         Some(row * self.cols() + col)
     }
 
-    pub fn insert(&mut self, entity: Entity, _pos: FixedVec2) {
+    pub fn insert(&mut self, entity: Entity, _pos: FixedVec2) -> Option<usize> {
         if let Some(idx) = self.get_cell_idx(_pos) {
-            self.cells_mut()[idx].insert(entity);
+            let vec_idx = self.cells_mut()[idx].len();
+            self.cells_mut()[idx].push(entity);
+            Some(vec_idx)
+        } else {
+            None
         }
     }
 
     /// Insert with logging for debugging obstacle detection
-    pub fn insert_with_log(&mut self, entity: Entity, pos: FixedVec2, is_obstacle: bool, _radius: Option<FixedNum>) {
+    pub fn insert_with_log(&mut self, entity: Entity, pos: FixedVec2, is_obstacle: bool, _radius: Option<FixedNum>) -> Option<usize> {
         if let Some(idx) = self.get_cell_idx(pos) {
-            self.cells_mut()[idx].insert(entity);
+            let vec_idx = self.cells_mut()[idx].len();
+            self.cells_mut()[idx].push(entity);
             // Removed per-obstacle logging - too verbose
+            Some(vec_idx)
         } else {
             if is_obstacle {
                 warn!("[SPATIAL_HASH] Failed to insert OBSTACLE entity {:?} at pos ({:.2}, {:.2}) - position out of bounds",
                     entity, pos.x.to_num::<f32>(), pos.y.to_num::<f32>());
             }
+            None
         }
     }
 
-    /// Remove an entity from a specific cell.
-    /// Used when an entity moves from one cell to another.
-    pub fn remove(&mut self, entity: Entity, col: usize, row: usize) {
+    /// Remove an entity from a specific cell using its Vec index.
+    /// Uses swap_remove for O(1) removal.
+    /// Returns Some(swapped_entity) if an entity was swapped, None otherwise.
+    /// The swapped entity needs its OccupiedCells index updated.
+    pub fn remove(&mut self, col: usize, row: usize, vec_idx: usize) -> Option<Entity> {
         let idx = row * self.cols() + col;
         if idx < self.cells().len() {
-            self.cells_mut()[idx].remove(&entity);
+            let cell = &mut self.cells_mut()[idx];
+            if vec_idx < cell.len() {
+                let _removed = cell.swap_remove(vec_idx);
+                // If we swapped (removed wasn't last element), return the entity now at vec_idx
+                if vec_idx < cell.len() {
+                    Some(cell[vec_idx])
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
         }
     }
 
-    /// Remove an entity from multiple cells.
-    /// Used when updating entities that occupy multiple cells.
-    pub fn remove_multi_cell(&mut self, entity: Entity, cells: &[(usize, usize)]) {
-        for &(col, row) in cells {
-            self.remove(entity, col, row);
+    /// Remove an entity from multiple cells using tracked indices.
+    /// Returns Vec of (col, row, swapped_entity) for entities that need index updates.
+    pub fn remove_multi_cell(&mut self, cells: &[(usize, usize, usize)]) -> Vec<(usize, usize, Entity)> {
+        let mut swapped_entities = Vec::new();
+        for &(col, row, vec_idx) in cells {
+            if let Some(swapped_entity) = self.remove(col, row, vec_idx) {
+                swapped_entities.push((col, row, swapped_entity));
+            }
         }
+        swapped_entities
     }
 
     /// Calculate all grid cells that an entity's radius overlaps.
@@ -161,54 +187,66 @@ impl SpatialHash {
     }
 
     /// Insert an entity into all cells its radius overlaps.
-    /// Returns the list of cells the entity was inserted into.
+    /// Returns the list of (col, row, vec_index) tuples.
     ///
     /// This should be used for all entity insertions to ensure correct collision
     /// detection with variable entity sizes.
-    pub fn insert_multi_cell(&mut self, entity: Entity, _pos: FixedVec2, radius: FixedNum) -> Vec<(usize, usize)> {
-        let cells = self.calculate_occupied_cells(_pos, radius);
+    pub fn insert_multi_cell(&mut self, entity: Entity, _pos: FixedVec2, radius: FixedNum) -> Vec<(usize, usize, usize)> {
+        let cell_coords = self.calculate_occupied_cells(_pos, radius);
+        let mut cells_with_indices = Vec::new();
         
-        // Insert into each overlapping cell
-        for &(col, row) in &cells {
+        // Insert into each overlapping cell and track the Vec index
+        for (col, row) in cell_coords {
             let idx = row * self.cols() + col;
             if idx < self.cells().len() {
-                self.cells_mut()[idx].insert(entity);
+                let vec_idx = self.cells_mut()[idx].len();
+                self.cells_mut()[idx].push(entity);
+                cells_with_indices.push((col, row, vec_idx));
             }
         }
         
-        cells
+        cells_with_indices
     }
 
     /// Insert an entity into all cells its radius overlaps, with logging.
-    /// Returns the list of cells the entity was inserted into.
-    pub fn insert_multi_cell_with_log(&mut self, entity: Entity, pos: FixedVec2, radius: FixedNum, is_obstacle: bool) -> Vec<(usize, usize)> {
-        let cells = self.calculate_occupied_cells(pos, radius);
+    /// Returns the list of (col, row, vec_index) tuples.
+    pub fn insert_multi_cell_with_log(&mut self, entity: Entity, pos: FixedVec2, radius: FixedNum, is_obstacle: bool) -> Vec<(usize, usize, usize)> {
+        let cell_coords = self.calculate_occupied_cells(pos, radius);
         
         // Only log summary for obstacles, not every cell
-        if is_obstacle && cells.len() > 20 {
+        if is_obstacle && cell_coords.len() > 20 {
             info!("[SPATIAL_HASH] Inserting OBSTACLE entity {:?} at pos ({:.2}, {:.2}) with radius {:.2} into {} cells",
-                entity, pos.x.to_num::<f32>(), pos.y.to_num::<f32>(), radius.to_num::<f32>(), cells.len());
+                entity, pos.x.to_num::<f32>(), pos.y.to_num::<f32>(), radius.to_num::<f32>(), cell_coords.len());
         }
         
-        // Insert into each overlapping cell
-        for &(col, row) in &cells {
+        let mut cells_with_indices = Vec::new();
+        
+        // Insert into each overlapping cell and track the Vec index
+        for (col, row) in cell_coords {
             let idx = row * self.cols() + col;
             if idx < self.cells().len() {
-                self.cells_mut()[idx].insert(entity);
+                let vec_idx = self.cells_mut()[idx].len();
+                self.cells_mut()[idx].push(entity);
+                cells_with_indices.push((col, row, vec_idx));
             }
         }
         
-        cells
+        cells_with_indices
     }
 
     /// Insert an entity into specific pre-calculated cells.
-    /// Used when updating entities that have moved - caller computes which cells to add/remove.
-    pub fn insert_into_cells(&mut self, entity: Entity, cells: &[(usize, usize)]) {
-        for &(col, row) in cells {
+    /// Used when updating entities that have moved - caller provides cell coordinates.
+    /// Returns Vec of (col, row, vec_index) for the inserted cells.
+    pub fn insert_into_cells(&mut self, entity: Entity, cell_coords: &[(usize, usize)]) -> Vec<(usize, usize, usize)> {
+        let mut cells_with_indices = Vec::new();
+        for &(col, row) in cell_coords {
             let idx = row * self.cols() + col;
             if idx < self.cells().len() {
-                self.cells_mut()[idx].insert(entity);
+                let vec_idx = self.cells_mut()[idx].len();
+                self.cells_mut()[idx].push(entity);
+                cells_with_indices.push((col, row, vec_idx));
             }
         }
+        cells_with_indices
     }
 }
