@@ -76,9 +76,9 @@
 ///    ```
 ///    $env:PERF_TEST_MODE="reset"; cargo test --release --test performance_scaling test_performance_scaling_suite -- --ignored --nocapture
 ///    ```
-/// 7. ** Single test run (e.g., 100k units @ 50 TPS)**:
+/// 7. ** Single test run (e.g., 500k units @ 100 TPS)**:
 ///    ```
-///    $env:START_INDEX="4"; cargo test --release --test performance_scaling test_performance_scaling_suite -- --ignored --nocapture
+///    $env:START_INDEX="8"; cargo test --release --test performance_scaling test_performance_scaling_suite -- --ignored --nocapture
 ///    ```
 
 use bevy::prelude::*;
