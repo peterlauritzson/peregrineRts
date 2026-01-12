@@ -48,10 +48,15 @@ impl Plugin for SimulationPlugin {
         // Configure FixedUpdate timestep
         app.insert_resource(Time::<Fixed>::from_seconds(1.0 / 20.0)); 
         
-        // Initialize resources
+        // Initialize resources (SpatialHash will be properly initialized in init_sim_config_from_initial)
         app.init_resource::<SimConfig>();
         app.init_resource::<SimPerformance>();
-        app.insert_resource(SpatialHash::new(FixedNum::from_num(100), FixedNum::from_num(100), FixedNum::from_num(2)));
+        app.insert_resource(SpatialHash::new(
+            FixedNum::from_num(100.0),
+            FixedNum::from_num(100.0),
+            &[0.5, 10.0],  // Default entity radii
+            4.0            // Default radius to cell ratio
+        ));
         app.insert_resource(MapFlowField(Default::default()));
         app.init_resource::<MapStatus>();
         app.init_resource::<DebugConfig>();

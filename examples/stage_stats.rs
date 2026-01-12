@@ -22,7 +22,8 @@ fn main() {
     app.insert_resource(SpatialHash::new(
         FixedNum::from_num(map_size),
         FixedNum::from_num(map_size),
-        FixedNum::from_num(1.0), // Cell size
+        &[0.5, 10.0],  // Expected entity sizes
+        4.0,  // radius to cell ratio
     ));
     
     app.insert_resource(SimConfig {
@@ -62,7 +63,7 @@ fn main() {
             SimAcceleration(FixedVec2::ZERO),
             Collider::default(),
             CachedNeighbors::default(),
-            OccupiedCells::default(),
+            OccupiedCell::default(),
         ));
     }
     

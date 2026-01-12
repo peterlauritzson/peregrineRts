@@ -163,7 +163,8 @@ mod tests {
         let spatial_hash = SpatialHash::new(
             FixedNum::from_num(100.0),
             FixedNum::from_num(100.0),
-            FixedNum::from_num(10.0),
+            &[0.5, 10.0, 25.0],
+            4.0,
         );
         app.insert_resource(spatial_hash);
         
@@ -194,8 +195,8 @@ mod tests {
         {
             let mut hash = app.world_mut().resource_mut::<SpatialHash>();
             hash.clear();
-            hash.insert(entity_a, pos_a);
-            hash.insert(entity_b, pos_b);
+            hash.insert(entity_a, pos_a, FixedNum::from_num(0.5));
+            hash.insert(entity_b, pos_b, FixedNum::from_num(0.5));
         }
         
         // Add the boids system
@@ -223,7 +224,8 @@ mod tests {
         let spatial_hash = SpatialHash::new(
             FixedNum::from_num(100.0),
             FixedNum::from_num(100.0),
-            FixedNum::from_num(10.0),
+            &[0.5, 10.0, 25.0],
+            4.0,
         );
         app.insert_resource(spatial_hash);
         
@@ -245,7 +247,7 @@ mod tests {
         {
             let mut hash = app.world_mut().resource_mut::<SpatialHash>();
             hash.clear();
-            hash.insert(entity, FixedVec2::ZERO);
+            hash.insert(entity, FixedVec2::ZERO, FixedNum::from_num(0.5));
         }
         
         app.add_systems(Update, apply_boids_steering);
@@ -265,7 +267,8 @@ mod tests {
         let spatial_hash = SpatialHash::new(
             FixedNum::from_num(100.0),
             FixedNum::from_num(100.0),
-            FixedNum::from_num(10.0),
+            &[0.5, 10.0, 25.0],
+            4.0,
         );
         app.insert_resource(spatial_hash);
         
@@ -301,8 +304,8 @@ mod tests {
         {
             let mut hash = app.world_mut().resource_mut::<SpatialHash>();
             hash.clear();
-            hash.insert(entity_a, pos_a);
-            hash.insert(entity_b, pos_b);
+            hash.insert(entity_a, pos_a, FixedNum::from_num(0.5));
+            hash.insert(entity_b, pos_b, FixedNum::from_num(0.5));
         }
         
         // Manually populate boids cache for entity_a with entity_b as neighbor
@@ -330,7 +333,8 @@ mod tests {
         let spatial_hash = SpatialHash::new(
             FixedNum::from_num(100.0),
             FixedNum::from_num(100.0),
-            FixedNum::from_num(10.0),
+            &[0.5, 10.0, 25.0],
+            4.0,
         );
         app.insert_resource(spatial_hash);
         
@@ -366,8 +370,8 @@ mod tests {
         {
             let mut hash = app.world_mut().resource_mut::<SpatialHash>();
             hash.clear();
-            hash.insert(entity_a, pos_a);
-            hash.insert(entity_b, pos_b);
+            hash.insert(entity_a, pos_a, FixedNum::from_num(0.5));
+            hash.insert(entity_b, pos_b, FixedNum::from_num(0.5));
         }
         
         // Manually populate boids cache for entity_a with entity_b as neighbor
@@ -396,7 +400,8 @@ mod tests {
         let spatial_hash = SpatialHash::new(
             FixedNum::from_num(100.0),
             FixedNum::from_num(100.0),
-            FixedNum::from_num(10.0),
+            &[0.5, 10.0, 25.0],
+            4.0,
         );
         app.insert_resource(spatial_hash);
         
@@ -442,9 +447,9 @@ mod tests {
         {
             let mut hash = app.world_mut().resource_mut::<SpatialHash>();
             hash.clear();
-            hash.insert(entity_a, pos_a);
-            hash.insert(entity_b, pos_b);
-            hash.insert(entity_c, pos_c);
+            hash.insert(entity_a, pos_a, FixedNum::from_num(0.5));
+            hash.insert(entity_b, pos_b, FixedNum::from_num(0.5));
+            hash.insert(entity_c, pos_c, FixedNum::from_num(0.5));
         }
         
         // Manually populate boids cache for entity_a with B and C as neighbors
@@ -473,7 +478,8 @@ mod tests {
         let spatial_hash = SpatialHash::new(
             FixedNum::from_num(100.0),
             FixedNum::from_num(100.0),
-            FixedNum::from_num(10.0),
+            &[0.5, 10.0, 25.0],
+            4.0,
         );
         app.insert_resource(spatial_hash);
         
@@ -513,9 +519,9 @@ mod tests {
         {
             let mut hash = app.world_mut().resource_mut::<SpatialHash>();
             hash.clear();
-            hash.insert(entity_a, pos_a);
-            hash.insert(entity_b, pos_b);
-            hash.insert(entity_c, pos_c);
+            hash.insert(entity_a, pos_a, FixedNum::from_num(0.5));
+            hash.insert(entity_b, pos_b, FixedNum::from_num(0.5));
+            hash.insert(entity_c, pos_c, FixedNum::from_num(0.5));
         }
         
         app.add_systems(Update, apply_boids_steering);

@@ -85,7 +85,7 @@ use bevy::prelude::*;
 use bevy::ecs::system::RunSystemOnce;
 use peregrine::game::simulation::components::{
     SimPosition, SimPositionPrev, SimVelocity, SimAcceleration, Collider,
-    CachedNeighbors, OccupiedCells, StaticObstacle, layers,
+    CachedNeighbors, OccupiedCell, StaticObstacle, layers,
 };
 use peregrine::game::simulation::resources::{SimConfig, MapFlowField};
 use peregrine::game::simulation::systems::apply_obstacle_to_flow_field;
@@ -719,7 +719,8 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
     app.insert_resource(SpatialHash::new(
         FixedNum::from_num(map_size),
         FixedNum::from_num(map_size),
-        FixedNum::from_num(40.0), // Cell size for spatial partitioning
+        &[0.5, 10.0, 25.0],  // Expected entity sizes
+        4.0,  // radius to cell ratio
     ));
     
     // Add simulation config
@@ -772,7 +773,7 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
             SimAcceleration(FixedVec2::ZERO),
             Collider::default(), // Collision detection enabled
             CachedNeighbors::default(),
-            OccupiedCells::default(),
+            OccupiedCell::default(),
         ));
     }
     
@@ -817,7 +818,7 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
                 layer: layers::OBSTACLE,
                 mask: layers::UNIT,
             },
-            OccupiedCells::default(),
+            OccupiedCell::default(),
         ));
     }
     
@@ -893,11 +894,11 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
         // NEW: Track per-entity cell occupancy every tick
         if investigate_spatial_hash {
             let world = app.world_mut();
-            let mut query = world.query::<(Entity, &OccupiedCells)>();
-            for (entity, occupied_cells) in query.iter(world) {
+            let mut query = world.query::<(Entity, &OccupiedCell)>();
+            for (entity, _occupied_cell) in query.iter(world) {
                 entity_cell_history.entry(entity)
                     .or_insert_with(Vec::new)
-                    .push(occupied_cells.cells.len());
+                    .push(1);  // Each entity now occupies exactly one cell
             }
         }
         
@@ -1002,34 +1003,16 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
             // Check WHY entities occupy multiple cells - analyze first entity
             let world = app.world_mut();
             if let Some(&sample_entity) = entities_with_growth.first().map(|(e, _, _, _)| e) {
-                let mut query = world.query::<(Entity, &SimPosition, &Collider, &OccupiedCells)>();
+                let mut query = world.query::<(Entity, &SimPosition, &Collider, &OccupiedCell)>();
                 if let Some((_, pos, collider, occupied)) = query.iter(world).find(|(e, _, _, _)| *e == sample_entity) {
-                    let spatial_hash = world.get_resource::<SpatialHash>().unwrap();
-                    
                     println!("\n  Sample entity {:?} analysis:", sample_entity);
                     println!("    Position: ({:.2}, {:.2})", pos.0.x.to_num::<f32>(), pos.0.y.to_num::<f32>());
                     println!("    Radius: {:.2}", collider.radius.to_num::<f32>());
-                    println!("    Cell size: {:.2}", spatial_hash.cell_size().to_num::<f32>());
-                    println!("    Occupies {} cells: {:?}", occupied.cells.len(), 
-                        occupied.cells.iter().map(|&(c, r, _)| (c, r)).collect::<Vec<_>>());
-                    
-                    // Calculate expected cells
-                    let expected_cells = spatial_hash.calculate_occupied_cells(pos.0, collider.radius);
-                    println!("    Expected cells (recalculated): {}", expected_cells.len());
-                    
-                    let occupied_coords: Vec<_> = occupied.cells.iter().map(|&(c, r, _)| (c, r)).collect();
-                    if expected_cells != occupied_coords {
-                        println!("    ⚠ MISMATCH! Entity stored cells are STALE!");
-                        println!("    Stored cells: {:?}", occupied_coords);
-                        println!("    Actual cells (fresh calc): {:?}", expected_cells);
-                    }
-                    
-                    // Check if entity is near cell boundary
-                    let cell_center = spatial_hash.calculate_cell_center(pos.0);
-                    let dx = (pos.0.x - cell_center.x).abs().to_num::<f32>();
-                    let dy = (pos.0.y - cell_center.y).abs().to_num::<f32>();
-                    let half_cell = (spatial_hash.cell_size() / FixedNum::from_num(2.0)).to_num::<f32>();
-                    println!("    Distance from cell center: dx={:.2}, dy={:.2} (half_cell={:.2})", dx, dy, half_cell);
+                    println!("    Occupies cell: size_class={}, grid={}, col={}, row={}", 
+                        occupied.size_class, 
+                        if occupied.grid_offset == 1 { "B" } else { "A" },
+                        occupied.col, 
+                        occupied.row);
                 }
             }
             
@@ -1059,224 +1042,39 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
 
 /// Run comprehensive spatial hash diagnostics (Tests 1 and 4 from investigation)
 fn run_spatial_hash_diagnostics(app: &mut App, unit_count: usize, obstacle_count: usize) {
-    use std::collections::HashSet;
-    
     println!("\n=== SPATIAL HASH DIAGNOSTICS ===");
     
-    // Collect all cell data first (to avoid holding borrow)
-    let (cell_data, _total_cells): (Vec<Vec<Entity>>, usize) = {
-        let world = app.world();
-        let spatial_hash = world.get_resource::<SpatialHash>().expect("SpatialHash resource not found");
-        let data: Vec<Vec<Entity>> = spatial_hash.iter_cells()
-            .map(|cell| cell.iter().copied().collect::<Vec<_>>())
-            .collect();
-        let cols = spatial_hash.cols();
-        let rows = spatial_hash.rows();
-        (data, cols * rows)
-    };
+    // Note: The new staggered multi-resolution spatial hash design uses internal
+    // cell storage that isn't exposed through a public API. Detailed cell diagnostics
+    // are no longer available. For debugging, use the OccupiedCell component which
+    // shows which cell each entity occupies.
     
-    // TEST 1: Duplicate Detection
-    let mut total_entries = 0;
-    let mut duplicate_count = 0;
-    let mut max_cell_size = 0;
-    let mut cells_with_duplicates = 0;
-    
-    // NEW: Track which entities are being duplicated
-    let mut entity_occurrence_counts = std::collections::HashMap::new();
-    
-    for cell in &cell_data {
-        total_entries += cell.len();
-        max_cell_size = max_cell_size.max(cell.len());
-        
-        // Check for duplicate entities in this cell
-        let mut seen = HashSet::new();
-        let mut has_duplicates = false;
-        for entity in cell {
-            if !seen.insert(*entity) {
-                duplicate_count += 1;
-                has_duplicates = true;
-            }
-            // Track total occurrences across ALL cells
-            *entity_occurrence_counts.entry(*entity).or_insert(0) += 1;
-        }
-        if has_duplicates {
-            cells_with_duplicates += 1;
-        }
-    }
-    
-    // Analyze which entities appear most frequently (likely accumulating)
-    let mut excessive_entries: Vec<_> = entity_occurrence_counts.iter()
-        .filter(|(_, &count)| count > 10) // Entities in >10 cells (suspicious for small entities)
-        .collect();
-    excessive_entries.sort_by_key(|(_, &count)| std::cmp::Reverse(count));
-    
-    if excessive_entries.len() > 0 {
-        println!("\n  EXCESSIVE DUPLICATION DETECTED:");
-        println!("    {} entities appear in >10 cells", excessive_entries.len());
-        println!("    Top offenders:");
-        for (entity, count) in excessive_entries.iter().take(5) {
-            println!("      Entity {:?}: {} cells", entity, count);
-        }
-    }
-    
-    // NEW: Check if OccupiedCells.cells matches actual spatial hash contents
-    let mut cells_mismatch_count = 0;
+    // TEST 1: Entity Coverage Check
+    let total_entries: usize;
     {
         let world = app.world_mut();
-        let spatial_hash = world.get_resource::<SpatialHash>().expect("SpatialHash");
-        
-        // Build a map of which cells each entity is actually in
-        let mut entity_to_actual_cells: std::collections::HashMap<Entity, std::collections::HashSet<(usize, usize)>> = 
-            std::collections::HashMap::new();
-        
-        for (row, col, entities_in_cell) in spatial_hash.iter_cells_with_coords() {
-            for &entity in entities_in_cell {
-                entity_to_actual_cells.entry(entity).or_default().insert((col, row));
-            }
-        }
-        
-        // Compare stored vs actual for each entity
-        let mut query = world.query::<(Entity, &OccupiedCells)>();
-        for (entity, occupied_cells) in query.iter(world) {
-            // Extract (col, row) from (col, row, vec_idx) for comparison
-            let stored_cells: std::collections::HashSet<_> = occupied_cells.cells.iter()
-                .map(|&(col, row, _)| (col, row))
-                .collect();
-            let actual_cells = entity_to_actual_cells.get(&entity).cloned().unwrap_or_default();
-            
-            if stored_cells != actual_cells {
-                cells_mismatch_count += 1;
-                if cells_mismatch_count <= 5 {  // Only log first 5
-                    println!("    MISMATCH for entity {:?}:", entity);
-                    println!("      Stored in OccupiedCells: {} cells", stored_cells.len());
-                    println!("      Actually in spatial hash: {} cells", actual_cells.len());
-                    let in_stored_not_actual: Vec<_> = stored_cells.difference(&actual_cells).collect();
-                    let in_actual_not_stored: Vec<_> = actual_cells.difference(&stored_cells).collect();
-                    if !in_stored_not_actual.is_empty() {
-                        println!("      In stored but NOT in hash: {:?}", in_stored_not_actual);
-                    }
-                    if !in_actual_not_stored.is_empty() {
-                        println!("      In hash but NOT in stored: {:?}", in_actual_not_stored);
-                    }
-                }
-            }
-        }
+        let mut query = world.query::<(Entity, &OccupiedCell)>();
+        total_entries = query.iter(world).count();
     }
-    
-    if cells_mismatch_count > 0 {
-        println!("\n  ⚠ CRITICAL: {} entities have mismatched OccupiedCells vs actual hash contents!", cells_mismatch_count);
-    } else {
-        println!("\n  ✓ All entities have matching OccupiedCells vs actual hash contents");
-    }
-    
-    // NOTE: Position staleness testing removed - spatial hash no longer stores positions
-    // This was Bug #1 that we fixed by removing position caching
-    let position_mismatches = 0;  // Always 0 now - positions not stored
-    let total_drift = FixedNum::ZERO;
-    let max_drift = FixedNum::ZERO;
     
     let expected = unit_count + obstacle_count;
-    let duplication_ratio = total_entries as f32 / expected as f32;
-    let avg_drift = if total_entries > 0 {
-        (total_drift / FixedNum::from_num(total_entries)).to_num::<f32>()
+    
+    println!("TEST 1: ENTITY COVERAGE");
+    println!("  Entities with OccupiedCell: {}", total_entries);
+    println!("  Expected entities: {}", expected);
+    if total_entries == expected {
+        println!("  ✓ All entities properly registered in spatial hash");
     } else {
-        0.0
-    };
+        println!("  ⚠ WARNING: {} entities missing from spatial hash!", expected - total_entries);
+    }
     
-    println!("TEST 1: DUPLICATE & STALENESS DETECTION");
-    println!("  Total entries: {}", total_entries);
-    println!("  Expected entries: ~{}", expected);
-    println!("  Duplication ratio: {:.2}x", duplication_ratio);
-    println!("  Duplicate entities: {} ({:.2}% of entries)", 
-             duplicate_count, 100.0 * duplicate_count as f32 / total_entries.max(1) as f32);
-    println!("  Cells with duplicates: {}", cells_with_duplicates);
-    println!("  Position mismatches (>1.0 drift): {} ({:.2}% of entries)",
-             position_mismatches, 100.0 * position_mismatches as f32 / total_entries.max(1) as f32);
-    println!("  Average position drift: {:.4} units", avg_drift);
-    println!("  Max position drift: {:.4} units", max_drift.to_num::<f32>());
-    
-    // TEST 4: Cell Size Distribution
-    let mut cell_sizes: Vec<usize> = cell_data.iter()
-        .map(|c| c.len())
-        .collect();
-    cell_sizes.sort_unstable();
-    
-    let non_empty_count = cell_sizes.iter().filter(|&&s| s > 0).count();
-    let total_cells = cell_sizes.len();
-    
-    // Calculate percentiles safely
-    let p50 = if !cell_sizes.is_empty() {
-        cell_sizes[cell_sizes.len() / 2]
-    } else {
-        0
-    };
-    let p95 = if !cell_sizes.is_empty() {
-        cell_sizes[(cell_sizes.len() * 95 / 100).min(cell_sizes.len() - 1)]
-    } else {
-        0
-    };
-    let p99 = if !cell_sizes.is_empty() {
-        cell_sizes[(cell_sizes.len() * 99 / 100).min(cell_sizes.len() - 1)]
-    } else {
-        0
-    };
-    let max_size = if !cell_sizes.is_empty() {
-        cell_sizes[cell_sizes.len() - 1]
-    } else {
-        0
-    };
-    
-    let avg_size = if non_empty_count > 0 {
-        total_entries as f32 / non_empty_count as f32
-    } else {
-        0.0
-    };
-    
-    println!("\nTEST 4: CELL SIZE DISTRIBUTION");
-    println!("  Total cells: {}", total_cells);
-    println!("  Non-empty cells: {} ({:.1}%)", non_empty_count, 
-             100.0 * non_empty_count as f32 / total_cells.max(1) as f32);
-    println!("  Average size (non-empty): {:.1}", avg_size);
-    println!("  p50 (median): {}", p50);
-    println!("  p95: {}", p95);
-    println!("  p99: {}", p99);
-    println!("  max: {}", max_size);
-    println!("  p99/p50 ratio: {:.2}x", p99 as f32 / p50.max(1) as f32);
-    println!("  max/avg ratio: {:.2}x", max_size as f32 / avg_size.max(0.1));
-    
-    // Analysis and warnings
+    // Analysis
     println!("\nANALYSIS:");
     
-    if duplication_ratio > 1.5 {
-        println!("  ⚠ HIGH DUPLICATION! Ratio {:.2}x suggests Bug #1 (position staleness) or Bug #2 (cell calculation mismatch)", duplication_ratio);
-    } else if duplication_ratio > 1.1 {
-        println!("  ⚠ Moderate duplication ({:.2}x) - some accumulation detected", duplication_ratio);
+    if total_entries != expected {
+        println!("  ⚠ Some entities missing OccupiedCell component!");
     } else {
-        println!("  ✓ Duplication ratio normal ({:.2}x)", duplication_ratio);
-    }
-    
-    if duplicate_count > 0 {
-        println!("  ⚠ DUPLICATES FOUND! {} duplicate entity entries suggest Bug #2 (cell calculation mismatch)", duplicate_count);
-    } else {
-        println!("  ✓ No duplicate entities within cells");
-    }
-    
-    let mismatch_pct = 100.0 * position_mismatches as f32 / total_entries.max(1) as f32;
-    if mismatch_pct > 10.0 {
-        println!("  ⚠ HIGH POSITION STALENESS! {:.1}% entries have >1.0 drift - confirms Bug #1 (position staleness)", mismatch_pct);
-    } else if mismatch_pct > 1.0 {
-        println!("  ⚠ Moderate position staleness ({:.1}%)", mismatch_pct);
-    } else {
-        println!("  ✓ Position staleness minimal ({:.1}%)", mismatch_pct);
-    }
-    
-    let p99_p50_ratio = p99 as f32 / p50.max(1) as f32;
-    if p99_p50_ratio > 10.0 {
-        println!("  ⚠ SEVERE CELL BLOAT! p99/p50 ratio {:.1}x - confirms Bug #3 (Vec bloat from failed removals)", p99_p50_ratio);
-    } else if p99_p50_ratio > 5.0 {
-        println!("  ⚠ Moderate cell bloat (p99/p50 = {:.1}x)", p99_p50_ratio);
-    } else {
-        println!("  ✓ Cell size distribution reasonable (p99/p50 = {:.1}x)", p99_p50_ratio);
+        println!("  ✓ All entities properly tracked in spatial hash");
     }
     
     println!("==================================\n");

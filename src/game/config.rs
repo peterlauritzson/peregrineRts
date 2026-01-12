@@ -55,6 +55,10 @@ pub struct InitialConfig {
     
     // Pathfinding settings
     pub pathfinding_build_batch_size: usize,
+    
+    // Spatial Hash Settings (Staggered Multi-Resolution)
+    pub spatial_hash_entity_radii: Vec<f32>,
+    pub spatial_hash_radius_to_cell_ratio: f32,
 }
 
 /// Runtime configuration that can be hot-reloaded during gameplay.
@@ -178,6 +182,8 @@ impl Default for InitialConfig {
             editor_map_size_x: 2048.0,
             editor_map_size_y: 2048.0,
             pathfinding_build_batch_size: 5,
+            spatial_hash_entity_radii: vec![0.5, 10.0, 25.0],
+            spatial_hash_radius_to_cell_ratio: 4.0,
         }
     }
 }

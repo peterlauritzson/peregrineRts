@@ -47,7 +47,7 @@ fn test_collision_unit_unit() {
         Collider::default(),
         CachedNeighbors::default(),
         BoidsNeighborCache::default(),
-        // OccupiedCells will be added by update_spatial_hash system
+        // OccupiedCell will be added by update_spatial_hash system
     )).id();
 
     let u2 = app.world_mut().spawn((
@@ -59,7 +59,7 @@ fn test_collision_unit_unit() {
         Collider::default(),
         CachedNeighbors::default(),
         BoidsNeighborCache::default(),
-        // OccupiedCells will be added by update_spatial_hash system
+        // OccupiedCell will be added by update_spatial_hash system
     )).id();
 
     // Run simulation for enough ticks for them to collide
@@ -138,7 +138,7 @@ fn test_collision_unit_wall() {
         Collider::default(),
         CachedNeighbors::default(),
         BoidsNeighborCache::default(),
-        // OccupiedCells will be added by update_spatial_hash system
+        // OccupiedCell will be added by update_spatial_hash system
     )).id();
 
     // Run simulation
@@ -191,7 +191,7 @@ fn test_collision_crowding() {
     }
 
     // Spawn 10 units at the same spot (or very close)
-    // Note: Don't include OccupiedCells - let the spatial hash system add it
+    // Note: Don't include OccupiedCell - let the spatial hash system add it
     let mut units = Vec::new();
     for _ in 0..10 {
         let id = app.world_mut().spawn((
@@ -203,12 +203,12 @@ fn test_collision_crowding() {
             Collider::default(),
             CachedNeighbors::default(),
             BoidsNeighborCache::default(),
-            // OccupiedCells will be added by update_spatial_hash system
+            // OccupiedCell will be added by update_spatial_hash system
         )).id();
         units.push(id);
     }
 
-    // Run one FixedUpdate to initialize OccupiedCells for all units
+    // Run one FixedUpdate to initialize OccupiedCell for all units
     app.world_mut().run_schedule(FixedUpdate);
     println!("Initialized spatial hash for {} units", units.len());
 

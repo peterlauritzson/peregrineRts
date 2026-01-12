@@ -88,7 +88,7 @@ pub fn process_input(
             Collider::default(),
             CachedNeighbors::default(),
             BoidsNeighborCache::default(),
-            OccupiedCells::default(), // Will be populated on first spatial hash update
+            OccupiedCell::default(), // Will be populated on first spatial hash update
         ));
     }
     
@@ -261,8 +261,8 @@ pub fn follow_path(
 /// Update spatial hash with entity positions
 pub fn update_spatial_hash(
     mut spatial_hash: ResMut<SpatialHash>,
-    mut query: Query<(Entity, &SimPosition, &Collider, &mut OccupiedCells), Without<StaticObstacle>>,
-    new_entities: Query<(Entity, &SimPosition, &Collider), Without<OccupiedCells>>,
+    mut query: Query<(Entity, &SimPosition, &Collider, &mut OccupiedCell), Without<StaticObstacle>>,
+    new_entities: Query<(Entity, &SimPosition, &Collider), Without<OccupiedCell>>,
     obstacles_query: Query<Entity, With<StaticObstacle>>,
     mut commands: Commands,
     time: Res<Time<Fixed>>,
@@ -273,33 +273,15 @@ pub fn update_spatial_hash(
     let mut unchanged = 0;
     let mut new_count = 0;
     let mut new_obstacles = 0;
-    let mut multi_cell_count = 0;
-    let mut box_check_skips = 0;  // SC2-style: grid box didn't change
     
-    // Handle entities that don't have OccupiedCells yet (first time in spatial hash)
+    // Handle entities that don't have OccupiedCell yet (first time in spatial hash)
     for (entity, pos, collider) in new_entities.iter() {
         let is_obstacle = obstacles_query.contains(entity);
         
-        // Insert into all cells the entity's radius overlaps
-        // Now returns Vec<(col, row, vec_index)> for O(1) removal later
-        let occupied = if is_obstacle {
-            spatial_hash.insert_multi_cell_with_log(entity, pos.0, collider.radius, true)
-        } else {
-            spatial_hash.insert_multi_cell(entity, pos.0, collider.radius)
-        };
+        // Insert entity into spatial hash (automatically classifies by size and picks optimal grid)
+        let occupied = spatial_hash.insert(entity, pos.0, collider.radius);
         
-        if occupied.len() > 1 {
-            multi_cell_count += 1;
-        }
-        
-        // Calculate and cache the grid bounding box
-        let grid_box = spatial_hash.calculate_grid_box(pos.0, collider.radius);
-        
-        // Track which cells this entity occupies (now with Vec indices)
-        commands.entity(entity).insert(OccupiedCells {
-            cells: occupied,
-            last_grid_box: grid_box,
-        });
+        commands.entity(entity).insert(occupied);
         
         new_count += 1;
         
@@ -308,65 +290,37 @@ pub fn update_spatial_hash(
         }
     }
     
-    // Handle static obstacles - they never move, so skip them entirely
-    // (They were already inserted in the new_entities pass above)
-    
     // Collect index updates needed for swapped entities (avoid double-borrow)
     let mut pending_index_updates: Vec<(Entity, usize, usize, usize)> = Vec::new();
     
-    // Handle dynamic entities - SC2 approach: only update if grid box changed
-    for (entity, pos, collider, mut occupied_cells) in query.iter_mut() {
-        // Calculate what the grid bounding box should be now
-        let new_grid_box = spatial_hash.calculate_grid_box(pos.0, collider.radius);
-        
-        // SC2 Optimization: Compare bounding boxes (4 integer comparisons)
-        // If the box didn't change, the occupied cells cannot have changed
-        if new_grid_box == occupied_cells.last_grid_box {
-            box_check_skips += 1;
-            unchanged += 1;
-            continue;
-        }
-        
-        // Grid box changed - recalculate which cells the entity should be in
-        let new_cell_coords = spatial_hash.calculate_occupied_cells(pos.0, collider.radius);
-        
-        // SIMPLIFIED: Just remove from all old cells and insert into all new cells
-        // No symmetric difference - simpler and avoids sorting overhead
-        
-        // Remove from ALL old cells using O(1) swap_remove
-        let swapped_entities = spatial_hash.remove_multi_cell(&occupied_cells.cells);
-        
-        // Queue index updates for swapped entities (will apply in second pass)
-        for (col, row, swapped_entity) in swapped_entities {
-            // Find which index the removed entity was at (now where swapped entity is)
-            if let Some(&(_, _, removed_idx)) = occupied_cells.cells.iter()
-                .find(|&&(c, r, _)| c == col && r == row) {
-                pending_index_updates.push((swapped_entity, col, row, removed_idx));
+    // Handle dynamic entities - check if they should update cells
+    for (entity, pos, _collider, mut occupied_cell) in query.iter_mut() {
+        // Check if entity moved closer to opposite grid
+        if let Some(new_occupied) = spatial_hash.update(entity, pos.0, &occupied_cell) {
+            // Entity changed cells - check if anything was swapped
+            if let Some(swapped_entity) = spatial_hash.remove(&occupied_cell) {
+                // Queue index update for swapped entity
+                pending_index_updates.push((
+                    swapped_entity,
+                    occupied_cell.col,
+                    occupied_cell.row,
+                    occupied_cell.vec_idx,
+                ));
             }
-        }
-        
-        // Insert into ALL new cells and get back the Vec indices
-        let new_cells_with_indices = spatial_hash.insert_into_cells(entity, &new_cell_coords);
-        
-        // Update cached grid box and cells
-        occupied_cells.last_grid_box = new_grid_box;
-        occupied_cells.cells = new_cells_with_indices;
-        updates += 1;
-        
-        if occupied_cells.cells.len() > 1 {
-            multi_cell_count += 1;
+            
+            *occupied_cell = new_occupied;
+            updates += 1;
+        } else {
+            unchanged += 1;
         }
     }
     
     // Second pass: Apply pending index updates to swapped entities
     for (swapped_entity, col, row, new_idx) in pending_index_updates {
         if let Ok((_, _, _, mut swapped_occupied)) = query.get_mut(swapped_entity) {
-            // Find this (col, row) in swapped entity's cells and update its vec_idx
-            for cell_entry in &mut swapped_occupied.cells {
-                if cell_entry.0 == col && cell_entry.1 == row {
-                    cell_entry.2 = new_idx;
-                    break;
-                }
+            // Update the vec_idx if this is the right cell
+            if swapped_occupied.col == col && swapped_occupied.row == row {
+                swapped_occupied.vec_idx = new_idx;
             }
         }
     }
@@ -375,14 +329,15 @@ pub fn update_spatial_hash(
     let tick = (time.elapsed_secs() * 30.0) as u64;
     if duration.as_millis() > 2 || tick % 100 == 0 || new_obstacles > 0 {
         let total = new_count + updates + unchanged;
-        let box_skip_percent = if total > 0 { (box_check_skips as f32 / total as f32) * 100.0 } else { 0.0 };
+        let update_percent = if total > 0 { (updates as f32 / total as f32) * 100.0 } else { 0.0 };
         
-        info!("[SPATIAL_HASH_UPDATE] {:?} | Entities: {} (new: {} [{} obstacles], updated: {}, unchanged: {}, multi-cell: {})", 
-              duration, total, new_count, new_obstacles, updates, unchanged, multi_cell_count);
-        info!("  SC2 Grid Box Check: {}/{} skipped ({}%)",
-              box_check_skips, total, box_skip_percent as u32);
+        info!("[SPATIAL_HASH_UPDATE] {:?} | Entities: {} (new: {} [{} obstacles], updated: {}, unchanged: {})", 
+              duration, total, new_count, new_obstacles, updates, unchanged);
+        info!("  Staggered Grid Update Rate: {}/{} ({:.1}%)",
+              updates, total, update_percent);
     }
 }
+
 
 // ============================================================================
 // Flow Field Management
@@ -509,6 +464,7 @@ pub fn apply_new_obstacles(
 pub fn init_sim_config_from_initial(
     mut fixed_time: ResMut<Time<Fixed>>,
     mut sim_config: ResMut<SimConfig>,
+    mut spatial_hash: ResMut<SpatialHash>,
     initial_config: Option<Res<InitialConfig>>,
 ) {
     info!("Initializing SimConfig from InitialConfig (lightweight startup init)");
@@ -558,8 +514,17 @@ pub fn init_sim_config_from_initial(
     sim_config.wind_spot_strength = FixedNum::from_num(config.wind_spot_strength);
     sim_config.force_source_radius = FixedNum::from_num(config.force_source_radius);
     
+    // Initialize spatial hash with proper configuration
+    spatial_hash.resize(
+        sim_config.map_width,
+        sim_config.map_height,
+        &config.spatial_hash_entity_radii,
+        config.spatial_hash_radius_to_cell_ratio,
+    );
+    
     info!("SimConfig initialized with map size: {}x{}", 
           sim_config.map_width.to_num::<f32>(), sim_config.map_height.to_num::<f32>());
+    info!("SpatialHash initialized with {} size classes", spatial_hash.size_classes().len());
 }
 
 /// Handle hot-reloadable runtime configuration

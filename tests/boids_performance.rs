@@ -61,7 +61,7 @@ fn test_10k_units_boids_tick_under_16ms() {
         hash.clear();
         
         for (entity, pos) in positions {
-            hash.insert(entity, pos);
+            hash.insert(entity, pos, FixedNum::from_num(0.5));  // Default unit radius
         }
     }
     
@@ -131,7 +131,7 @@ fn test_spatial_query_correctness() {
         hash.clear();
         
         for (entity, pos) in positions {
-            hash.insert(entity, pos);
+            hash.insert(entity, pos, FixedNum::from_num(0.5));  // Default unit radius
         }
     }
     
@@ -213,7 +213,7 @@ fn test_boids_with_spatial_hash_vs_brute_force() {
         hash.clear();
         
         for (entity, pos) in positions {
-            hash.insert(entity, pos);
+            hash.insert(entity, pos, FixedNum::from_num(0.5));  // Default unit radius
         }
     }
     

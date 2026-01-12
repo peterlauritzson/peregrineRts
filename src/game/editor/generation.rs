@@ -91,7 +91,8 @@ pub fn handle_generation(
     spatial_hash.resize(
         FixedNum::from_num(map_width),
         FixedNum::from_num(map_height),
-        FixedNum::from_num(2.0)
+        &[0.5, 10.0, 25.0],  // Use default entity radii
+        4.0  // Default radius to cell ratio
     );
     info!("Updated SpatialHash for new map size");
 

@@ -6,18 +6,20 @@ mod query;
 #[cfg(test)]
 mod tests;
 
-/// Spatial partitioning grid for efficient proximity queries in 2D space.
+pub use grid::{StaggeredGrid, SizeClass};
+use crate::game::fixed_math::FixedVec2;
+use crate::game::simulation::components::OccupiedCell;
+
+/// Staggered Multi-Resolution Spatial Hash for efficient proximity queries.
 ///
-/// The spatial hash divides the game world into a uniform grid of cells, allowing
-/// O(1) amortized insertion and efficient proximity queries by only checking
-/// entities in nearby cells.
+/// **NEW DESIGN (January 2026):**
+/// - Multiple cell sizes for different entity size ranges
+/// - Each cell size has TWO offset grids (Grid A and Grid B) staggered by half_cell
+/// - Entities are ALWAYS single-cell (inserted into whichever grid they're closest to center of)
+/// - Memory: 25 bytes per entity (vs 96 bytes for old multi-cell approach)
+/// - Update threshold: ~half_cell distance (much rarer than multi-cell updates)
 ///
-/// # Use Cases
-///
-/// - **Collision Detection:** Find entities within collision radius
-/// - **Boids/Flocking:** Query neighbors for separation, alignment, cohesion
-/// - **AI/Aggro:** Find nearby enemies or threats
-/// - **Area Effects:** Find all entities in blast radius
+/// See SPATIAL_PARTITIONING.md Section 2.2 for detailed explanation.
 ///
 /// # Example
 ///
@@ -27,118 +29,265 @@ mod tests;
 /// use peregrine::game::spatial_hash::SpatialHash;
 ///
 /// let mut hash = SpatialHash::new(
-///     FixedNum::from_num(100.0), // map width
-///     FixedNum::from_num(100.0), // map height  
-///     FixedNum::from_num(5.0)    // cell size
+///     FixedNum::from_num(100.0),  // map width
+///     FixedNum::from_num(100.0),  // map height  
+///     &[0.5, 10.0],               // entity radii
+///     4.0                         // radius to cell ratio
 /// );
 ///
-/// // Insert entities
-/// let entity = Entity::PLACEHOLDER;
-/// let pos = FixedVec2::new(FixedNum::from_num(10.0), FixedNum::from_num(20.0));
-/// hash.insert(entity, pos);
-///
-/// // Query nearby entities within radius (excludes self)
-/// let radius = FixedNum::from_num(5.0);
-/// let nearby = hash.query_radius(entity, pos, radius);
-/// assert_eq!(nearby.len(), 0); // No other entities nearby
+/// // Entities are automatically classified by size and inserted into appropriate grid
 /// ```
-///
-/// # Performance
-///
-/// - **Insert:** O(1) amortized
-/// - **Query:** O(k) where k = entities in nearby cells (typically << N)
-/// - **Clear:** O(1) (reuses allocated vectors)
-///
-/// # Implementation Notes
-///
-/// - Uses fixed-point math for deterministic cross-platform behavior
-/// - Cells use `Vec<Entity>` for cache locality and O(1) indexed removal
-/// - OccupiedCells component tracks Vec indices for O(1) removal via swap_remove
-/// - Origin is at bottom-left corner of map (-width/2, -height/2)
 #[derive(Resource)]
 pub struct SpatialHash {
-    cell_size: FixedNum,
-    cols: usize,
-    rows: usize,
-    cells: Vec<Vec<Entity>>,
+    /// Array of size classes, each with staggered grids
+    size_classes: Vec<SizeClass>,
+    
+    /// Map from entity radius to size class index
+    /// Precomputed during initialization: [(max_radius, class_index), ...]
+    radius_to_class: Vec<(FixedNum, u8)>,
+    
     map_width: FixedNum,
     map_height: FixedNum,
 }
 
 impl SpatialHash {
-    pub fn new(map_width: FixedNum, map_height: FixedNum, cell_size: FixedNum) -> Self {
-        let cols = (map_width / cell_size).ceil().to_num::<usize>() + 1;
-        let rows = (map_height / cell_size).ceil().to_num::<usize>() + 1;
+    /// Initialize spatial hash with staggered multi-resolution grids
+    ///
+    /// # Arguments
+    /// * `map_width` - Width of the game map
+    /// * `map_height` - Height of the game map
+    /// * `entity_radii` - Expected entity sizes in game (e.g., [0.5, 10.0, 25.0])
+    /// * `radius_to_cell_ratio` - Desired ratio between cell size and entity radius (e.g., 4.0)
+    pub fn new(
+        map_width: FixedNum,
+        map_height: FixedNum,
+        entity_radii: &[f32],
+        radius_to_cell_ratio: f32,
+    ) -> Self {
+        // Step 1: Determine unique cell sizes needed
+        let mut cell_sizes = Vec::new();
+        for &radius in entity_radii {
+            let cell_size = FixedNum::from_num(radius) * FixedNum::from_num(radius_to_cell_ratio);
+            
+            // Merge similar cell sizes (within 20% of each other)
+            let existing = cell_sizes.iter().find(|&&cs: &&FixedNum| {
+                let ratio = (cs / cell_size).to_num::<f32>();
+                ratio >= 0.8 && ratio <= 1.2
+            });
+            
+            if existing.is_none() {
+                cell_sizes.push(cell_size);
+            }
+        }
+        
+        // Sort cell sizes (smallest to largest)
+        cell_sizes.sort();
+        
+        // Step 2: Create size classes with staggered grids
+        let size_classes: Vec<SizeClass> = cell_sizes.iter()
+            .map(|&cell_size| SizeClass::new(map_width, map_height, cell_size))
+            .collect();
+        
+        // Step 3: Build radius-to-class mapping
+        let mut radius_to_class = Vec::new();
+        for (idx, &cell_size) in cell_sizes.iter().enumerate() {
+            let max_radius = cell_size / FixedNum::from_num(radius_to_cell_ratio);
+            radius_to_class.push((max_radius, idx as u8));
+        }
         
         Self {
-            cell_size,
-            cols,
-            rows,
-            cells: vec![Vec::new(); cols * rows],
+            size_classes,
+            radius_to_class,
             map_width,
             map_height,
         }
     }
-
-    pub fn resize(&mut self, map_width: FixedNum, map_height: FixedNum, cell_size: FixedNum) {
-        let cols = (map_width / cell_size).ceil().to_num::<usize>() + 1;
-        let rows = (map_height / cell_size).ceil().to_num::<usize>() + 1;
-        
-        self.map_width = map_width;
-        self.map_height = map_height;
-        self.cell_size = cell_size;
-        self.cols = cols;
-        self.rows = rows;
-        self.cells = vec![Vec::new(); cols * rows];
+    
+    pub fn resize(&mut self, map_width: FixedNum, map_height: FixedNum, entity_radii: &[f32], radius_to_cell_ratio: f32) {
+        *self = Self::new(map_width, map_height, entity_radii, radius_to_cell_ratio);
     }
 
     pub fn clear(&mut self) {
-        for cell in &mut self.cells {
-            cell.clear();
+        for size_class in &mut self.size_classes {
+            size_class.clear();
         }
     }
 
-    /// Count the total number of entity entries across all cells.
-    /// Useful for debugging and diagnostics.
     pub fn total_entries(&self) -> usize {
-        self.cells.iter().map(|cell| cell.len()).sum()
+        self.size_classes.iter().map(|sc| sc.total_entries()).sum()
     }
 
-    /// Count the number of non-empty cells.
-    /// Useful for debugging and diagnostics.
     pub fn non_empty_cells(&self) -> usize {
-        self.cells.iter().filter(|cell| !cell.is_empty()).count()
+        // Count across all grids in all size classes
+        self.size_classes.iter()
+            .map(|sc| {
+                sc.grid_a.cells_in_radius(FixedVec2::ZERO, self.map_width).iter().filter(|c| !c.is_empty()).count() +
+                sc.grid_b.cells_in_radius(FixedVec2::ZERO, self.map_width).iter().filter(|c| !c.is_empty()).count()
+            })
+            .sum()
     }
 
-    /// Iterate over all cells and their contents for diagnostics.
-    /// Returns an iterator over references to Vec<Entity>.
-    pub fn iter_cells(&self) -> impl Iterator<Item = &Vec<Entity>> + '_ {
-        self.cells.iter()
-    }
-
-    /// Iterate over all cells with their (row, col) coordinates for diagnostics.
-    /// Returns tuples of (row, col, &Vec<Entity>).
-    pub fn iter_cells_with_coords(&self) -> impl Iterator<Item = (usize, usize, &Vec<Entity>)> + '_ {
-        self.cells.iter().enumerate().map(move |(idx, cell)| {
-            let row = idx / self.cols;
-            let col = idx % self.cols;
-            (row, col, cell)
-        })
-    }
-
-    // Getters for grid parameters
-    pub fn cell_size(&self) -> FixedNum { self.cell_size }
+    // Getters
     pub fn map_width(&self) -> FixedNum { self.map_width }
     pub fn map_height(&self) -> FixedNum { self.map_height }
-    pub fn cols(&self) -> usize { self.cols }
-    pub fn rows(&self) -> usize { self.rows }
-
-    // Internal accessor for submodules
-    pub(crate) fn cells(&self) -> &Vec<Vec<Entity>> {
-        &self.cells
+    
+    // For compatibility with old API (returns cell size of first size class)
+    pub fn cell_size(&self) -> FixedNum {
+        self.size_classes.first().map(|sc| sc.cell_size).unwrap_or(FixedNum::from_num(2.0))
     }
-
-    pub(crate) fn cells_mut(&mut self) -> &mut Vec<Vec<Entity>> {
-        &mut self.cells
+    
+    pub fn cols(&self) -> usize {
+        self.size_classes.first().map(|sc| sc.grid_a.cols).unwrap_or(0)
+    }
+    
+    pub fn rows(&self) -> usize {
+        self.size_classes.first().map(|sc| sc.grid_a.rows).unwrap_or(0)
+    }
+    
+    /// Get reference to size classes (for advanced usage)
+    pub fn size_classes(&self) -> &[SizeClass] {
+        &self.size_classes
+    }
+    
+    // ============================================================================
+    // Entity Management (Insert, Remove, Update)
+    // ============================================================================
+    
+    /// Classify entity by radius to determine which size class it belongs to
+    fn classify_entity(&self, radius: FixedNum) -> u8 {
+        for &(max_radius, class_idx) in &self.radius_to_class {
+            if radius <= max_radius {
+                return class_idx;
+            }
+        }
+        // Default to largest size class
+        (self.size_classes.len() - 1) as u8
+    }
+    
+    /// Insert entity into spatial hash
+    /// Returns OccupiedCell component to attach to the entity
+    pub fn insert(&mut self, entity: Entity, pos: FixedVec2, radius: FixedNum) -> OccupiedCell {
+        let size_class_idx = self.classify_entity(radius);
+        let size_class = &mut self.size_classes[size_class_idx as usize];
+        
+        // Find nearest center in Grid A
+        let (col_a, row_a) = size_class.grid_a.pos_to_cell(pos);
+        let center_a = size_class.grid_a.cell_center(col_a, row_a);
+        let dist_a_sq = (pos - center_a).length_squared();
+        
+        // Find nearest center in Grid B
+        let (col_b, row_b) = size_class.grid_b.pos_to_cell(pos);
+        let center_b = size_class.grid_b.cell_center(col_b, row_b);
+        let dist_b_sq = (pos - center_b).length_squared();
+        
+        // Insert into whichever grid is closer
+        let (grid_offset, col, row, vec_idx) = if dist_a_sq < dist_b_sq {
+            let idx = size_class.grid_a.insert_entity(col_a, row_a, entity);
+            (0, col_a, row_a, idx)
+        } else {
+            let idx = size_class.grid_b.insert_entity(col_b, row_b, entity);
+            (1, col_b, row_b, idx)
+        };
+        
+        size_class.entity_count += 1;
+        
+        OccupiedCell {
+            size_class: size_class_idx,
+            grid_offset,
+            col,
+            row,
+            vec_idx,
+        }
+    }
+    
+    /// Remove entity from spatial hash
+    /// Returns Some(swapped_entity) if another entity was swapped to this index
+    pub fn remove(&mut self, occupied: &OccupiedCell) -> Option<Entity> {
+        let size_class = &mut self.size_classes[occupied.size_class as usize];
+        
+        let grid = if occupied.grid_offset == 0 {
+            &mut size_class.grid_a
+        } else {
+            &mut size_class.grid_b
+        };
+        
+        let removed = grid.remove_entity(occupied.col, occupied.row, occupied.vec_idx);
+        
+        if removed.is_some() {
+            size_class.entity_count -= 1;
+        }
+        
+        removed
+    }
+    
+    /// Check if entity should update its cell (moved closer to opposite grid)
+    /// Returns Some(new_occupied_cell) if entity should be re-inserted
+    pub fn should_update(&self, pos: FixedVec2, occupied: &OccupiedCell) -> Option<(u8, usize, usize)> {
+        let size_class = &self.size_classes[occupied.size_class as usize];
+        
+        // Get current grid center
+        let current_grid = if occupied.grid_offset == 0 {
+            &size_class.grid_a
+        } else {
+            &size_class.grid_b
+        };
+        let current_center = current_grid.cell_center(occupied.col, occupied.row);
+        
+        // Get opposite grid center
+        let opposite_grid = if occupied.grid_offset == 0 {
+            &size_class.grid_b
+        } else {
+            &size_class.grid_a
+        };
+        let (opp_col, opp_row) = opposite_grid.pos_to_cell(pos);
+        let opposite_center = opposite_grid.cell_center(opp_col, opp_row);
+        
+        // Check if now closer to opposite grid
+        let dist_current = (pos - current_center).length_squared();
+        let dist_opposite = (pos - opposite_center).length_squared();
+        
+        if dist_opposite < dist_current {
+            let opposite_offset = if occupied.grid_offset == 0 { 1 } else { 0 };
+            Some((opposite_offset, opp_col, opp_row))
+        } else {
+            None
+        }
+    }
+    
+    /// Update entity position in spatial hash
+    /// Returns Some(new_occupied_cell) if entity changed cells
+    pub fn update(
+        &mut self,
+        entity: Entity,
+        pos: FixedVec2,
+        occupied: &OccupiedCell,
+    ) -> Option<OccupiedCell> {
+        if let Some((new_grid_offset, new_col, new_row)) = self.should_update(pos, occupied) {
+            // Remove from current cell
+            self.remove(occupied);
+            
+            // Insert into new cell
+            let size_class = &mut self.size_classes[occupied.size_class as usize];
+            let grid = if new_grid_offset == 0 {
+                &mut size_class.grid_a
+            } else {
+                &mut size_class.grid_b
+            };
+            
+            let vec_idx = grid.insert_entity(new_col, new_row, entity);
+            size_class.entity_count += 1;
+            
+            Some(OccupiedCell {
+                size_class: occupied.size_class,
+                grid_offset: new_grid_offset,
+                col: new_col,
+                row: new_row,
+                vec_idx,
+            })
+        } else {
+            None
+        }
     }
 }
+
+

@@ -182,25 +182,37 @@ impl Default for BoidsNeighborCache {
 ///
 /// This approach is superior to distance-based checks because:
 /// - Only 4 integer comparisons (no floating point math)
-/// - Exact (no false positives or accumulation bugs)
-/// - Works correctly for multi-cell entities
+/// Component tracking which cell an entity occupies in the spatial hash.
+///
+/// **NEW DESIGN (Staggered Multi-Resolution Grids):**
+/// - Entities are ALWAYS single-cell (no multi-cell complexity)
+/// - Inserted into whichever grid (A or B) they're closest to center of
+/// - Only updates when entity crosses midpoint between grid centers
 ///
 /// See SPATIAL_PARTITIONING.md Section 2.2 for detailed explanation.
 #[derive(Component, Debug, Clone)]
-pub struct OccupiedCells {
-    /// All (col, row, vec_index) tuples this entity currently occupies in the spatial hash
-    /// vec_index is the index in the cell's Vec<Entity> for O(1) removal via swap_remove
-    pub cells: Vec<(usize, usize, usize)>,
-    /// Cached grid bounding box: (min_col, min_row, max_col, max_row)
-    /// If this doesn't change, the occupied cells haven't changed
-    pub last_grid_box: (usize, usize, usize, usize),
+pub struct OccupiedCell {
+    /// Which cell size class (index into SpatialHash.size_classes)
+    pub size_class: u8,
+    /// Which grid (0 = Grid A, 1 = Grid B)
+    pub grid_offset: u8,
+    /// Cell column
+    pub col: usize,
+    /// Cell row
+    pub row: usize,
+    /// Index in cell's Vec<Entity> for O(1) removal via swap_remove
+    pub vec_idx: usize,
 }
 
-impl Default for OccupiedCells {
+impl Default for OccupiedCell {
     fn default() -> Self {
         Self {
-            cells: Vec::new(),
-            last_grid_box: (usize::MAX, usize::MAX, 0, 0),  // Invalid box - force update on first tick
+            size_class: 0,
+            grid_offset: 0,
+            col: 0,
+            row: 0,
+            vec_idx: 0,
         }
     }
 }
+

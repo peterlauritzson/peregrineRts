@@ -88,7 +88,7 @@ pub fn update_neighbor_cache(
             
             // Use detailed logging version if we have very few units
             cache.neighbors = if total_units <= 5 {
-                spatial_hash.get_potential_collisions_with_log(
+                spatial_hash.get_potential_collisions(
                     pos.0, 
                     search_radius, 
                     Some(entity)

@@ -6,7 +6,8 @@ fn test_query_radius_finds_entities_within_range() {
     let mut hash = SpatialHash::new(
         FixedNum::from_num(100.0),
         FixedNum::from_num(100.0),
-        FixedNum::from_num(10.0),
+        &[0.5, 10.0, 25.0],
+        4.0,
     );
 
     let entity_a = Entity::from_bits(1);
@@ -18,9 +19,9 @@ fn test_query_radius_finds_entities_within_range() {
     let pos_b = FixedVec2::new(FixedNum::from_num(5.0), FixedNum::from_num(0.0)); // 5 units away
     let pos_c = FixedVec2::new(FixedNum::from_num(0.0), FixedNum::from_num(5.0)); // 5 units away
 
-    hash.insert(entity_a, pos_a);
-    hash.insert(entity_b, pos_b);
-    hash.insert(entity_c, pos_c);
+    hash.insert(entity_a, pos_a, FixedNum::from_num(0.5));
+    hash.insert(entity_b, pos_b, FixedNum::from_num(0.5));
+    hash.insert(entity_c, pos_c, FixedNum::from_num(0.5));
 
     // Query from entity_a with radius 10 (should find B and C, but not self)
     let results = hash.query_radius(entity_a, pos_a, FixedNum::from_num(10.0));
@@ -36,7 +37,8 @@ fn test_query_radius_excludes_entities_outside_range() {
     let mut hash = SpatialHash::new(
         FixedNum::from_num(100.0),
         FixedNum::from_num(100.0),
-        FixedNum::from_num(10.0),
+        &[0.5, 10.0, 25.0],
+        4.0,
     );
 
     let entity_a = Entity::from_bits(1);
@@ -47,9 +49,9 @@ fn test_query_radius_excludes_entities_outside_range() {
     let pos_b = FixedVec2::new(FixedNum::from_num(3.0), FixedNum::from_num(0.0)); // 3 units away
     let pos_c = FixedVec2::new(FixedNum::from_num(20.0), FixedNum::from_num(0.0)); // 20 units away
 
-    hash.insert(entity_a, pos_a);
-    hash.insert(entity_b, pos_b);
-    hash.insert(entity_c, pos_c);
+    hash.insert(entity_a, pos_a, FixedNum::from_num(0.5));
+    hash.insert(entity_b, pos_b, FixedNum::from_num(0.5));
+    hash.insert(entity_c, pos_c, FixedNum::from_num(0.5));
 
     // Query with radius 5 (should find B but not C)
     let results = hash.query_radius(entity_a, pos_a, FixedNum::from_num(5.0));
@@ -67,13 +69,14 @@ fn test_spatial_hash_excludes_self() {
     let mut hash = SpatialHash::new(
         FixedNum::from_num(100.0),
         FixedNum::from_num(100.0),
-        FixedNum::from_num(10.0),
+        &[0.5, 10.0, 25.0],
+        4.0,
     );
 
     let entity = Entity::from_bits(1);
     let pos = FixedVec2::new(FixedNum::from_num(0.0), FixedNum::from_num(0.0));
 
-    hash.insert(entity, pos);
+    hash.insert(entity, pos, FixedNum::from_num(0.5));
 
     // Query from same entity - should NOT include self
     let results = hash.query_radius(entity, pos, FixedNum::from_num(10.0));
@@ -86,7 +89,8 @@ fn test_spatial_hash_query_finds_neighbors() {
     let mut hash = SpatialHash::new(
         FixedNum::from_num(100.0),
         FixedNum::from_num(100.0),
-        FixedNum::from_num(10.0),
+        &[0.5, 10.0, 25.0],
+        4.0,
     );
 
     let entity_a = Entity::from_bits(1);
@@ -95,8 +99,8 @@ fn test_spatial_hash_query_finds_neighbors() {
     let pos_a = FixedVec2::new(FixedNum::from_num(0.0), FixedNum::from_num(0.0));
     let pos_b = FixedVec2::new(FixedNum::from_num(2.0), FixedNum::from_num(2.0));
 
-    hash.insert(entity_a, pos_a);
-    hash.insert(entity_b, pos_b);
+    hash.insert(entity_a, pos_a, FixedNum::from_num(0.5));
+    hash.insert(entity_b, pos_b, FixedNum::from_num(0.5));
 
     // A should find B but not itself
     let results = hash.query_radius(entity_a, pos_a, FixedNum::from_num(5.0));
@@ -114,7 +118,8 @@ fn test_spatial_hash_empty_cell_returns_empty() {
     let hash = SpatialHash::new(
         FixedNum::from_num(100.0),
         FixedNum::from_num(100.0),
-        FixedNum::from_num(10.0),
+        &[0.5, 10.0, 25.0],
+        4.0,
     );
 
     let entity = Entity::from_bits(1);
@@ -130,7 +135,8 @@ fn test_spatial_hash_boundary_cases() {
     let mut hash = SpatialHash::new(
         FixedNum::from_num(100.0),
         FixedNum::from_num(100.0),
-        FixedNum::from_num(10.0),
+        &[0.5, 10.0, 25.0],
+        4.0,
     );
 
     // Test entities at boundaries of the map
@@ -143,9 +149,9 @@ fn test_spatial_hash_boundary_cases() {
     let pos_center = FixedVec2::new(FixedNum::from_num(0.0), FixedNum::from_num(0.0));
     let pos_edge = FixedVec2::new(FixedNum::from_num(49.0), FixedNum::from_num(0.0));
 
-    hash.insert(entity_corner, pos_corner);
-    hash.insert(entity_center, pos_center);
-    hash.insert(entity_edge, pos_edge);
+    hash.insert(entity_corner, pos_corner, FixedNum::from_num(0.5));
+    hash.insert(entity_center, pos_center, FixedNum::from_num(0.5));
+    hash.insert(entity_edge, pos_edge, FixedNum::from_num(0.5));
 
     // Query from corner with small radius - should not find center or edge
     let results = hash.query_radius(entity_corner, pos_corner, FixedNum::from_num(5.0));
@@ -161,7 +167,8 @@ fn test_query_radius_returns_same_results_as_brute_force() {
     let mut hash = SpatialHash::new(
         FixedNum::from_num(100.0),
         FixedNum::from_num(100.0),
-        FixedNum::from_num(10.0),
+        &[0.5, 10.0, 25.0],
+        4.0,
     );
 
     // Create multiple entities at various positions
@@ -176,7 +183,7 @@ fn test_query_radius_returns_same_results_as_brute_force() {
 
     // Insert into spatial hash
     for (entity, pos) in &entities {
-        hash.insert(*entity, *pos);
+        hash.insert(*entity, *pos, FixedNum::from_num(0.5));
     }
 
     let query_entity = entities[0].0;
@@ -223,13 +230,14 @@ fn test_get_potential_collisions_excludes_self() {
     let mut hash = SpatialHash::new(
         FixedNum::from_num(100.0),
         FixedNum::from_num(100.0),
-        FixedNum::from_num(10.0),
+        &[0.5, 10.0, 25.0],
+        4.0,
     );
 
     let entity = Entity::from_bits(1);
     let pos = FixedVec2::new(FixedNum::from_num(0.0), FixedNum::from_num(0.0));
 
-    hash.insert(entity, pos);
+    hash.insert(entity, pos, FixedNum::from_num(0.5));
 
     // Query with exclude_entity set - should NOT include self
     let results = hash.get_potential_collisions(pos, FixedNum::from_num(10.0), Some(entity));
@@ -242,15 +250,16 @@ fn test_get_potential_collisions_includes_all_without_exclusion() {
     let mut hash = SpatialHash::new(
         FixedNum::from_num(100.0),
         FixedNum::from_num(100.0),
-        FixedNum::from_num(10.0),
+        &[0.5, 10.0, 25.0],
+        4.0,
     );
 
     let entity1 = Entity::from_bits(1);
     let entity2 = Entity::from_bits(2);
     let pos = FixedVec2::new(FixedNum::from_num(0.0), FixedNum::from_num(0.0));
 
-    hash.insert(entity1, pos);
-    hash.insert(entity2, pos);
+    hash.insert(entity1, pos, FixedNum::from_num(0.5));
+    hash.insert(entity2, pos, FixedNum::from_num(0.5));
 
     // Query with None - should include all entities
     let results = hash.get_potential_collisions(pos, FixedNum::from_num(10.0), None);
@@ -263,7 +272,8 @@ fn test_get_potential_collisions_finds_neighbors_excludes_self() {
     let mut hash = SpatialHash::new(
         FixedNum::from_num(100.0),
         FixedNum::from_num(100.0),
-        FixedNum::from_num(10.0),
+        &[0.5, 10.0, 25.0],
+        4.0,
     );
 
     let entity1 = Entity::from_bits(1);
@@ -271,8 +281,8 @@ fn test_get_potential_collisions_finds_neighbors_excludes_self() {
     let pos1 = FixedVec2::new(FixedNum::from_num(0.0), FixedNum::from_num(0.0));
     let pos2 = FixedVec2::new(FixedNum::from_num(5.0), FixedNum::from_num(0.0));
 
-    hash.insert(entity1, pos1);
-    hash.insert(entity2, pos2);
+    hash.insert(entity1, pos1, FixedNum::from_num(0.5));
+    hash.insert(entity2, pos2, FixedNum::from_num(0.5));
 
     // Query from entity1 with exclusion - should find entity2 but not entity1
     let results = hash.get_potential_collisions(pos1, FixedNum::from_num(10.0), Some(entity1));
