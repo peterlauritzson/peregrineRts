@@ -11,6 +11,10 @@ pub struct StaggeredGrid {
     offset: FixedVec2,  // Grid A: (0, 0), Grid B: (cell_size/2, cell_size/2)
     map_width: FixedNum,
     map_height: FixedNum,
+    // Pre-computed constants to avoid repeated divisions in hot paths
+    half_map_width: FixedNum,
+    half_map_height: FixedNum,
+    half_cell: FixedNum,  // 0.5 for cell center calculations
 }
 
 impl StaggeredGrid {
@@ -26,17 +30,17 @@ impl StaggeredGrid {
             offset,
             map_width,
             map_height,
+            half_map_width: map_width / FixedNum::from_num(2.0),
+            half_map_height: map_height / FixedNum::from_num(2.0),
+            half_cell: FixedNum::from_num(0.5),
         }
     }
     
     /// Convert world position to cell coordinates
     pub fn pos_to_cell(&self, pos: FixedVec2) -> (usize, usize) {
-        let half_w = self.map_width / FixedNum::from_num(2.0);
-        let half_h = self.map_height / FixedNum::from_num(2.0);
-        
         // Shift to [0, w] and apply grid offset
-        let x = pos.x + half_w - self.offset.x;
-        let y = pos.y + half_h - self.offset.y;
+        let x = pos.x + self.half_map_width - self.offset.x;
+        let y = pos.y + self.half_map_height - self.offset.y;
         
         let col = (x / self.cell_size).floor().to_num::<isize>().max(0).min((self.cols - 1) as isize) as usize;
         let row = (y / self.cell_size).floor().to_num::<isize>().max(0).min((self.rows - 1) as isize) as usize;
@@ -46,14 +50,10 @@ impl StaggeredGrid {
     
     /// Calculate the center of a cell in world coordinates
     pub fn cell_center(&self, col: usize, row: usize) -> FixedVec2 {
-        let half_w = self.map_width / FixedNum::from_num(2.0);
-        let half_h = self.map_height / FixedNum::from_num(2.0);
-        let half = FixedNum::from_num(0.5);
+        let center_x = (FixedNum::from_num(col) + self.half_cell) * self.cell_size + self.offset.x;
+        let center_y = (FixedNum::from_num(row) + self.half_cell) * self.cell_size + self.offset.y;
         
-        let center_x = (FixedNum::from_num(col) + half) * self.cell_size + self.offset.x;
-        let center_y = (FixedNum::from_num(row) + half) * self.cell_size + self.offset.y;
-        
-        FixedVec2::new(center_x - half_w, center_y - half_h)
+        FixedVec2::new(center_x - self.half_map_width, center_y - self.half_map_height)
     }
     
     /// Insert entity into cell and return Vec index
