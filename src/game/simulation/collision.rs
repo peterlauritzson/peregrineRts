@@ -155,7 +155,7 @@ pub fn update_boids_neighbor_cache(
     mut query: Query<(Entity, &SimPosition, &SimVelocity, &mut BoidsNeighborCache)>,
     spatial_hash: Res<SpatialHash>,
     sim_config: Res<SimConfig>,
-    all_units: Query<&SimVelocity>,
+    all_units: Query<(&SimPosition, &SimVelocity)>,
     time: Res<Time<Fixed>>,
 ) {
     let start_time = std::time::Instant::now();
@@ -182,15 +182,15 @@ pub fn update_boids_neighbor_cache(
             cache_misses += 1;
             
             // Query spatial hash with boids neighbor radius (5.0 units)
-            let nearby = spatial_hash.query_radius(entity, pos.0, sim_config.neighbor_radius);
+            let nearby_entities = spatial_hash.query_radius(entity, pos.0, sim_config.neighbor_radius);
             
             // Get closest N neighbors efficiently using partial sort
-            // Previously we just took the first N from spatial hash which had spatial bias!
-            let mut neighbors_with_dist: Vec<_> = nearby.iter()
-                .filter_map(|(neighbor_entity, neighbor_pos)| {
-                    if let Ok(neighbor_vel) = all_units.get(*neighbor_entity) {
-                        let dist_sq = (pos.0 - *neighbor_pos).length_squared();
-                        Some((*neighbor_entity, *neighbor_pos, neighbor_vel.0, dist_sq))
+            // Query SimPosition and SimVelocity components for each nearby entity
+            let mut neighbors_with_dist: Vec<_> = nearby_entities.iter()
+                .filter_map(|&neighbor_entity| {
+                    if let Ok((neighbor_pos, neighbor_vel)) = all_units.get(neighbor_entity) {
+                        let dist_sq = (pos.0 - neighbor_pos.0).length_squared();
+                        Some((neighbor_entity, neighbor_pos.0, neighbor_vel.0, dist_sq))
                     } else {
                         None
                     }
@@ -310,13 +310,13 @@ pub fn detect_collisions(
         total_neighbors_found += neighbors_count;
         max_neighbors_found = max_neighbors_found.max(neighbors_count);
         
-        for &(other_entity, _) in &cache.neighbors {
+        for &other_entity in &cache.neighbors {
             if entity > other_entity { 
                 total_duplicate_skips += 1;
                 continue; 
             } // Avoid duplicates (self already excluded)
             
-            // Get current position from position_lookup (not cached position)
+            // Get current position from SimPosition component (not cached)
             if let Ok((other_pos, other_collider)) = position_lookup.get(other_entity) {
                 // Check layers
                 if (collider.mask & other_collider.layer) == 0 && (other_collider.mask & collider.layer) == 0 {
@@ -509,7 +509,7 @@ pub fn resolve_obstacle_collisions(
         // Obstacles are already in the spatial hash, so they appear in cached neighbors
         total_neighbors_checked += cache.neighbors.len();
         
-        for &(neighbor_entity, _) in &cache.neighbors {
+        for &neighbor_entity in &cache.neighbors {
             // Check if this neighbor is a static obstacle
             let Ok((obs_pos, obs_collider)) = obstacle_query.get(neighbor_entity) else {
                 continue;

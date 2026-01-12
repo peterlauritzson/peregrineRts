@@ -26,16 +26,16 @@ impl SpatialHash {
         Some(row * self.cols() + col)
     }
 
-    pub fn insert(&mut self, entity: Entity, pos: FixedVec2) {
-        if let Some(idx) = self.get_cell_idx(pos) {
-            self.cells_mut()[idx].push((entity, pos));
+    pub fn insert(&mut self, entity: Entity, _pos: FixedVec2) {
+        if let Some(idx) = self.get_cell_idx(_pos) {
+            self.cells_mut()[idx].insert(entity);
         }
     }
 
     /// Insert with logging for debugging obstacle detection
     pub fn insert_with_log(&mut self, entity: Entity, pos: FixedVec2, is_obstacle: bool, _radius: Option<FixedNum>) {
         if let Some(idx) = self.get_cell_idx(pos) {
-            self.cells_mut()[idx].push((entity, pos));
+            self.cells_mut()[idx].insert(entity);
             // Removed per-obstacle logging - too verbose
         } else {
             if is_obstacle {
@@ -50,7 +50,7 @@ impl SpatialHash {
     pub fn remove(&mut self, entity: Entity, col: usize, row: usize) {
         let idx = row * self.cols() + col;
         if idx < self.cells().len() {
-            self.cells_mut()[idx].retain(|&(e, _)| e != entity);
+            self.cells_mut()[idx].remove(&entity);
         }
     }
 
@@ -105,6 +105,31 @@ impl SpatialHash {
         cells
     }
 
+    /// Calculate the grid bounding box (in grid coordinates) that an entity's radius overlaps.
+    /// Returns (min_col, min_row, max_col, max_row).
+    ///
+    /// This is the StarCraft 2 optimization: by comparing bounding boxes instead of positions,
+    /// we can detect when cells haven't changed with just 4 integer comparisons.
+    /// If the box didn't change, the occupied cells cannot have changed.
+    pub fn calculate_grid_box(&self, pos: FixedVec2, radius: FixedNum) -> (usize, usize, usize, usize) {
+        let half_w = self.map_width() / FixedNum::from_num(2.0);
+        let half_h = self.map_height() / FixedNum::from_num(2.0);
+        
+        // Calculate the bounding box of cells the entity overlaps
+        let min_x = pos.x - radius + half_w;
+        let max_x = pos.x + radius + half_w;
+        let min_y = pos.y - radius + half_h;
+        let max_y = pos.y + radius + half_h;
+        
+        // Convert to grid coordinates, clamped to valid range
+        let min_col = (min_x / self.cell_size()).floor().to_num::<isize>().max(0) as usize;
+        let max_col = (max_x / self.cell_size()).floor().to_num::<isize>().min((self.cols() as isize) - 1).max(0) as usize;
+        let min_row = (min_y / self.cell_size()).floor().to_num::<isize>().max(0) as usize;
+        let max_row = (max_y / self.cell_size()).floor().to_num::<isize>().min((self.rows() as isize) - 1).max(0) as usize;
+        
+        (min_col, min_row, max_col, max_row)
+    }
+
     /// Calculate the world position of the center of the cell containing the given position.
     /// This is used for fast-path cell change detection without expensive division operations.
     ///
@@ -140,14 +165,14 @@ impl SpatialHash {
     ///
     /// This should be used for all entity insertions to ensure correct collision
     /// detection with variable entity sizes.
-    pub fn insert_multi_cell(&mut self, entity: Entity, pos: FixedVec2, radius: FixedNum) -> Vec<(usize, usize)> {
-        let cells = self.calculate_occupied_cells(pos, radius);
+    pub fn insert_multi_cell(&mut self, entity: Entity, _pos: FixedVec2, radius: FixedNum) -> Vec<(usize, usize)> {
+        let cells = self.calculate_occupied_cells(_pos, radius);
         
         // Insert into each overlapping cell
         for &(col, row) in &cells {
             let idx = row * self.cols() + col;
             if idx < self.cells().len() {
-                self.cells_mut()[idx].push((entity, pos));
+                self.cells_mut()[idx].insert(entity);
             }
         }
         
@@ -169,10 +194,21 @@ impl SpatialHash {
         for &(col, row) in &cells {
             let idx = row * self.cols() + col;
             if idx < self.cells().len() {
-                self.cells_mut()[idx].push((entity, pos));
+                self.cells_mut()[idx].insert(entity);
             }
         }
         
         cells
+    }
+
+    /// Insert an entity into specific pre-calculated cells.
+    /// Used when updating entities that have moved - caller computes which cells to add/remove.
+    pub fn insert_into_cells(&mut self, entity: Entity, cells: &[(usize, usize)]) {
+        for &(col, row) in cells {
+            let idx = row * self.cols() + col;
+            if idx < self.cells().len() {
+                self.cells_mut()[idx].insert(entity);
+            }
+        }
     }
 }

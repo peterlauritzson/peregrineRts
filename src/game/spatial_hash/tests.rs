@@ -1,4 +1,5 @@
 use super::*;
+use crate::game::fixed_math::FixedVec2;
 
 #[test]
 fn test_query_radius_finds_entities_within_range() {
@@ -25,9 +26,9 @@ fn test_query_radius_finds_entities_within_range() {
     let results = hash.query_radius(entity_a, pos_a, FixedNum::from_num(10.0));
 
     assert_eq!(results.len(), 2, "Should find 2 neighbors within radius");
-    assert!(results.iter().any(|(e, _)| *e == entity_b), "Should find entity B");
-    assert!(results.iter().any(|(e, _)| *e == entity_c), "Should find entity C");
-    assert!(!results.iter().any(|(e, _)| *e == entity_a), "Should NOT find self");
+    assert!(results.iter().any(|e| *e == entity_b), "Should find entity B");
+    assert!(results.iter().any(|e| *e == entity_c), "Should find entity C");
+    assert!(!results.iter().any(|e| *e == entity_a), "Should NOT find self");
 }
 
 #[test]
@@ -55,7 +56,7 @@ fn test_query_radius_excludes_entities_outside_range() {
 
     // Note: query_radius returns all entities in the grid cells, not filtered by actual distance
     // So this test verifies the grid-based spatial partitioning works
-    assert!(results.iter().any(|(e, _)| *e == entity_b), "Should find nearby entity B");
+    assert!(results.iter().any(|e| *e == entity_b), "Should find nearby entity B");
     
     // Entity C is far enough to be in different grid cells with small radius
     // With cell_size=10 and radius=5, we only check cells within that range
@@ -100,12 +101,12 @@ fn test_spatial_hash_query_finds_neighbors() {
     // A should find B but not itself
     let results = hash.query_radius(entity_a, pos_a, FixedNum::from_num(5.0));
     assert_eq!(results.len(), 1, "A should find exactly one neighbor (B)");
-    assert_eq!(results[0].0, entity_b, "A should find B");
+    assert_eq!(results[0], entity_b, "A should find B");
 
     // B should find A but not itself
     let results = hash.query_radius(entity_b, pos_b, FixedNum::from_num(5.0));
     assert_eq!(results.len(), 1, "B should find exactly one neighbor (A)");
-    assert_eq!(results[0].0, entity_a, "B should find A");
+    assert_eq!(results[0], entity_a, "B should find A");
 }
 
 #[test]
@@ -194,7 +195,7 @@ fn test_query_radius_returns_same_results_as_brute_force() {
             let dx = (query_pos.x - pos.x).abs();
             let dy = (query_pos.y - pos.y).abs();
             if dx <= query_radius && dy <= query_radius {
-                brute_force_results.push((*entity, *pos));
+                brute_force_results.push(*entity);
             }
         }
     }
@@ -208,12 +209,11 @@ fn test_query_radius_returns_same_results_as_brute_force() {
     );
 
     // All brute force results should be in spatial results
-    for (entity, pos) in &brute_force_results {
+    for entity in &brute_force_results {
         assert!(
-            spatial_results.iter().any(|(e, p)| e == entity && p == pos),
-            "Spatial hash should find entity {:?} at {:?}",
-            entity,
-            pos
+            spatial_results.iter().any(|e| e == entity),
+            "Spatial hash should find entity {:?}",
+            entity
         );
     }
 }
@@ -278,6 +278,6 @@ fn test_get_potential_collisions_finds_neighbors_excludes_self() {
     let results = hash.get_potential_collisions(pos1, FixedNum::from_num(10.0), Some(entity1));
 
     assert_eq!(results.len(), 1, "Should find 1 neighbor");
-    assert_eq!(results[0].0, entity2, "Should find entity2");
-    assert!(results.iter().all(|(e, _)| *e != entity1), "Should not find self");
+    assert_eq!(results[0], entity2, "Should find entity2");
+    assert!(results.iter().all(|e| *e != entity1), "Should not find self");
 }

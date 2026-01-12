@@ -1,5 +1,6 @@
 use bevy::prelude::*;
-use crate::game::fixed_math::{FixedNum, FixedVec2};
+use crate::game::fixed_math::FixedNum;
+use rustc_hash::FxHashSet;
 
 mod grid;
 mod query;
@@ -59,7 +60,7 @@ pub struct SpatialHash {
     cell_size: FixedNum,
     cols: usize,
     rows: usize,
-    cells: Vec<Vec<(Entity, FixedVec2)>>,
+    cells: Vec<FxHashSet<Entity>>,
     map_width: FixedNum,
     map_height: FixedNum,
 }
@@ -73,7 +74,7 @@ impl SpatialHash {
             cell_size,
             cols,
             rows,
-            cells: vec![Vec::new(); cols * rows],
+            cells: vec![FxHashSet::default(); cols * rows],
             map_width,
             map_height,
         }
@@ -88,7 +89,7 @@ impl SpatialHash {
         self.cell_size = cell_size;
         self.cols = cols;
         self.rows = rows;
-        self.cells = vec![Vec::new(); cols * rows];
+        self.cells = vec![FxHashSet::default(); cols * rows];
     }
 
     pub fn clear(&mut self) {
@@ -109,6 +110,22 @@ impl SpatialHash {
         self.cells.iter().filter(|cell| !cell.is_empty()).count()
     }
 
+    /// Iterate over all cells and their contents for diagnostics.
+    /// Returns an iterator over references to FxHashSet<Entity>.
+    pub fn iter_cells(&self) -> impl Iterator<Item = &FxHashSet<Entity>> + '_ {
+        self.cells.iter()
+    }
+
+    /// Iterate over all cells with their (row, col) coordinates for diagnostics.
+    /// Returns tuples of (row, col, &FxHashSet<Entity>).
+    pub fn iter_cells_with_coords(&self) -> impl Iterator<Item = (usize, usize, &FxHashSet<Entity>)> + '_ {
+        self.cells.iter().enumerate().map(move |(idx, cell)| {
+            let row = idx / self.cols;
+            let col = idx % self.cols;
+            (row, col, cell)
+        })
+    }
+
     // Getters for grid parameters
     pub fn cell_size(&self) -> FixedNum { self.cell_size }
     pub fn map_width(&self) -> FixedNum { self.map_width }
@@ -117,11 +134,11 @@ impl SpatialHash {
     pub fn rows(&self) -> usize { self.rows }
 
     // Internal accessor for submodules
-    pub(crate) fn cells(&self) -> &Vec<Vec<(Entity, FixedVec2)>> {
+    pub(crate) fn cells(&self) -> &Vec<FxHashSet<Entity>> {
         &self.cells
     }
 
-    pub(crate) fn cells_mut(&mut self) -> &mut Vec<Vec<(Entity, FixedVec2)>> {
+    pub(crate) fn cells_mut(&mut self) -> &mut Vec<FxHashSet<Entity>> {
         &mut self.cells
     }
 }

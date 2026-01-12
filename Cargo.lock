@@ -3662,6 +3662,7 @@ dependencies = [
  "flate2",
  "rand",
  "ron 0.12.0",
+ "rustc-hash 2.1.1",
  "serde",
  "serde_json",
  "smallvec",

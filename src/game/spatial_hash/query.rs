@@ -6,16 +6,18 @@ impl SpatialHash {
     /// Returns all entities within query_radius of pos.
     /// If exclude_entity is Some, that entity will be excluded from results.
     /// This avoids wasted self-collision checks in collision detection.
-    pub fn get_potential_collisions(&self, pos: FixedVec2, query_radius: FixedNum, exclude_entity: Option<Entity>) -> Vec<(Entity, FixedVec2)> {
+    /// 
+    /// NOTE: Only returns Entity IDs. Callers must query SimPosition component for positions.
+    pub fn get_potential_collisions(&self, pos: FixedVec2, query_radius: FixedNum, exclude_entity: Option<Entity>) -> Vec<Entity> {
         self.get_potential_collisions_internal(pos, query_radius, exclude_entity, false)
     }
 
     /// Get potential collisions with optional debug logging
-    pub fn get_potential_collisions_with_log(&self, pos: FixedVec2, query_radius: FixedNum, exclude_entity: Option<Entity>) -> Vec<(Entity, FixedVec2)> {
+    pub fn get_potential_collisions_with_log(&self, pos: FixedVec2, query_radius: FixedNum, exclude_entity: Option<Entity>) -> Vec<Entity> {
         self.get_potential_collisions_internal(pos, query_radius, exclude_entity, true)
     }
 
-    fn get_potential_collisions_internal(&self, pos: FixedVec2, query_radius: FixedNum, exclude_entity: Option<Entity>, log: bool) -> Vec<(Entity, FixedVec2)> {
+    fn get_potential_collisions_internal(&self, pos: FixedVec2, query_radius: FixedNum, exclude_entity: Option<Entity>, log: bool) -> Vec<Entity> {
         let mut result = Vec::new();
         
         let half_w = self.map_width() / FixedNum::from_num(2.0);
@@ -45,23 +47,18 @@ impl SpatialHash {
                     if log && !self.cells()[idx].is_empty() {
                         info!("[SPATIAL_HASH_QUERY] Cell [{}, {}] (idx {}) contains {} entities",
                             col, row, idx, self.cells()[idx].len());
-                        for &(entity, entity_pos) in &self.cells()[idx] {
-                            let dist = (pos - entity_pos).length();
-                            info!("[SPATIAL_HASH_QUERY]   - Entity {:?} at ({:.2}, {:.2}), distance: {:.2}",
-                                entity, entity_pos.x.to_num::<f32>(), entity_pos.y.to_num::<f32>(), dist.to_num::<f32>());
-                        }
                     }
                     
                     if let Some(exclude) = exclude_entity {
                         // Exclude specific entity from results
-                        for &(entity, entity_pos) in &self.cells()[idx] {
+                        for &entity in &self.cells()[idx] {
                             if entity != exclude {
-                                result.push((entity, entity_pos));
+                                result.push(entity);
                             }
                         }
                     } else {
                         // Include all entities
-                        result.extend_from_slice(&self.cells()[idx]);
+                        result.extend(self.cells()[idx].iter().copied());
                     }
                 }
             }
@@ -77,7 +74,9 @@ impl SpatialHash {
     /// General proximity query for boids, aggro, and other proximity-based systems.
     /// Returns all entities within the specified radius, excluding the query entity itself.
     /// This enables O(1) amortized queries instead of O(N) brute force.
-    pub fn query_radius(&self, query_entity: Entity, pos: FixedVec2, radius: FixedNum) -> Vec<(Entity, FixedVec2)> {
+    /// 
+    /// NOTE: Only returns Entity IDs. Callers must query SimPosition component for positions.
+    pub fn query_radius(&self, query_entity: Entity, pos: FixedVec2, radius: FixedNum) -> Vec<Entity> {
         let mut result = Vec::new();
         
         let half_w = self.map_width() / FixedNum::from_num(2.0);
@@ -97,10 +96,10 @@ impl SpatialHash {
             for col in min_col..=max_col {
                 let idx = row * self.cols() + col;
                 if idx < self.cells().len() {
-                    for &(entity, entity_pos) in &self.cells()[idx] {
+                    for &entity in &self.cells()[idx] {
                         // Exclude self from results to avoid wasted cycles
                         if entity != query_entity {
-                            result.push((entity, entity_pos));
+                            result.push(entity);
                         }
                     }
                 }

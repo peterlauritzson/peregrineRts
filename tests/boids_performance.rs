@@ -147,13 +147,13 @@ fn test_spatial_query_correctness() {
     // Note: spatial hash returns entities in nearby grid cells, not exact radius
     // so we verify it finds the nearby one at minimum
     assert!(
-        results.iter().any(|(e, _)| *e == entity_near),
+        results.iter().any(|e| *e == entity_near),
         "Spatial query should find nearby entity"
     );
     
     // Should not find itself
     assert!(
-        !results.iter().any(|(e, _)| *e == entity_center),
+        !results.iter().any(|e| *e == entity_center),
         "Spatial query should not find itself"
     );
     

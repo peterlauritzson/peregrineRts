@@ -101,10 +101,11 @@ pub enum ForceType {
 /// 
 /// Stores the result of spatial hash queries to avoid redundant lookups.
 /// Cache is invalidated when the entity moves significantly or after a timeout.
+/// Note: Only stores Entity IDs - positions must be queried from SimPosition component.
 #[derive(Component, Debug, Clone)]
 pub struct CachedNeighbors {
-    /// List of nearby entities from last spatial query
-    pub neighbors: Vec<(Entity, FixedVec2)>,
+    /// List of nearby entity IDs from last spatial query
+    pub neighbors: Vec<Entity>,
     /// Position where the last query was performed
     pub last_query_pos: FixedVec2,
     /// Frames elapsed since last cache update
@@ -172,33 +173,33 @@ impl Default for BoidsNeighborCache {
 /// Without multi-cell storage, large entities can be invisible to queries from
 /// nearby small entities, causing collision detection failures.
 ///
-/// # Performance Optimization
+/// # Performance Optimization (StarCraft 2 Approach)
 ///
-/// To avoid expensive division operations every tick, we cache the world position
-/// of the entity's cell center. We can then do a fast comparison (just subtractions)
-/// to check if the entity is still within the same cell before doing expensive
-/// cell calculations.
+/// Instead of checking if an entity moved, we cache the grid bounding box
+/// (min/max grid coordinates) that the entity occupies. We only update the
+/// spatial hash if this bounding box changes. This is mathematically sound:
+/// if the box didn't change, the cells cannot have changed.
+///
+/// This approach is superior to distance-based checks because:
+/// - Only 4 integer comparisons (no floating point math)
+/// - Exact (no false positives or accumulation bugs)
+/// - Works correctly for multi-cell entities
 ///
 /// See SPATIAL_PARTITIONING.md Section 2.2 for detailed explanation.
 #[derive(Component, Debug, Clone)]
 pub struct OccupiedCells {
     /// All (col, row) pairs this entity currently occupies in the spatial hash
     pub cells: Vec<(usize, usize)>,
-    /// Cached world position of the center of the primary cell (for fast path check)
-    pub last_cell_center: FixedVec2,
-    /// Ticks since last full cell calculation (for velocity-based skip optimization)
-    pub ticks_since_update: u8,
-    /// Estimated ticks until entity exits current cell (based on velocity)
-    pub ticks_to_wall: u8,
+    /// Cached grid bounding box: (min_col, min_row, max_col, max_row)
+    /// If this doesn't change, the occupied cells haven't changed
+    pub last_grid_box: (usize, usize, usize, usize),
 }
 
 impl Default for OccupiedCells {
     fn default() -> Self {
         Self {
             cells: Vec::new(),
-            last_cell_center: FixedVec2::ZERO,
-            ticks_since_update: 255,  // Force update on first tick
-            ticks_to_wall: 0,  // Will be computed on first update
+            last_grid_box: (usize::MAX, usize::MAX, 0, 0),  // Invalid box - force update on first tick
         }
     }
 }
