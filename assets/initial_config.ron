@@ -59,7 +59,7 @@
     
     // Spatial Hash (Staggered Multi-Resolution)
     spatial_hash_entity_radii: [0.5, 10.0, 25.0],  // Expected entity sizes: units, medium obstacles, large obstacles
-    spatial_hash_radius_to_cell_ratio: 4.0,        // cell_size = radius × ratio
+    spatial_hash_radius_to_cell_ratio: 10.0,        // cell_size = radius × ratio
     
     // Spatial Hash Parallel Updates (Performance)
     spatial_hash_parallel_updates: true,           // Enable parallel processing (5-10× speedup on multi-core)

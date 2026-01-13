@@ -544,6 +544,8 @@ fn timed_spatial_hash(world: &mut World) {
     let t = Instant::now();
     // Use optimized phase-based version
     world.run_system_once(systems::update_spatial_hash_parallel).ok();
+    // Use sequential version (change to update_spatial_hash_parallel for parallel)
+    // world.run_system_once(systems::update_spatial_hash).ok();
     let elapsed = t.elapsed().as_secs_f32() * 1000.0;
     if let Some(timings) = world.get_resource::<SystemTimings>() {
         *timings.spatial_hash_ms.lock().unwrap() = elapsed;
@@ -721,7 +723,7 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
         FixedNum::from_num(map_size),
         FixedNum::from_num(map_size),
         &[0.5, 10.0, 25.0],  // Expected entity sizes
-        4.0,  // radius to cell ratio
+        15.0,  // radius to cell ratio
     ));
     
     // Add simulation config

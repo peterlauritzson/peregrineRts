@@ -3660,6 +3660,7 @@ dependencies = [
  "fastrand",
  "fixed",
  "flate2",
+ "peregrine_macros",
  "rand",
  "ron 0.12.0",
  "rustc-hash 2.1.1",
@@ -3668,6 +3669,15 @@ dependencies = [
  "smallvec",
  "tracing-appender",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "peregrine_macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
