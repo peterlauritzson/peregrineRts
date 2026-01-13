@@ -539,10 +539,11 @@ const PERF_TESTS: &[PerfTestConfig] = &[
     },
 ];
 
-// Timing wrapper systems
+// Timing wrapper systems  
 fn timed_spatial_hash(world: &mut World) {
     let t = Instant::now();
-    world.run_system_once(systems::update_spatial_hash).ok();
+    // Use optimized phase-based version
+    world.run_system_once(systems::update_spatial_hash_parallel).ok();
     let elapsed = t.elapsed().as_secs_f32() * 1000.0;
     if let Some(timings) = world.get_resource::<SystemTimings>() {
         *timings.spatial_hash_ms.lock().unwrap() = elapsed;

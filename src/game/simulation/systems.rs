@@ -265,6 +265,7 @@ pub fn update_spatial_hash(
     new_entities: Query<(Entity, &SimPosition, &Collider), Without<OccupiedCell>>,
     obstacles_query: Query<Entity, With<StaticObstacle>>,
     mut commands: Commands,
+    _sim_config: Res<SimConfig>,  // Keep for signature compatibility
     time: Res<Time<Fixed>>,
 ) {
     let start_time = std::time::Instant::now();
@@ -335,6 +336,100 @@ pub fn update_spatial_hash(
               duration, total, new_count, new_obstacles, updates, unchanged);
         info!("  Staggered Grid Update Rate: {}/{} ({:.1}%)",
               updates, total, update_percent);
+    }
+}
+
+/// Parallel spatial hash update using static partitioning + phase-based processing
+/// 
+/// Phase 1 (Parallel): Compute which entities need updates using par_iter
+/// Phase 2 (Sequential): Apply updates to spatial hash (batch processing)
+/// 
+/// This approach parallelizes the expensive computation while keeping updates sequential.
+pub fn update_spatial_hash_parallel(
+    mut spatial_hash: ResMut<SpatialHash>,
+    mut query: Query<(Entity, &SimPosition, &Collider, &mut OccupiedCell), Without<StaticObstacle>>,
+    new_entities: Query<(Entity, &SimPosition, &Collider), Without<OccupiedCell>>,
+    obstacles_query: Query<Entity, With<StaticObstacle>>,
+    mut commands: Commands,
+    _sim_config: Res<SimConfig>,
+    time: Res<Time<Fixed>>,
+) {
+    let start_time = std::time::Instant::now();
+    
+    let mut new_count = 0;
+    let mut new_obstacles = 0;
+    
+    // Handle new entities (rare, keep sequential)
+    for (entity, pos, collider) in new_entities.iter() {
+        let is_obstacle = obstacles_query.contains(entity);
+        let occupied = spatial_hash.insert(entity, pos.0, collider.radius);
+        commands.entity(entity).insert(occupied);
+        new_count += 1;
+        if is_obstacle {
+            new_obstacles += 1;
+        }
+    }
+    
+    // Phase 1: Parallel computation - find entities that need updates
+    // Pre-allocate with estimated capacity to reduce reallocations
+    use std::sync::Mutex;
+    let estimated_updates = query.iter().len() / 20; // ~5% typically need updates
+    let updates: Mutex<Vec<(Entity, OccupiedCell, OccupiedCell)>> = Mutex::new(Vec::with_capacity(estimated_updates));
+    
+    query.par_iter().for_each(|(entity, pos, _collider, occupied_cell)| {
+        if let Some((grid_offset, col, row)) = spatial_hash.should_update(pos.0, occupied_cell) {
+            let new_occupied = OccupiedCell {
+                size_class: occupied_cell.size_class,
+                grid_offset,
+                col,
+                row,
+                vec_idx: 0,
+            };
+            updates.lock().unwrap().push((entity, occupied_cell.clone(), new_occupied));
+        }
+    });
+    
+    let updates = updates.into_inner().unwrap();
+    let update_count = updates.len();
+    let unchanged = query.iter().len() - update_count;
+    
+    // Phase 2: Sequential apply - update spatial hash and components
+    // This is fast because we pre-computed everything
+    let mut pending_swaps: Vec<(Entity, usize, usize, usize)> = Vec::new();
+    
+    for (entity, old_occupied, new_occupied) in updates {
+        // Remove from old cell
+        if let Some(swapped_entity) = spatial_hash.remove(&old_occupied) {
+            pending_swaps.push((swapped_entity, old_occupied.col, old_occupied.row, old_occupied.vec_idx));
+        }
+        
+        // Insert into new cell
+        let vec_idx = spatial_hash.insert_into_cell(entity, &new_occupied);
+        
+        // Update component
+        if let Ok((_, _, _, mut occupied_cell)) = query.get_mut(entity) {
+            *occupied_cell = OccupiedCell { vec_idx, ..new_occupied };
+        }
+    }
+    
+    // Fix swapped entity indices
+    for (swapped_entity, col, row, new_idx) in pending_swaps {
+        if let Ok((_, _, _, mut swapped_occupied)) = query.get_mut(swapped_entity) {
+            if swapped_occupied.col == col && swapped_occupied.row == row {
+                swapped_occupied.vec_idx = new_idx;
+            }
+        }
+    }
+    
+    let duration = start_time.elapsed();
+    let tick = (time.elapsed_secs() * 30.0) as u64;
+    if duration.as_millis() > 2 || tick % 100 == 0 || new_obstacles > 0 {
+        let total = new_count + update_count + unchanged;
+        let update_percent = if total > 0 { (update_count as f32 / total as f32) * 100.0 } else { 0.0 };
+        
+        info!("[SPATIAL_HASH_PARALLEL] {:?} | Entities: {} (new: {}, updated: {}, unchanged: {})", 
+              duration, total, new_count, update_count, unchanged);
+        info!("  Update Rate: {}/{} ({:.1}%)", update_count, total, update_percent);
     }
 }
 
@@ -513,6 +608,10 @@ pub fn init_sim_config_from_initial(
     sim_config.black_hole_strength = FixedNum::from_num(config.black_hole_strength);
     sim_config.wind_spot_strength = FixedNum::from_num(config.wind_spot_strength);
     sim_config.force_source_radius = FixedNum::from_num(config.force_source_radius);
+    
+    // Spatial hash parallel updates
+    sim_config.spatial_hash_parallel_updates = config.spatial_hash_parallel_updates;
+    sim_config.spatial_hash_regions_per_axis = config.spatial_hash_regions_per_axis;
     
     // Initialize spatial hash with proper configuration
     spatial_hash.resize(

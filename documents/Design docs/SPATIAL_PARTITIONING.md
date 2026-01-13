@@ -226,10 +226,90 @@ fn should_update_cell(
 - No multi-cell symmetric difference
 - Just: "Am I closer to the other grid now?"
 
+### 2.9 Parallel Spatial Hash Updates (January 2026)
+
+**PERFORMANCE BOTTLENECK:**
+At massive scale (500k+ entities), spatial hash updates become a bottleneck when many entities simultaneously cross grid boundaries (causing spikes from 24ms to 75ms average).
+
+**SOLUTION: Spatial Partitioning with Parallel Processing**
+
+The map is divided into **update regions** (e.g., 10×10 = 100 regions) that can be processed in parallel:
+
+```rust
+// Divide map into NxN update regions
+const UPDATE_REGIONS: usize = 10; // 10×10 = 100 parallel chunks
+
+struct UpdateRegion {
+    min_x: FixedNum,
+    max_x: FixedNum,
+    min_y: FixedNum,
+    max_y: FixedNum,
+}
+```
+
+**Parallel Update Algorithm:**
+
+1. **Pre-compute region assignments** (parallel):
+   ```rust
+   // Each entity computes which region it belongs to
+   // This is a read-only operation - fully parallelizable
+   par_iter(entities).for_each(|(entity, pos, occupied)| {
+       let region_id = calculate_region(pos);
+       // Also check if update needed (should_update)
+       if should_update(pos, occupied) {
+           pending_updates[region_id].push((entity, new_cell_info));
+       }
+   });
+   ```
+
+2. **Apply updates per-region** (parallel):
+   ```rust
+   // Each region's updates can be applied independently
+   // No data races because regions map to disjoint cell ranges
+   pending_updates.par_iter().for_each(|region_updates| {
+       for (entity, new_cell) in region_updates {
+           spatial_hash.update_entity(entity, new_cell);
+       }
+   });
+   ```
+
+**Key Design Principles:**
+
+- **Region size balancing**: Regions should be ~4-10 cells wide (not too small = overhead, not too large = poor load balancing)
+- **Cross-region entities**: An entity moving from region A to region B is handled by computing its new region first, then applying update
+- **Load balancing**: With 100 regions, CPU cores stay saturated even if some regions are empty
+- **Determinism**: Process regions in consistent order or use atomic operations for swapped entity tracking
+- **Memory locality**: Entities in the same region tend to access nearby grid cells (cache-friendly)
+
+**Expected Performance:**
+
+- **Current (single-threaded)**: ~75ms spike when many entities update
+- **With 8-core parallelization**: ~10-15ms (5-7× speedup)
+- **With 16-core parallelization**: ~5-8ms (10-15× speedup)
+- **Scalability**: Near-linear scaling up to ~64 regions (then overhead dominates)
+
+**Implementation Complexity:**
+
+- Low: Bevy's `par_iter()` handles thread pool
+- Medium: Need careful region-to-cell mapping
+- Medium: Swapped entity tracking requires atomic/mutex coordination
+
+**Alternative Approach: Lock-Free Updates**
+
+Instead of spatial partitioning, use fine-grained locking per cell:
+```rust
+struct GridCell {
+    entities: Mutex<Vec<Entity>>,  // Lock per cell
+}
+```
+
+- **Pro**: Simpler implementation
+- **Con**: Higher contention, cache thrashing, harder to reason about
+- **Verdict**: Spatial partitioning is better for this use case
+
 ---
 
 ## 3. Use Case: Physical Collision Detection
----
 
 ## 3. Use Case: Physical Collision Detection
 

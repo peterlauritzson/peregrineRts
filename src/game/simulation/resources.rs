@@ -113,6 +113,12 @@ pub struct SimConfig {
     // Spatial Hash Optimization
     pub spatial_hash_max_ticks_without_update: u8,
     pub spatial_hash_velocity_estimate_scale: FixedNum,
+    
+    // Parallel Update Configuration
+    /// Enable parallel spatial hash updates (requires rayon)
+    pub spatial_hash_parallel_updates: bool,
+    /// Number of regions per axis for parallel updates (e.g., 10 = 10×10 = 100 regions)
+    pub spatial_hash_regions_per_axis: usize,
 }
 
 impl Default for SimConfig {
@@ -152,6 +158,8 @@ impl Default for SimConfig {
             force_source_radius: FixedNum::from_num(10.0),
             spatial_hash_max_ticks_without_update: 8,
             spatial_hash_velocity_estimate_scale: FixedNum::from_num(1.0),
+            spatial_hash_parallel_updates: true,  // Enable by default for performance
+            spatial_hash_regions_per_axis: 10,    // 10×10 = 100 parallel chunks
         }
     }
 }

@@ -99,6 +99,20 @@ impl Plugin for SimulationPlugin {
                 .run_if(in_state(GameState::InGame).or(in_state(GameState::Loading)))
         );
         
+        // Determine which spatial hash update system to use based on config
+        // Note: This must be decided at app setup time, not dynamically
+        let use_parallel = if let Ok(config_str) = std::env::var("SPATIAL_HASH_PARALLEL") {
+            config_str.to_lowercase() != "false" && config_str != "0"
+        } else {
+            true  // Default: use parallel updates
+        };
+        
+        let spatial_hash_system = if use_parallel {
+            systems::update_spatial_hash_parallel
+        } else {
+            systems::update_spatial_hash
+        };
+        
         // Fixed update systems (deterministic simulation)
         app.add_systems(FixedUpdate, (
             // Pre-simulation
@@ -117,7 +131,7 @@ impl Plugin for SimulationPlugin {
             physics::apply_velocity.in_set(SimSet::Integration),
             
             // Physics
-            systems::update_spatial_hash
+            spatial_hash_system
                 .in_set(SimSet::Physics)
                 .before(collision::update_neighbor_cache)
                 .before(collision::update_boids_neighbor_cache)

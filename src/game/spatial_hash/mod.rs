@@ -288,6 +288,21 @@ impl SpatialHash {
             None
         }
     }
+    
+    /// Insert entity into new cell (used by parallel updates)
+    /// Returns the vec_idx where the entity was inserted
+    pub fn insert_into_cell(&mut self, entity: Entity, new_occupied: &OccupiedCell) -> usize {
+        let size_class = &mut self.size_classes[new_occupied.size_class as usize];
+        let grid = if new_occupied.grid_offset == 0 {
+            &mut size_class.grid_a
+        } else {
+            &mut size_class.grid_b
+        };
+        
+        let vec_idx = grid.insert_entity(new_occupied.col, new_occupied.row, entity);
+        size_class.entity_count += 1;
+        vec_idx
+    }
 }
 
 
