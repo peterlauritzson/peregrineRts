@@ -285,6 +285,7 @@ impl HierarchicalGraph {
     /// 
     /// NOTE: This is the synchronous version - only use for tests or small maps.
     /// For loading screens, use build_routing_table_for_source() incrementally.
+    #[peregrine_macros::profile(1)]
     pub fn build_routing_table(&mut self) {
         self.cluster_routing_table.clear();
         
@@ -293,7 +294,6 @@ impl HierarchicalGraph {
         }
         
         info!("[ROUTING TABLE] Building cluster routing table for {} clusters...", self.clusters.len());
-        let start_time = std::time::Instant::now();
         
         // Collect cluster keys to avoid borrow checker issues
         let cluster_keys: Vec<_> = self.clusters.keys().cloned().collect();
@@ -305,8 +305,7 @@ impl HierarchicalGraph {
         
         let total_entries: usize = self.cluster_routing_table.values().map(|m| m.len()).sum();
         info!(
-            "[ROUTING TABLE] Built routing table in {:?}: {} cluster pairs, ~{} KB memory",
-            start_time.elapsed(),
+            "[ROUTING TABLE] Complete: {} cluster pairs, ~{} KB memory",
             total_entries,
             (total_entries * std::mem::size_of::<usize>() * 3) / 1024
         );

@@ -6,26 +6,56 @@
 use bevy::prelude::*;
 use crate::game::fixed_math::{FixedNum};
 use crate::game::structures::FlowField;
-use std::time::{Instant, Duration};
+// NOLINT: Duration is a data type for storing time values, not for profiling/timing
+use std::time::Duration;
+
+// ============================================================================
+// Simulation Tick Counter
+// ============================================================================
+
+/// Global deterministic tick counter for the simulation.
+/// 
+/// This resource is incremented once per fixed update cycle and provides
+/// a reliable, deterministic tick count for:
+/// - Conditional logging (every N ticks)
+/// - Replay/determinism validation
+/// - Time-independent simulation logic
+/// 
+/// # Determinism
+/// Unlike `Time<Fixed>::elapsed_secs()` which uses floats, this counter
+/// is purely integer-based and guaranteed to be identical across all clients
+/// in multiplayer scenarios.
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub struct SimTick(pub u64);
+
+impl SimTick {
+    /// Increment the tick counter (wraps on overflow)
+    pub fn increment(&mut self) {
+        self.0 = self.0.wrapping_add(1);
+    }
+    
+    /// Get the current tick value
+    pub fn get(&self) -> u64 {
+        self.0
+    }
+    
+    /// Check if this tick should trigger periodic logging (every 100 ticks)
+    pub fn should_log(&self) -> bool {
+        self.0 % 100 == 0
+    }
+}
 
 // ============================================================================
 // Performance Tracking
 // ============================================================================
 
-/// Performance tracking for simulation ticks
-#[derive(Resource)]
+/// Performance tracking for simulation ticks.
+/// 
+/// Stores the last recorded simulation tick duration for display in status logs.
+/// Individual system timing is handled by the #[profile] macro.
+#[derive(Resource, Default)]
 pub struct SimPerformance {
-    pub start_time: Option<Instant>,
     pub last_duration: Duration,
-}
-
-impl Default for SimPerformance {
-    fn default() -> Self {
-        Self {
-            start_time: None,
-            last_duration: Duration::from_secs(0),
-        }
-    }
 }
 
 // ============================================================================

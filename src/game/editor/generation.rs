@@ -10,6 +10,7 @@ use crate::game::config::{GameConfig, GameConfigHandle};
 use rand::Rng;
 use super::components::*;
 use super::input::spawn_obstacle;
+use peregrine_macros::profile;
 
 /// Handles the async map generation process
 pub fn handle_generation(
@@ -49,17 +50,11 @@ pub fn handle_generation(
     };
 
     let params = editor_state.generation_params;
-    let gen_start = std::time::Instant::now();
     info!("=== MAP GENERATION START ===");
     info!("Generating map: {}x{} with {} obstacles...", params.map_width, params.map_height, params.num_obstacles);
 
     // Clear existing obstacles
-    let clear_start = std::time::Instant::now();
-    let obstacle_count = obstacle_query.iter().count();
-    for entity in obstacle_query.iter() {
-        commands.entity(entity).despawn();
-    }
-    info!("Cleared {} existing obstacles in {:?}", obstacle_count, clear_start.elapsed());
+    clear_obstacles(&mut commands, &obstacle_query);
     
     // Clear existing units to prevent bounds issues when map size changes
     let unit_count = unit_query.iter().count();
@@ -71,10 +66,9 @@ pub fn handle_generation(
     }
     
     // Reset Graph and Build State
-    let graph_reset_start = std::time::Instant::now();
     graph.reset();
     build_state.step = GraphBuildStep::Done;
-    info!("Reset graph in {:?}", graph_reset_start.elapsed());
+    info!("Reset graph");
     
     // Use params from dialog
     let map_width = params.map_width;
@@ -112,14 +106,13 @@ pub fn handle_generation(
     info!("Creating FlowField: {} x {} cells ({}x{} world units)", 
           ff_width, ff_height, map_width, map_height);
 
-    let ff_start = std::time::Instant::now();
     map_flow_field.0 = FlowField::new(
         ff_width, 
         ff_height, 
         FixedNum::from_num(CELL_SIZE), 
         FixedVec2::new(FixedNum::from_num(-map_width/2.0), FixedNum::from_num(-map_height/2.0))
     );
-    info!("FlowField created successfully in {:?} (total cells: {})", ff_start.elapsed(), ff_width * ff_height);
+    info!("FlowField created successfully (total cells: {})", ff_width * ff_height);
     
     // Update ground plane mesh to match new map size
     for (entity, _mesh3d) in ground_plane_query.iter() {
@@ -132,11 +125,9 @@ pub fn handle_generation(
     // This ensures clusters and portals are valid for the new map size
     // before apply_new_obstacles tries to regenerate cluster flow fields
     info!("Building hierarchical graph for new map...");
-    let graph_start = std::time::Instant::now();
     graph.build_graph_sync(&map_flow_field.0);
     graph.initialized = true;
-    info!("Graph built in {:?} - {} clusters, {} portals", 
-        graph_start.elapsed(), 
+    info!("Graph built - {} clusters, {} portals", 
         graph.clusters.len(), 
         graph.nodes.len()
     );
@@ -144,28 +135,13 @@ pub fn handle_generation(
     // Spawn obstacles (if any)
     let num_obstacles = params.num_obstacles;
     if num_obstacles > 0 {
-        info!("Starting to spawn {} obstacles...", num_obstacles);
-        let spawn_start = std::time::Instant::now();
-        let mut rng = rand::rng();
-        
-        for i in 0..num_obstacles {
-            if i % 100 == 0 && i > 0 {
-                info!("  Spawned {}/{} obstacles ({:.1}%) - elapsed: {:?}", 
-                      i, num_obstacles, (i as f32 / num_obstacles as f32) * 100.0, spawn_start.elapsed());
-            }
-            let x = rng.random_range(-map_width/2.0..map_width/2.0);
-            let y = rng.random_range(-map_height/2.0..map_height/2.0);
-            let radius = rng.random_range(params.min_radius..params.max_radius);
-            
-            spawn_obstacle(&mut commands, FixedVec2::new(FixedNum::from_num(x), FixedNum::from_num(y)), FixedNum::from_num(radius), &editor_resources);
-        }
-        info!("Finished spawning all {} obstacles in {:?}", num_obstacles, spawn_start.elapsed());
+        spawn_obstacles(&mut commands, params, map_width, map_height, num_obstacles, &editor_resources);
     } else {
         info!("No obstacles to spawn.");
     }
 
     editor_state.is_generating = false;
-    info!("=== MAP GENERATION COMPLETE in {:?} ===", gen_start.elapsed());
+    info!("=== MAP GENERATION COMPLETE ===");
     info!("Map generation complete - NOT removing overlay yet, letting Bevy process entities first.");
     
     // DON'T remove loading overlay immediately - let it be removed on the next frame
@@ -195,3 +171,48 @@ pub fn check_finalization_complete(
         }
     }
 }
+
+// ============================================================================
+// Helper Functions (extracted for profiling annotations)
+// ============================================================================
+
+/// Clear existing obstacles from the map
+#[profile(1)]
+fn clear_obstacles(
+    commands: &mut Commands,
+    obstacle_query: &Query<Entity, With<StaticObstacle>>,
+) {
+    let obstacle_count = obstacle_query.iter().len();
+    for entity in obstacle_query.iter() {
+        commands.entity(entity).despawn();
+    }
+    info!("Cleared {} existing obstacles", obstacle_count);
+}
+
+/// Spawn random obstacles across the map
+#[profile(1)]
+fn spawn_obstacles(
+    commands: &mut Commands,
+    params: GenerationParams,
+    map_width: f32,
+    map_height: f32,
+    num_obstacles: usize,
+    editor_resources: &EditorResources,
+) {
+    info!("Starting to spawn {} obstacles...", num_obstacles);
+    let mut rng = rand::rng();
+    
+    for i in 0..num_obstacles {
+        if i % 100 == 0 && i > 0 {
+            info!("  Spawned {}/{} obstacles ({:.1}%)", 
+                  i, num_obstacles, (i as f32 / num_obstacles as f32) * 100.0);
+        }
+        let x = rng.random_range(-map_width/2.0..map_width/2.0);
+        let y = rng.random_range(-map_height/2.0..map_height/2.0);
+        let radius = rng.random_range(params.min_radius..params.max_radius);
+        
+        spawn_obstacle(commands, FixedVec2::new(FixedNum::from_num(x), FixedNum::from_num(y)), FixedNum::from_num(radius), editor_resources);
+    }
+    info!("Finished spawning all {} obstacles", num_obstacles);
+}
+

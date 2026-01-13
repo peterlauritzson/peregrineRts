@@ -8,17 +8,30 @@
 /// - Simulation timing/performance tracking
 
 use bevy::prelude::*;
-use crate::game::profiling::profile;
 use crate::game::fixed_math::{FixedVec2, FixedNum};
 use crate::game::config::{GameConfig, GameConfigHandle, InitialConfig};
 use crate::game::pathfinding::{Path, PathRequest, HierarchicalGraph, CLUSTER_SIZE, regenerate_cluster_flow_fields};
 use crate::game::spatial_hash::SpatialHash;
 use crate::game::structures::{FlowField, CELL_SIZE};
+use peregrine_macros::profile;
 
 use super::components::*;
 use super::resources::*;
 use super::events::*;
 use super::physics::seek;
+
+// ============================================================================
+// Tick Management
+// ============================================================================
+
+/// Increment the global simulation tick counter.
+/// 
+/// This system runs first in the FixedUpdate schedule to ensure all other
+/// systems have access to the current tick value for deterministic logic
+/// and conditional logging.
+pub fn increment_sim_tick(mut tick: ResMut<SimTick>) {
+    tick.increment();
+}
 
 // ============================================================================
 // Input Processing
@@ -584,42 +597,28 @@ pub fn update_sim_from_runtime_config(
 // Performance Tracking
 // ============================================================================
 
-/// Mark simulation tick start
+/// Log simulation status periodically
 pub fn sim_start(
-    stats: ResMut<SimPerformance>,
-    time: Res<Time<Fixed>>,
-    units_query: Query<Entity, With<crate::game::unit::Unit>>,
-    paths_query: Query<&Path>,
+    #[allow(unused_variables)] stats: Res<SimPerformance>,
+    #[allow(unused_variables)] tick: Res<SimTick>,
+    #[allow(unused_variables)] units_query: Query<Entity, With<crate::game::unit::Unit>>,
+    #[allow(unused_variables)] paths_query: Query<&Path>,
 ) {
+    use crate::profile_log;
     
-    // Log every 5 seconds (100 ticks at 20 Hz)
-    let tick = (time.elapsed_secs() * 20.0) as u64;
-    if tick % 100 == 0 {
-        let unit_count = units_query.iter().count();
-        let path_count = paths_query.iter().count();
-        info!("[SIM STATUS] Tick: {} | Units: {} | Active Paths: {} | Last sim duration: {:?}", 
-              tick, unit_count, path_count, stats.last_duration);
-    }
+    profile_log!(tick, "[SIM STATUS] Tick: {} | Units: {} | Active Paths: {} | Last sim duration: {:?}", 
+          tick.0, units_query.iter().len(), paths_query.iter().len(), stats.last_duration);
 }
 
-/// Mark simulation tick end and check performance
-pub fn sim_end(mut stats: ResMut<SimPerformance>) {
-    if let Some(start) = stats.start_time {
-        stats.last_duration = start.elapsed();
-        
-        // Performance threshold depends on build mode:
-        // - Debug builds are much slower (10-50x), so use a higher threshold
-        // - Release builds should target 60fps (16ms) or better
-        #[cfg(debug_assertions)]
-        const THRESHOLD_MS: u128 = 100; // Debug builds: warn if > 100ms
-        
-        #[cfg(not(debug_assertions))]
-        const THRESHOLD_MS: u128 = 16; // Release builds: warn if > 16ms (60fps)
-        
-        if stats.last_duration.as_millis() > THRESHOLD_MS {
-            warn!("Sim tick took too long: {:?}", stats.last_duration);
-        }
-    }
+/// Update simulation performance stats
+/// 
+/// NOTE: Individual system timing is handled by #[profile] macro.
+/// This tracks overall fixed update duration for monitoring.
+#[profile(16)]  // Warn if entire simulation tick > 16ms
+pub fn sim_end(mut stats: ResMut<SimPerformance>, time: Res<Time<Fixed>>) {
+    // Store the actual fixed timestep duration for status reporting
+    // This represents the configured tick duration, not the wall-clock time
+    stats.last_duration = time.delta();
 }
 
 // ... Additional loading/setup systems will be added later if needed

@@ -129,11 +129,23 @@ foreach ($file in $simulationFiles) {
         $matches = Select-String -Path $file.FullName -Pattern $check.Pattern -AllMatches
         foreach ($match in $matches) {
             $lineContent = $lines[$match.LineNumber - 1].Trim()
-            if ($lineContent -notmatch '^\s*//') {
-                $relativePath = $file.FullName.Replace("$PWD\\", "")
-                Write-Violation -File $relativePath -Line $match.LineNumber -Message $check.Message -Code $lineContent
-                $nonDetViolations++
+            
+            # Skip comments and NOLINT directives
+            if ($lineContent -match '^\s*//') {
+                continue
             }
+            
+            # Check if previous line has NOLINT comment
+            if ($match.LineNumber -gt 1) {
+                $prevLine = $lines[$match.LineNumber - 2].Trim()
+                if ($prevLine -match '//\s*NOLINT') {
+                    continue
+                }
+            }
+            
+            $relativePath = $file.FullName.Replace("$PWD\\", "")
+            Write-Violation -File $relativePath -Line $match.LineNumber -Message $check.Message -Code $lineContent
+            $nonDetViolations++
         }
     }
 }
@@ -143,7 +155,59 @@ if ($nonDetViolations -eq 0) {
 }
 
 # ============================================================================
-# CHECK 3: File Size Limits (300-400 line guideline)
+# CHECK 3: Time-Based Profiling (Should Use Tracy/Bevy Spans)
+# ============================================================================
+Write-Section "Checking for Time-Based Profiling"
+
+$timeProfilingPatterns = @(
+    @{ Pattern = '\.elapsed\(\)'; Message = 'Manual timing with .elapsed() - use Tracy spans or Bevy diagnostic spans instead' }
+    @{ Pattern = 'std::time'; Message = 'std::time usage - prefer Tracy/Bevy profiling over manual timing' }
+    @{ Pattern = 'Instant::now\(\)'; Message = 'Instant::now() for profiling - use Tracy spans or Bevy diagnostic spans instead' }
+)
+
+$allRustFiles = Get-ChildItem -Path "src" -Filter "*.rs" -Recurse
+$timeProfilingViolations = 0
+
+foreach ($file in $allRustFiles) {
+    $content = Get-Content $file.FullName -Raw
+    $lines = Get-Content $file.FullName
+    
+    # Skip if file is a test module
+    if ($content -match '#\[cfg\(test\)\]') {
+        continue
+    }
+    
+    foreach ($check in $timeProfilingPatterns) {
+        $matches = Select-String -Path $file.FullName -Pattern $check.Pattern -AllMatches
+        foreach ($match in $matches) {
+            $lineContent = $lines[$match.LineNumber - 1].Trim()
+            
+            # Skip comments and NOLINT directives
+            if ($lineContent -match '^\s*//') {
+                continue
+            }
+            
+            # Check if previous line has NOLINT comment
+            if ($match.LineNumber -gt 1) {
+                $prevLine = $lines[$match.LineNumber - 2].Trim()
+                if ($prevLine -match '//\s*NOLINT') {
+                    continue
+                }
+            }
+            
+            $relativePath = $file.FullName.Replace("$PWD\\", "")
+            Write-Violation -File $relativePath -Line $match.LineNumber -Message $check.Message -Code $lineContent
+            $timeProfilingViolations++
+        }
+    }
+}
+
+if ($timeProfilingViolations -eq 0) {
+    Write-Pass "No manual time-based profiling found"
+}
+
+# ============================================================================
+# CHECK 4: File Size Limits (300-400 line guideline)
 # ============================================================================
 Write-Section "Checking File Size Limits"
 
@@ -169,7 +233,7 @@ if ($oversizedFiles -eq 0) {
 }
 
 # ============================================================================
-# CHECK 4: Magic Numbers in Config-able Systems
+# CHECK 5: Magic Numbers in Config-able Systems
 # ============================================================================
 Write-Section "Checking for Magic Numbers (Heuristic)"
 
@@ -203,7 +267,7 @@ if ($magicNumberViolations -eq 0) {
 }
 
 # ============================================================================
-# CHECK 5: Avoid .clone() in Hot Paths (Performance Warning)
+# CHECK 6: Avoid .clone() in Hot Paths (Performance Warning)
 # ============================================================================
 Write-Section "Checking for Excessive Cloning"
 

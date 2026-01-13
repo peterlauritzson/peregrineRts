@@ -51,6 +51,7 @@ impl Plugin for SimulationPlugin {
         // Initialize resources (SpatialHash will be properly initialized in init_sim_config_from_initial)
         app.init_resource::<SimConfig>();
         app.init_resource::<SimPerformance>();
+        app.init_resource::<SimTick>();
         app.insert_resource(SpatialHash::new(
             FixedNum::from_num(100.0),
             FixedNum::from_num(100.0),
@@ -115,6 +116,9 @@ impl Plugin for SimulationPlugin {
         
         // Fixed update systems (deterministic simulation)
         app.add_systems(FixedUpdate, (
+            // Increment tick counter first (before all other systems)
+            systems::increment_sim_tick.before(systems::sim_start),
+            
             // Pre-simulation
             systems::sim_start.before(SimSet::Input),
             

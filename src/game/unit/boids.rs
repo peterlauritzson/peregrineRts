@@ -1,6 +1,8 @@
 use bevy::prelude::*;
 use crate::game::fixed_math::{FixedVec2, FixedNum};
-use crate::game::simulation::{SimPosition, SimVelocity, SimConfig, BoidsNeighborCache};
+use crate::game::simulation::{SimPosition, SimVelocity, SimConfig, BoidsNeighborCache, SimTick};
+use peregrine_macros::profile;
+use crate::profile_log;
 
 use super::components::Unit;
 
@@ -11,12 +13,12 @@ use super::components::Unit;
 /// - **Separation**: Avoid crowding neighbors that are too close
 /// - **Alignment**: Steer toward the average heading of neighbors
 /// - **Cohesion**: Steer toward the average position (center of mass) of neighbors
+#[profile(2)]
 pub(super) fn apply_boids_steering(
     mut query: Query<(Entity, &SimPosition, &mut SimVelocity, &BoidsNeighborCache), With<Unit>>,
     sim_config: Res<SimConfig>,
-    time: Res<bevy::time::Time<bevy::time::Fixed>>,
+    #[allow(unused_variables)] tick: Res<SimTick>,
 ) {
-    let start_time = std::time::Instant::now();
     
     let separation_weight = sim_config.separation_weight;
     let alignment_weight = sim_config.alignment_weight;
@@ -136,13 +138,7 @@ pub(super) fn apply_boids_steering(
         }
     }
     
-    // Log performance
-    let duration = start_time.elapsed();
-    let tick = (time.elapsed_secs() * 30.0) as u64;
-    let unit_count = query.iter().count();
-    if duration.as_millis() > 2 || tick % 100 == 0 {
-        warn!("[BOIDS_STEERING] {:?} | Units: {}", duration, unit_count);
-    }
+    profile_log!(tick, "[BOIDS_STEERING] Units: {}", query.iter().len());
 }
 
 #[cfg(test)]

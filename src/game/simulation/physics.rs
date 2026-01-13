@@ -11,28 +11,24 @@ use bevy::prelude::*;
 use crate::game::fixed_math::{FixedVec2, FixedNum};
 use super::components::*;
 use super::resources::*;
+use peregrine_macros::profile;
+use crate::profile_log;
 
 // ============================================================================
 // State Caching
 // ============================================================================
 
 /// Cache previous state for interpolation
+#[profile(2)]
 pub fn cache_previous_state(
     mut query: Query<(&mut SimPositionPrev, &SimPosition)>,
-    time: Res<Time<Fixed>>,
+    #[allow(unused_variables)] tick: Res<SimTick>,
 ) {
-    let start_time = std::time::Instant::now();
-    let entity_count = query.iter().count();
-    
     for (mut prev, pos) in query.iter_mut() {
         prev.0 = pos.0;
     }
     
-    let duration = start_time.elapsed();
-    let tick = (time.elapsed_secs() * 30.0) as u64;
-    if duration.as_millis() > 2 || tick % 100 == 0 {
-        info!("[CACHE_PREV_STATE] {:?} | Entities: {}", duration, entity_count);
-    }
+    profile_log!(tick, "[CACHE_PREV_STATE] Entities: {}", query.iter().len());
 }
 
 // ============================================================================
@@ -40,14 +36,13 @@ pub fn cache_previous_state(
 // ============================================================================
 
 /// Apply velocity to position
+#[profile(2)]
 pub fn apply_velocity(
     sim_config: Res<SimConfig>,
     mut query: Query<(&mut SimPosition, &mut SimVelocity, &mut SimAcceleration)>,
-    time: Res<Time<Fixed>>,
+    #[allow(unused_variables)] tick: Res<SimTick>,
 ) {
-    let start_time = std::time::Instant::now();
     let delta = FixedNum::from_num(1.0) / FixedNum::from_num(sim_config.tick_rate);
-    let entity_count = query.iter().count();
 
     for (mut pos, mut vel, mut acc) in query.iter_mut() {
         // Apply acceleration
@@ -65,22 +60,16 @@ pub fn apply_velocity(
         }
     }
     
-    let duration = start_time.elapsed();
-    let tick = (time.elapsed_secs() * 30.0) as u64;
-    if duration.as_millis() > 2 || tick % 100 == 0 {
-        info!("[APPLY_VELOCITY] {:?} | Entities: {}", duration, entity_count);
-    }
+    profile_log!(tick, "[APPLY_VELOCITY] Entities: {}", query.iter().len());
 }
 
 /// Apply friction to slow down entities
+#[profile(2)]
 pub fn apply_friction(
     mut query: Query<&mut SimVelocity>,
     sim_config: Res<SimConfig>,
-    time: Res<Time<Fixed>>,
+    #[allow(unused_variables)] tick: Res<SimTick>,
 ) {
-    let start_time = std::time::Instant::now();
-    let entity_count = query.iter().count();
-    
     let friction = sim_config.friction;
     let min_velocity_sq = sim_config.min_velocity * sim_config.min_velocity;
     for mut vel in query.iter_mut() {
@@ -90,11 +79,7 @@ pub fn apply_friction(
         }
     }
     
-    let duration = start_time.elapsed();
-    let tick = (time.elapsed_secs() * 30.0) as u64;
-    if duration.as_millis() > 2 || tick % 100 == 0 {
-        warn!("[APPLY_FRICTION] {:?} | Entities: {}", duration, entity_count);
-    }
+    profile_log!(tick, "[APPLY_FRICTION] Entities: {}", query.iter().len());
 }
 
 // ============================================================================
@@ -102,14 +87,12 @@ pub fn apply_friction(
 // ============================================================================
 
 /// Apply force sources (black holes, wind, etc.)
+#[profile(2)]
 pub fn apply_forces(
     mut units: Query<(&SimPosition, &mut SimAcceleration)>,
     sources: Query<(&SimPosition, &ForceSource)>,
-    time: Res<Time<Fixed>>,
+    #[allow(unused_variables)] tick: Res<SimTick>,
 ) {
-    let start_time = std::time::Instant::now();
-    let unit_count = units.iter().count();
-    
     for (u_pos, mut u_acc) in units.iter_mut() {
         for (s_pos, source) in sources.iter() {
              let delta = s_pos.0 - u_pos.0;
@@ -136,11 +119,7 @@ pub fn apply_forces(
         }
     }
     
-    let duration = start_time.elapsed();
-    let tick = (time.elapsed_secs() * 30.0) as u64;
-    if duration.as_millis() > 2 || tick % 100 == 0 {
-        info!("[APPLY_FORCES] {:?} | Units: {}", duration, unit_count);
-    }
+    profile_log!(tick, "[APPLY_FORCES] Units: {}", units.iter().len());
 }
 
 // ============================================================================

@@ -11,6 +11,7 @@ use super::astar::find_path_astar_local;
 use super::cluster_flow::generate_local_flow_field;
 use std::collections::BTreeMap;
 use crate::game::fixed_math::FixedNum;
+use peregrine_macros::profile;
 
 #[derive(Resource, Default)]
 pub struct GraphBuildState {
@@ -101,17 +102,7 @@ pub(super) fn incremental_build_graph(
             build_state.step = GraphBuildStep::InitializingClusters;
         }
         GraphBuildStep::InitializingClusters => {
-            let init_start = std::time::Instant::now();
-            for cy in 0..height_clusters {
-                for cx in 0..width_clusters {
-                    graph.clusters.insert((cx, cy), Cluster {
-                        id: (cx, cy),
-                        portals: Vec::new(),
-                        flow_field_cache: BTreeMap::new(),
-                    });
-                }
-            }
-            info!("Initialized {} clusters in {:?}", width_clusters * height_clusters, init_start.elapsed());
+            initialize_clusters(&mut graph, width_clusters, height_clusters);
             build_state.cx = 0;
             build_state.cy = 0;
             build_state.step = GraphBuildStep::FindingVerticalPortals;
@@ -216,7 +207,6 @@ pub(super) fn incremental_build_graph(
             if start_idx == 0 {
                 info!("Connecting intra-cluster portals (batch size: {})...", batch_size);
             }
-            let batch_start = std::time::Instant::now();
             for _ in 0..batch_size {
                 if build_state.current_cluster_idx < build_state.cluster_keys.len() {
                     let key = build_state.cluster_keys[build_state.current_cluster_idx];
@@ -231,10 +221,9 @@ pub(super) fn incremental_build_graph(
                 }
             }
             let end_idx = build_state.current_cluster_idx;
-            let batch_duration = batch_start.elapsed();
             if end_idx > start_idx && end_idx % 50 == 0 {
-                info!("  Connected {}/{} clusters - batch of {} took {:?}", 
-                      end_idx, build_state.cluster_keys.len(), end_idx - start_idx, batch_duration);
+                info!("  Connected {}/{} clusters - batch of {}", 
+                      end_idx, build_state.cluster_keys.len(), end_idx - start_idx);
             }
             loading_progress.progress = 0.40 + 0.20 * (build_state.current_cluster_idx as f32 / build_state.cluster_keys.len() as f32);
         }
@@ -245,7 +234,6 @@ pub(super) fn incremental_build_graph(
             if start_idx == 0 {
                 info!("Precomputing flow fields (batch size: {})...", batch_size);
             }
-            let batch_start = std::time::Instant::now();
             for _ in 0..batch_size {
                 if build_state.current_cluster_idx < build_state.cluster_keys.len() {
                     let key = build_state.cluster_keys[build_state.current_cluster_idx];
@@ -256,9 +244,7 @@ pub(super) fn incremental_build_graph(
                     
                     // Build connected components to detect unreachable regions
                     info!("Building connected components...");
-                    let conn_start = std::time::Instant::now();
-                    components.build_from_graph(&graph);
-                    info!("Connected components built in {:?}", conn_start.elapsed());
+                    build_connected_components(&mut components, &graph);
                     
                     // Move to routing table build step (starts at 80%)
                     build_state.step = GraphBuildStep::BuildingRoutingTable;
@@ -267,10 +253,9 @@ pub(super) fn incremental_build_graph(
                 }
             }
             let end_idx = build_state.current_cluster_idx;
-            let batch_duration = batch_start.elapsed();
             if end_idx > start_idx && end_idx % 50 == 0 {
-                info!("  Precomputed flow fields for {}/{} clusters - batch of {} took {:?}", 
-                      end_idx, build_state.cluster_keys.len(), end_idx - start_idx, batch_duration);
+                info!("  Precomputed flow fields for {}/{} clusters - batch of {}", 
+                      end_idx, build_state.cluster_keys.len(), end_idx - start_idx);
             }
             loading_progress.progress = 0.60 + 0.20 * (build_state.current_cluster_idx as f32 / build_state.cluster_keys.len() as f32);
         }
@@ -289,7 +274,6 @@ pub(super) fn incremental_build_graph(
             // Process routing table in batches to stay responsive
             let batch_size = initial_config.pathfinding_build_batch_size;
             let start_idx = build_state.routing_current_source_idx;
-            let batch_start = std::time::Instant::now();
             
             for _ in 0..batch_size {
                 if build_state.routing_current_source_idx < build_state.routing_source_clusters.len() {
@@ -311,10 +295,9 @@ pub(super) fn incremental_build_graph(
             }
             
             let end_idx = build_state.routing_current_source_idx;
-            let batch_duration = batch_start.elapsed();
             if end_idx > start_idx && end_idx % 50 == 0 {
-                info!("  Built routing table for {}/{} clusters - batch of {} took {:?}", 
-                      end_idx, build_state.routing_source_clusters.len(), end_idx - start_idx, batch_duration);
+                info!("  Built routing table for {}/{} clusters - batch of {}", 
+                      end_idx, build_state.routing_source_clusters.len(), end_idx - start_idx);
             }
             
             // Progress: 80% to 100% during routing table build (20% of total)
@@ -383,4 +366,37 @@ pub fn regenerate_cluster_flow_fields(
     cluster_key: (usize, usize),
 ) {
     precompute_flow_fields_for_cluster(graph, flow_field, cluster_key);
+}
+
+// ============================================================================
+// Helper Functions (extracted for profiling annotations)
+// ============================================================================
+
+/// Initialize cluster data structures
+#[profile(1)]
+fn initialize_clusters(
+    graph: &mut HierarchicalGraph,
+    width_clusters: usize,
+    height_clusters: usize,
+) {
+    for cy in 0..height_clusters {
+        for cx in 0..width_clusters {
+            graph.clusters.insert((cx, cy), Cluster {
+                id: (cx, cy),
+                portals: Vec::new(),
+                flow_field_cache: BTreeMap::new(),
+            });
+        }
+    }
+    info!("Initialized {} clusters", width_clusters * height_clusters);
+}
+
+/// Build connected components from graph
+#[profile(1)]
+fn build_connected_components(
+    components: &mut ConnectedComponents,
+    graph: &HierarchicalGraph,
+) {
+    components.build_from_graph(graph);
+    info!("Connected components built");
 }
