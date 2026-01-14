@@ -59,6 +59,16 @@ impl StaggeredGrid {
     /// Insert entity into cell and return Vec index
     pub fn insert_entity(&mut self, col: usize, row: usize, entity: Entity) -> usize {
         let idx = row * self.cols + col;
+        // Bounds check to prevent crashes
+        if idx >= self.cells.len() {
+            error!("insert_entity: idx {} out of bounds (cells.len={}), col={}, row={}, cols={}", 
+                   idx, self.cells.len(), col, row, self.cols);
+            // Clamp to last valid cell as fallback
+            let idx = self.cells.len().saturating_sub(1);
+            let vec_idx = self.cells[idx].len();
+            self.cells[idx].push(entity);
+            return vec_idx;
+        }
         let vec_idx = self.cells[idx].len();
         self.cells[idx].push(entity);
         vec_idx
@@ -68,7 +78,12 @@ impl StaggeredGrid {
     /// Returns Some(swapped_entity) if an entity was swapped to this index
     pub fn remove_entity(&mut self, col: usize, row: usize, vec_idx: usize) -> Option<Entity> {
         let idx = row * self.cols + col;
-        if idx < self.cells.len() && vec_idx < self.cells[idx].len() {
+        if idx >= self.cells.len() {
+            error!("remove_entity: idx {} out of bounds (cells.len={}), col={}, row={}, cols={}", 
+                   idx, self.cells.len(), col, row, self.cols);
+            return None;
+        }
+        if vec_idx < self.cells[idx].len() {
             self.cells[idx].swap_remove(vec_idx);
             // If we swapped, return the entity now at vec_idx
             if vec_idx < self.cells[idx].len() {

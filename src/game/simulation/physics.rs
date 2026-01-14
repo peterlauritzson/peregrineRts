@@ -43,20 +43,53 @@ pub fn apply_velocity(
     #[allow(unused_variables)] tick: Res<SimTick>,
 ) {
     let delta = FixedNum::from_num(1.0) / FixedNum::from_num(sim_config.tick_rate);
+    let max_velocity = sim_config.max_velocity;
+    let max_velocity_sq = max_velocity * max_velocity;
+    let max_acceleration = sim_config.max_acceleration;
+    let max_acceleration_sq = max_acceleration * max_acceleration;
+    let half_w = sim_config.map_width / FixedNum::from_num(2.0);
+    let half_h = sim_config.map_height / FixedNum::from_num(2.0);
 
     for (mut pos, mut vel, mut acc) in query.iter_mut() {
+        // Clamp acceleration to max_acceleration to prevent runaway forces
+        let acc_sq = acc.0.length_squared();
+        if acc_sq > max_acceleration_sq {
+            acc.0 = acc.0.normalize() * max_acceleration;
+        }
+        
         // Apply acceleration
         if acc.0.length_squared() > FixedNum::ZERO {
             vel.0 = vel.0 + acc.0 * delta;
-            // Limit velocity to max speed? Or let drag handle it?
-            // Let's clamp it for safety, though drag is better.
-            // Actually, let's not clamp here, let steering/drag handle it.
-            // But we should reset acceleration.
             acc.0 = FixedVec2::ZERO;
         }
+        
+        // Clamp velocity to max_velocity to prevent physics explosions
+        let vel_sq = vel.0.length_squared();
+        if vel_sq > max_velocity_sq {
+            vel.0 = vel.0.normalize() * max_velocity;
+        }
 
+        // Update position
         if vel.0.length_squared() > FixedNum::ZERO {
             pos.0 = pos.0 + vel.0 * delta;
+        }
+        
+        // Immediately constrain to map bounds after position update
+        let was_out_of_bounds = pos.0.x < -half_w || pos.0.x > half_w || 
+                                 pos.0.y < -half_h || pos.0.y > half_h;
+        
+        // Clamp position to map bounds
+        if pos.0.x < -half_w { pos.0.x = -half_w; }
+        if pos.0.x > half_w { pos.0.x = half_w; }
+        if pos.0.y < -half_h { pos.0.y = -half_h; }
+        if pos.0.y > half_h { pos.0.y = half_h; }
+        
+        // Zero velocity against walls
+        if was_out_of_bounds {
+            if pos.0.x <= -half_w && vel.0.x < FixedNum::ZERO { vel.0.x = FixedNum::ZERO; }
+            if pos.0.x >= half_w && vel.0.x > FixedNum::ZERO { vel.0.x = FixedNum::ZERO; }
+            if pos.0.y <= -half_h && vel.0.y < FixedNum::ZERO { vel.0.y = FixedNum::ZERO; }
+            if pos.0.y >= half_h && vel.0.y > FixedNum::ZERO { vel.0.y = FixedNum::ZERO; }
         }
     }
     
@@ -126,45 +159,8 @@ pub fn apply_forces(
 // Map Constraints
 // ============================================================================
 
-/// Constrain entities to map bounds
-pub fn constrain_to_map_bounds(
-    mut query: Query<(Entity, &mut SimPosition, &mut SimVelocity)>,
-    sim_config: Res<SimConfig>,
-) {
-    let half_w = sim_config.map_width / FixedNum::from_num(2.0);
-    let half_h = sim_config.map_height / FixedNum::from_num(2.0);
-    
-    let mut escaped_count = 0;
-
-    for (entity, mut pos, mut vel) in query.iter_mut() {
-        let was_out_of_bounds = pos.0.x < -half_w || pos.0.x > half_w || 
-                                 pos.0.y < -half_h || pos.0.y > half_h;
-        
-        // 1. Clamp Position
-        if pos.0.x < -half_w { pos.0.x = -half_w; }
-        if pos.0.x > half_w { pos.0.x = half_w; }
-        if pos.0.y < -half_h { pos.0.y = -half_h; }
-        if pos.0.y > half_h { pos.0.y = half_h; }
-        
-        if was_out_of_bounds {
-            escaped_count += 1;
-            if escaped_count <= 3 {
-                warn!("[BOUNDS] Entity {:?} was outside map bounds! Pos: {:?}, Bounds: ±{} x ±{}", 
-                      entity, pos.0, half_w, half_h);
-            }
-        }
-
-        // 2. Zero Velocity against walls
-        if pos.0.x <= -half_w && vel.0.x < FixedNum::ZERO { vel.0.x = FixedNum::ZERO; }
-        if pos.0.x >= half_w && vel.0.x > FixedNum::ZERO { vel.0.x = FixedNum::ZERO; }
-        if pos.0.y <= -half_h && vel.0.y < FixedNum::ZERO { vel.0.y = FixedNum::ZERO; }
-        if pos.0.y >= half_h && vel.0.y > FixedNum::ZERO { vel.0.y = FixedNum::ZERO; }
-    }
-    
-    if escaped_count > 3 {
-        warn!("[BOUNDS] {} total entities escaped map bounds this tick!", escaped_count);
-    }
-}
+// Note: Map bounds constraint is now integrated into apply_velocity system
+// to ensure positions are always valid before spatial hash updates
 
 // ============================================================================
 // Steering Helpers

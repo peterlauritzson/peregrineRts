@@ -280,12 +280,13 @@ pub fn update_spatial_hash(
     // Handle dynamic entities - check if they should update cells
     for (entity, pos, _collider, mut occupied_cell) in query.iter_mut() {
         // Check if entity moved closer to opposite grid
-        if let Some(new_occupied) = spatial_hash.update(entity, pos.0, &occupied_cell) {
+        // Note: spatial_hash.update() internally handles remove + insert
+        if let Some((new_occupied, swapped_entity)) = spatial_hash.update_with_swap(entity, pos.0, &occupied_cell) {
             // Entity changed cells - check if anything was swapped
-            if let Some(swapped_entity) = spatial_hash.remove(&occupied_cell) {
+            if let Some(swapped) = swapped_entity {
                 // Queue index update for swapped entity
                 pending_index_updates.push((
-                    swapped_entity,
+                    swapped,
                     occupied_cell.col,
                     occupied_cell.row,
                     occupied_cell.vec_idx,
@@ -300,89 +301,6 @@ pub fn update_spatial_hash(
     for (swapped_entity, col, row, new_idx) in pending_index_updates {
         if let Ok((_, _, _, mut swapped_occupied)) = query.get_mut(swapped_entity) {
             // Update the vec_idx if this is the right cell
-            if swapped_occupied.col == col && swapped_occupied.row == row {
-                swapped_occupied.vec_idx = new_idx;
-            }
-        }
-    }
-}
-
-/// Parallel spatial hash update using zero-contention fold/reduce
-/// 
-/// Phase 1 (Parallel): Each thread builds its own Vec independently - ZERO mutex contention
-/// Phase 2 (Sequential): Apply updates to spatial hash (batch processing)
-/// 
-/// This achieves true parallelization by eliminating the mutex bottleneck.
-pub fn update_spatial_hash_parallel(
-    mut spatial_hash: ResMut<SpatialHash>,
-    mut query: Query<(Entity, &SimPosition, &Collider, &mut OccupiedCell), Without<StaticObstacle>>,
-    new_entities: Query<(Entity, &SimPosition, &Collider), Without<OccupiedCell>>,
-    mut commands: Commands,
-    _sim_config: Res<SimConfig>,
-) {
-    
-    
-    // Handle new entities (rare, keep sequential)
-    for (entity, pos, collider) in new_entities.iter() {
-        let occupied = spatial_hash.insert(entity, pos.0, collider.radius);
-        commands.entity(entity).insert(occupied);
-    }
-    
-    // Phase 1: Parallel computation - find entities that need updates
-    // Use 16 mutexes (power of 2 for fast modulo via bitwise AND) to reduce contention
-    // With 8 CPU cores, this gives ~2 mutexes per thread on average
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    
-    const NUM_SHARDS: usize = 16;
-    let per_shard_updates: Vec<Mutex<Vec<(Entity, OccupiedCell, OccupiedCell)>>> = 
-        (0..NUM_SHARDS).map(|_| Mutex::new(Vec::with_capacity(5000))).collect();
-    let counter = AtomicUsize::new(0);
-    
-    query.par_iter().for_each(|(entity, pos, _collider, occupied_cell)| {
-        if let Some((grid_offset, col, row)) = spatial_hash.should_update(pos.0, occupied_cell) {
-            let new_occupied = OccupiedCell {
-                size_class: occupied_cell.size_class,
-                grid_offset,
-                col,
-                row,
-                vec_idx: 0,
-            };
-            
-            // Simple round-robin distribution across shards
-            let shard_idx = counter.fetch_add(1, Ordering::Relaxed) & (NUM_SHARDS - 1);
-            per_shard_updates[shard_idx].lock().unwrap()
-                .push((entity, occupied_cell.clone(), new_occupied));
-        }
-    });
-    
-    // Combine all shard results
-    let updates: Vec<_> = per_shard_updates.into_iter()
-        .flat_map(|mutex| mutex.into_inner().unwrap())
-        .collect();
-    
-    // Phase 2: Sequential apply - update spatial hash and components
-    // This is fast because we pre-computed everything
-    let mut pending_swaps: Vec<(Entity, usize, usize, usize)> = Vec::new();
-    
-    for (entity, old_occupied, new_occupied) in updates {
-        // Remove from old cell
-        if let Some(swapped_entity) = spatial_hash.remove(&old_occupied) {
-            pending_swaps.push((swapped_entity, old_occupied.col, old_occupied.row, old_occupied.vec_idx));
-        }
-        
-        // Insert into new cell
-        let vec_idx = spatial_hash.insert_into_cell(entity, &new_occupied);
-        
-        // Update component
-        if let Ok((_, _, _, mut occupied_cell)) = query.get_mut(entity) {
-            *occupied_cell = OccupiedCell { vec_idx, ..new_occupied };
-        }
-    }
-    
-    // Fix swapped entity indices
-    for (swapped_entity, col, row, new_idx) in pending_swaps {
-        if let Ok((_, _, _, mut swapped_occupied)) = query.get_mut(swapped_entity) {
             if swapped_occupied.col == col && swapped_occupied.row == row {
                 swapped_occupied.vec_idx = new_idx;
             }
@@ -541,12 +459,14 @@ pub fn init_sim_config_from_initial(
     sim_config.obstacle_push_strength = FixedNum::from_num(config.obstacle_push_strength);
     sim_config.friction = FixedNum::from_num(config.friction);
     sim_config.min_velocity = FixedNum::from_num(config.min_velocity);
+    sim_config.max_velocity = FixedNum::from_num(config.max_velocity);
     sim_config.braking_force = FixedNum::from_num(config.braking_force);
     sim_config.touch_dist_multiplier = FixedNum::from_num(config.touch_dist_multiplier);
     sim_config.check_dist_multiplier = FixedNum::from_num(config.check_dist_multiplier);
     sim_config.arrival_threshold = FixedNum::from_num(config.arrival_threshold);
     sim_config.max_force = FixedNum::from_num(config.max_force);
     sim_config.steering_force = FixedNum::from_num(config.steering_force);
+    sim_config.max_acceleration = FixedNum::from_num(config.max_acceleration);
     sim_config.repulsion_force = FixedNum::from_num(config.repulsion_force);
     sim_config.repulsion_decay = FixedNum::from_num(config.repulsion_decay);
     sim_config.separation_weight = FixedNum::from_num(config.separation_weight);

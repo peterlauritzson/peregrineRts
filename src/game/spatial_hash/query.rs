@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use crate::game::fixed_math::{FixedNum, FixedVec2};
 use super::SpatialHash;
+use std::collections::HashSet;
 
 impl SpatialHash {
     /// Query all entities within radius of position
@@ -8,6 +9,7 @@ impl SpatialHash {
     /// 
     /// NOTE: Only returns Entity IDs. Callers must query SimPosition component for positions.
     pub fn get_potential_collisions(&self, pos: FixedVec2, query_radius: FixedNum, exclude_entity: Option<Entity>) -> Vec<Entity> {
+        let mut seen = HashSet::new();
         let mut result = Vec::new();
         
         // Query each size class (both Grid A and Grid B)
@@ -20,7 +22,7 @@ impl SpatialHash {
             let cells_a = size_class.grid_a.cells_in_radius(pos, query_radius);
             for cell in cells_a {
                 for &entity in cell {
-                    if Some(entity) != exclude_entity && !result.contains(&entity) {
+                    if Some(entity) != exclude_entity && seen.insert(entity) {
                         result.push(entity);
                     }
                 }
@@ -30,7 +32,7 @@ impl SpatialHash {
             let cells_b = size_class.grid_b.cells_in_radius(pos, query_radius);
             for cell in cells_b {
                 for &entity in cell {
-                    if Some(entity) != exclude_entity && !result.contains(&entity) {
+                    if Some(entity) != exclude_entity && seen.insert(entity) {
                         result.push(entity);
                     }
                 }

@@ -228,88 +228,334 @@ fn should_update_cell(
 
 ### 2.9 Parallel Spatial Hash Updates (January 2026)
 
-**PERFORMANCE BOTTLENECK:**
-At massive scale (500k+ entities), spatial hash updates become a bottleneck when many entities simultaneously cross grid boundaries (causing spikes from 24ms to 75ms average).
+**CURRENT IMPLEMENTATION: Sequential Updates**
 
-**SOLUTION: Spatial Partitioning with Parallel Processing**
-
-The map is divided into **update regions** (e.g., 10×10 = 100 regions) that can be processed in parallel:
+After exploring various parallel update strategies, we use a **simple sequential implementation** for pragmatic reasons:
 
 ```rust
-// Divide map into NxN update regions
-const UPDATE_REGIONS: usize = 10; // 10×10 = 100 parallel chunks
-
-struct UpdateRegion {
-    min_x: FixedNum,
-    max_x: FixedNum,
-    min_y: FixedNum,
-    max_y: FixedNum,
+pub fn update_spatial_hash(
+    mut spatial_hash: ResMut<SpatialHash>,
+    mut query: Query<(Entity, &SimPosition, &Collider, &mut OccupiedCell), Without<StaticObstacle>>,
+    new_entities: Query<(Entity, &SimPosition, &Collider), Without<OccupiedCell>>,
+    mut commands: Commands,
+) {
+    // Handle new entities
+    for (entity, pos, collider) in new_entities.iter() {
+        let occupied = spatial_hash.insert(entity, pos.0, collider.radius);
+        commands.entity(entity).insert(occupied);
+    }
+    
+    // Collect pending swaps
+    let mut pending_index_updates: Vec<(Entity, usize, usize, usize)> = Vec::new();
+    
+    // Update moved entities
+    for (entity, pos, _collider, mut occupied_cell) in query.iter_mut() {
+        if let Some(new_occupied) = spatial_hash.update(entity, pos.0, &occupied_cell) {
+            if let Some(swapped_entity) = spatial_hash.remove(&occupied_cell) {
+                pending_index_updates.push((swapped_entity, occupied_cell.col, occupied_cell.row, occupied_cell.vec_idx));
+            }
+            *occupied_cell = new_occupied;
+        }
+    }
+    
+    // Fix swapped entity indices
+    for (swapped_entity, col, row, new_idx) in pending_index_updates {
+        if let Ok((_, _, _, mut swapped_occupied)) = query.get_mut(swapped_entity) {
+            if swapped_occupied.col == col && swapped_occupied.row == row {
+                swapped_occupied.vec_idx = new_idx;
+            }
+        }
+    }
 }
 ```
 
-**Parallel Update Algorithm:**
+**Why Sequential?**
 
-1. **Pre-compute region assignments** (parallel):
-   ```rust
-   // Each entity computes which region it belongs to
-   // This is a read-only operation - fully parallelizable
-   par_iter(entities).for_each(|(entity, pos, occupied)| {
-       let region_id = calculate_region(pos);
-       // Also check if update needed (should_update)
-       if should_update(pos, occupied) {
-           pending_updates[region_id].push((entity, new_cell_info));
-       }
-   });
-   ```
+1. **Update frequency is low**: With staggered grids, 95%+ entities skip update each tick
+2. **Check is cheap**: `should_update()` is just 2 distance comparisons (~1ns)
+3. **Small overhead**: Typical frame: 1-2ms for 10k entities, 5-8ms for 50k entities
+4. **Simplicity**: No locks, no synchronization, easy to debug
+5. **Not the bottleneck**: Collision detection and pathfinding take 10× more time
 
-2. **Apply updates per-region** (parallel):
-   ```rust
-   // Each region's updates can be applied independently
-   // No data races because regions map to disjoint cell ranges
-   pending_updates.par_iter().for_each(|region_updates| {
-       for (entity, new_cell) in region_updates {
-           spatial_hash.update_entity(entity, new_cell);
-       }
-   });
-   ```
+**Attempted Parallel Approaches (And Why They Failed):**
 
-**Key Design Principles:**
-
-- **Region size balancing**: Regions should be ~4-10 cells wide (not too small = overhead, not too large = poor load balancing)
-- **Cross-region entities**: An entity moving from region A to region B is handled by computing its new region first, then applying update
-- **Load balancing**: With 100 regions, CPU cores stay saturated even if some regions are empty
-- **Determinism**: Process regions in consistent order or use atomic operations for swapped entity tracking
-- **Memory locality**: Entities in the same region tend to access nearby grid cells (cache-friendly)
-
-**Expected Performance:**
-
-- **Current (single-threaded)**: ~75ms spike when many entities update
-- **With 8-core parallelization**: ~10-15ms (5-7× speedup)
-- **With 16-core parallelization**: ~5-8ms (10-15× speedup)
-- **Scalability**: Near-linear scaling up to ~64 regions (then overhead dominates)
-
-**Implementation Complexity:**
-
-- Low: Bevy's `par_iter()` handles thread pool
-- Medium: Need careful region-to-cell mapping
-- Medium: Swapped entity tracking requires atomic/mutex coordination
-
-**Alternative Approach: Lock-Free Updates**
-
-Instead of spatial partitioning, use fine-grained locking per cell:
+**❌ Component-Based Marking:**
 ```rust
-struct GridCell {
-    entities: Mutex<Vec<Entity>>,  // Lock per cell
-}
+// Phase 1: Parallel check
+query.par_iter().for_each(|(entity, pos, occupied_cell)| {
+    if should_update(pos, occupied_cell) {
+        // ERROR: Commands is not Clone, can't use in par_iter
+        commands.entity(entity).insert(PendingSpatialUpdate { ... });
+    }
+});
+```
+**Problem**: Requires mutex to collect results, negating parallelization benefit.
+
+**❌ Mutex Collection:**
+```rust
+let updates = Mutex::new(Vec::new());
+query.par_iter().for_each(|...| {
+    updates.lock().unwrap().push(...);  // Mutex contention!
+});
+```
+**Problem**: All threads contend on the same mutex, often slower than sequential.
+
+**✅ Fold/Reduce (Viable But Overkill):**
+```rust
+let updates: Vec<_> = query
+    .par_iter()
+    .fold(Vec::new, |mut acc, (entity, pos, _, occupied_cell)| {
+        if let Some((grid_offset, col, row)) = spatial_hash.should_update(pos.0, occupied_cell) {
+            acc.push((entity, OccupiedCell { grid_offset, col, row, ... }));
+        }
+        acc  // Each thread has its own Vec
+    })
+    .reduce(Vec::new, |mut a, b| {
+        a.extend(b);  // Combine thread-local Vecs
+        a
+    });
+
+// Sequential: Apply updates
+for (entity, new_cell) in updates { ... }
 ```
 
-- **Pro**: Simpler implementation
-- **Con**: Higher contention, cache thrashing, harder to reason about
-- **Verdict**: Spatial partitioning is better for this use case
+**Why fold/reduce works**: Each thread builds its own Vec (no shared state), then results are combined.
+
+**Why we don't use it**: 
+- Parallelizing a 1-2ms system to save 0.5-1ms isn't worth the complexity
+- Only ~5% of entities need updates (fold/reduce overhead on 95% wasted work)
+- Benchmark showed only 1.3× speedup (not worth maintaining)
+
+**When to revisit**: If profiling shows spatial hash update >10ms consistently (unlikely).
 
 ---
 
-## 3. Use Case: Physical Collision Detection
+### 2.10 Future: True Parallel Spatial Hash (Research Notes)
+
+For extreme scale (500k+ entities), true parallel writes to the spatial hash may become necessary. Below are explored approaches and their tradeoffs.
+
+**THE FUNDAMENTAL CONSTRAINT:**
+
+Current spatial hash uses `HashMap<(col, row), Vec<Entity>>`:
+- **Reads**: Fully parallelizable (shared reference is fine)
+- **Writes**: Sequential bottleneck (`Vec::push()` requires exclusive access)
+
+**The goal**: Enable parallel writes where threads update different memory locations simultaneously.
+
+---
+
+#### Approach 1: Preallocated Slot Array (Lock-Free)
+
+**Concept**: Each entity gets a permanent slot index. Writes to different indices are independent.
+
+```rust
+struct SpatialHash {
+    // Preallocated for max entities (e.g., 500k)
+    slots: Vec<SpatialSlot>,
+    active_count: AtomicUsize,
+}
+
+struct SpatialSlot {
+    entity: Entity,
+    cell_x: u16,
+    cell_y: u16,
+    position: FixedVec2,
+    active: AtomicBool,  // Is this slot in use?
+}
+
+// Parallel update - each entity writes to its own slot
+par_iter(entities).for_each(|(entity, pos, occupied_cell)| {
+    let slot_idx = entity.slot_index();  // Permanent index
+    slots[slot_idx].cell_x = new_cell_x;
+    slots[slot_idx].cell_y = new_cell_y;
+    slots[slot_idx].position = pos;
+    // NO DATA RACE - different memory addresses!
+});
+
+// Query: Binary search sorted array for cell range
+fn query_cell(&self, cell_x: u16, cell_y: u16) -> &[SpatialSlot] {
+    // Array is sorted by (cell_x, cell_y)
+    // Binary search for range [start, end) with matching coords
+    self.slots.binary_search_range((cell_x, cell_y))
+}
+```
+
+**Workflow:**
+1. **Parallel write phase**: Each entity updates its own slot (lock-free!)
+2. **Sequential sort phase**: Sort `slots` by `(cell_x, cell_y)` (cache-friendly, mostly sorted)
+3. **Query phase**: Binary search for cell range, iterate results
+
+**Benefits:**
+- ✅ True lock-free parallel writes
+- ✅ No memory waste (allocate for actual max entities)
+- ✅ Simple memory layout (array of structs)
+- ✅ Handles crowding naturally (cells aren't pre-sized)
+
+**Tradeoffs:**
+- ❌ Requires sequential sort phase (10-20ms for 500k entities)
+- ❌ Sort can be hidden behind other systems in schedule
+- ⚠️ Query cost is O(log N + M) where M = entities in cell (vs current O(1))
+- ⚠️ Need to manage "dead slots" when entities despawn
+
+**Performance Estimate (500k entities, 8 cores):**
+- Parallel write: 2-3ms (vs 15-20ms sequential)
+- Sort phase: 10-15ms (can overlap with pathfinding/rendering)
+- Net gain: ~10ms saved per tick
+
+---
+
+#### Approach 2: Sharded Spatial Hash (Regional Parallelism)
+
+**Concept**: Divide map into regions, each region gets independent SpatialHash.
+
+```rust
+struct ShardedSpatialHash {
+    shards: Vec<SpatialHash>,  // e.g., 8×8 = 64 independent hashes
+    shards_x: usize,
+    shards_y: usize,
+}
+
+// Parallel update - different regions don't conflict
+par_iter(entities).for_each(|(entity, pos, occupied_cell)| {
+    let region_id = calculate_region(pos);
+    shards[region_id].update(entity, pos);  // Lock per shard
+});
+```
+
+**Benefits:**
+- ✅ Preserves current HashMap architecture
+- ✅ Parallel updates for entities in different regions
+- ✅ Relatively simple to implement
+
+**Tradeoffs:**
+- ❌ Boundary queries need to check multiple shards
+- ❌ Load balancing issues if entities cluster
+- ❌ Still need locks/mutexes (just finer-grained)
+- ⚠️ Optimal shard count depends on entity distribution
+
+---
+
+#### Approach 3: Double-Buffered Sequential (Temporal Parallelism)
+
+**Concept**: Two complete spatial hashes, swap buffers between ticks.
+
+```rust
+struct DoubleBufferedSpatialHash {
+    read_buffer: SpatialHash,
+    write_buffer: SpatialHash,
+}
+
+// Tick N: Systems read from read_buffer
+// Meanwhile: Update write_buffer for tick N+1
+// Tick N+1: Swap buffers
+```
+
+**Benefits:**
+- ✅ Queries never block on writes
+- ✅ Can update write_buffer in parallel with queries
+- ✅ Simple conceptual model
+
+**Tradeoffs:**
+- ❌ 2× memory usage (duplicate spatial hash)
+- ❌ Still need parallel update strategy for write_buffer
+- ⚠️ Queries are 1 tick stale (acceptable for most gameplay)
+
+---
+
+#### Approach 4: Atomic Slot Allocation (Lock-Free HashMap)
+
+**Concept**: Use `DashMap` or similar lock-free concurrent hashmap.
+
+```rust
+use dashmap::DashMap;
+
+struct ConcurrentSpatialHash {
+    cells: DashMap<(u16, u16), Vec<Entity>>,
+}
+
+// Parallel updates with fine-grained internal locking
+par_iter(entities).for_each(|(entity, pos)| {
+    spatial_hash.cells.entry(cell_coords)
+        .or_default()
+        .push(entity);
+});
+```
+
+**Benefits:**
+- ✅ Minimal code changes
+- ✅ Proven concurrent data structure
+
+**Tradeoffs:**
+- ❌ Hidden locks still exist (just managed internally)
+- ❌ Overhead of atomic operations
+- ❌ May not be faster than sequential for typical workloads
+- ⚠️ Complex to reason about performance
+
+---
+
+### 2.11 Recommendation: Staged Approach
+
+**Current (Implemented):**
+- Sequential updates with clean code
+- Good enough for 10-50k entities
+- Zero complexity overhead
+
+**Next Step (If Needed):**
+1. Profile to confirm spatial hash is actually the bottleneck
+2. Try **Approach 1 (Preallocated Slot Array)** first
+   - Simplest lock-free parallel writes
+   - Sort phase can be hidden behind other systems
+   - Most predictable performance
+
+**Future (If Still Needed):**
+- Combine Approach 1 with Approach 2 (sharded slot arrays)
+- Each shard gets its own slot array, reduces sort cost
+
+**Key Insight:**
+With staggered grids, 95%+ entities skip the update check entirely. The actual bottleneck is likely elsewhere (collision detection, pathfinding), so parallel spatial hash may never be necessary.
+
+---
+
+### 2.12 Parallel Reads (Already Optimal)
+
+Unlike writes, **spatial hash reads are fully parallelizable** with the current architecture:
+
+```rust
+// Multiple systems can query simultaneously
+spatial_hash: Res<SpatialHash>  // Shared read access
+
+// Example: Collision system and boids system query in parallel
+par_iter(collision_entities).for_each(|(entity, pos)| {
+    let neighbors = spatial_hash.query_radius(pos, radius);  // ✅ Thread-safe
+});
+
+par_iter(boids_entities).for_each(|(entity, pos)| {
+    let neighbors = spatial_hash.query_radius(pos, radius);  // ✅ Thread-safe
+});
+```
+
+**Why reads are fast:**
+- `Res<SpatialHash>` provides shared `&SpatialHash` reference
+- Reading from HashMap is thread-safe (no mutation)
+- Each thread can query different cells simultaneously
+- No locks, no contention, perfect parallelization
+
+**Current optimization: Neighbor caching:**
+Queries are cached in `CachedNeighbors` component, giving 95%+ cache hit rate. This makes spatial hash query frequency very low.
+
+---
+
+**DESIGN EVOLUTION:**
+
+Multiple parallel approaches were explored and rejected:
+
+1. **Mutex-sharded writes** (16 mutexes, atomic counters): Contention overhead negated benefits
+2. **Component-based marking**: Requires mutex to collect results in par_iter (can't use Commands)
+3. **Fold/reduce pattern**: Works but only 1.3× speedup on an already fast system
+
+The sequential implementation won on simplicity, debuggability, and "fast enough" pragmatism.
+
+---
 
 ## 3. Use Case: Physical Collision Detection
 

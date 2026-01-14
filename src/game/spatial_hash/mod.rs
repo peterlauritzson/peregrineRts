@@ -289,6 +289,44 @@ impl SpatialHash {
         }
     }
     
+    /// Update entity position in spatial hash, returning both new cell and any swapped entity
+    /// Returns Some((new_occupied_cell, swapped_entity)) if entity changed cells
+    pub fn update_with_swap(
+        &mut self,
+        entity: Entity,
+        pos: FixedVec2,
+        occupied: &OccupiedCell,
+    ) -> Option<(OccupiedCell, Option<Entity>)> {
+        if let Some((new_grid_offset, new_col, new_row)) = self.should_update(pos, occupied) {
+            // Remove from current cell and capture any swapped entity
+            let swapped_entity = self.remove(occupied);
+            
+            // Insert into new cell
+            let size_class = &mut self.size_classes[occupied.size_class as usize];
+            let grid = if new_grid_offset == 0 {
+                &mut size_class.grid_a
+            } else {
+                &mut size_class.grid_b
+            };
+            
+            let vec_idx = grid.insert_entity(new_col, new_row, entity);
+            size_class.entity_count += 1;
+            
+            Some((
+                OccupiedCell {
+                    size_class: occupied.size_class,
+                    grid_offset: new_grid_offset,
+                    col: new_col,
+                    row: new_row,
+                    vec_idx,
+                },
+                swapped_entity,
+            ))
+        } else {
+            None
+        }
+    }
+    
     /// Insert entity into new cell (used by parallel updates)
     /// Returns the vec_idx where the entity was inserted
     pub fn insert_into_cell(&mut self, entity: Entity, new_occupied: &OccupiedCell) -> usize {

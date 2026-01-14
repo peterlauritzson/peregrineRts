@@ -69,10 +69,24 @@ pub(super) fn apply_boids_steering(
             // Separation: only for very close neighbors
             // Use squared distance math - no sqrt needed!
             if dist_sq < separation_radius_sq {
-                // Inverse-square falloff for separation strength
-                let strength = separation_radius_sq / dist_sq.max(FixedNum::from_num(0.01));
-                separation_accum = separation_accum + diff * strength;
-                separation_count += 1;
+                // Guard against division by zero or near-zero distances
+                // Use a larger epsilon to prevent numeric overflow
+                let min_dist_sq = FixedNum::from_num(0.25); // 0.5 units minimum distance
+                if dist_sq > min_dist_sq {
+                    // Inverse-square falloff for separation strength
+                    let strength = separation_radius_sq / dist_sq;
+                    // Cap the maximum strength to prevent overflow
+                    let capped_strength = strength.min(FixedNum::from_num(100.0));
+                    separation_accum = separation_accum + diff * capped_strength;
+                    separation_count += 1;
+                } else {
+                    // Units too close - use maximum separation force in normalized direction
+                    if diff.length_squared() > FixedNum::ZERO {
+                        let normalized_diff = diff.normalize();
+                        separation_accum = separation_accum + normalized_diff * FixedNum::from_num(100.0);
+                        separation_count += 1;
+                    }
+                }
             }
         }
 

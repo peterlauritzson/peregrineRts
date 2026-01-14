@@ -294,11 +294,13 @@ pub fn resolve_collisions(
 ) {
     let repulsion_strength = sim_config.repulsion_force;
     let decay = sim_config.repulsion_decay;
+    let max_overlap = FixedNum::from_num(10.0); // Cap overlap to prevent overflow
     
     for event in events.read() {
         // Apply repulsion force based on overlap
         // Force increases as overlap increases
-        let force_mag = repulsion_strength * (FixedNum::ONE + event.overlap * decay);
+        let capped_overlap = event.overlap.min(max_overlap);
+        let force_mag = repulsion_strength * (FixedNum::ONE + capped_overlap * decay);
         let force = event.normal * force_mag;
         
         // Apply to entity 1
