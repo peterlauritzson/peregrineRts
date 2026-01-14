@@ -25,10 +25,12 @@
     // Movement & Forces
     max_force: 40.0,
     steering_force: 40.0,
+    max_acceleration: 100.0,
     repulsion_force: 20.0,
     repulsion_decay: 2.0,
     friction: 0.98,
     min_velocity: 0.01,
+    max_velocity: 50.0,
     braking_force: 5.0,
     touch_dist_multiplier: 2.1,
     check_dist_multiplier: 4.0,
