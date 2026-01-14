@@ -1,6 +1,31 @@
-# Map File Format Design Document
+# Map Generation & File Format Design Document
 
-## Goal
+## File Structure
+
+**Random Map Generation UI**: `src/game/menu/random_map.rs` (302 lines)
+- Systems for handling random map dialog interactions, keyboard input, and button clicks
+- Integration with loading system to trigger map generation
+
+**Random Map UI Components**: `src/game/menu/random_map_ui.rs` (199 lines)
+- UI construction for the random map generation dialog
+- Macro-based value row creation for adjustable parameters
+
+## Random Map Generation
+
+### UI Workflow
+1. Player opens random map dialog from main menu
+2. Adjustable parameters:
+   - **Map Width/Height**: Size of playable area (default: 500x500)
+   - **Num Obstacles**: Number of randomly placed obstacles (default: 50)
+   - **Obstacle Radius**: Size of generated obstacles (default: 15)
+3. Dialog provides increment/decrement buttons or direct keyboard input
+4. "Generate" button triggers map creation and transitions to loading state
+5. Loading system creates random obstacles and builds pathfinding graph
+
+### Integration with Loading
+The random map dialog creates a `PendingMapGeneration` resource with parameters, then transitions to `GameState::Loading` with `TargetGameState::InGame`. The loading system detects this resource and generates the map instead of loading from file.
+
+## Map File Format Goal
 To significantly reduce game startup time by precomputing and saving expensive map data (Flow Fields, Hierarchical Graph, etc.) into a file, which can be loaded directly instead of regenerating it every time.
 
 ## Overview

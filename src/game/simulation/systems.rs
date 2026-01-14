@@ -1,24 +1,29 @@
 /// Core simulation systems.
 ///
 /// This module contains systems for:
-/// - Input processing
-/// - Path following
-/// - Spatial hash updates  
-/// - Flow field management
-/// - Simulation timing/performance tracking
+/// - Tick management
+/// - Input processing (commands → pathfinding requests)
+/// - Path following (hierarchical navigation)
+/// - Performance tracking
+
+#[path = "systems_spatial.rs"]
+mod systems_spatial;
+#[path = "systems_config.rs"]
+mod systems_config;
 
 use bevy::prelude::*;
 use crate::game::fixed_math::{FixedVec2, FixedNum};
-use crate::game::config::{GameConfig, GameConfigHandle, InitialConfig};
-use crate::game::pathfinding::{Path, PathRequest, HierarchicalGraph, CLUSTER_SIZE, regenerate_cluster_flow_fields};
-use crate::game::spatial_hash::SpatialHash;
-use crate::game::structures::{FlowField, CELL_SIZE};
+use crate::game::pathfinding::{Path, PathRequest, HierarchicalGraph, CLUSTER_SIZE};
 use peregrine_macros::profile;
 
 use super::components::*;
 use super::resources::*;
 use super::events::*;
 use super::physics::seek;
+
+// Re-export systems from submodules
+pub use systems_spatial::{update_spatial_hash, init_flow_field, apply_obstacle_to_flow_field, apply_new_obstacles};
+pub use systems_config::{init_sim_config_from_initial, update_sim_from_runtime_config};
 
 // ============================================================================
 // Tick Management
@@ -248,266 +253,6 @@ pub fn follow_path(
                         }
                     }
                 }
-            }
-        }
-    }
-}
-
-// ============================================================================
-// Spatial Hash
-// ============================================================================
-
-/// Update spatial hash with entity positions
-pub fn update_spatial_hash(
-    mut spatial_hash: ResMut<SpatialHash>,
-    mut query: Query<(Entity, &SimPosition, &Collider, &mut OccupiedCell), Without<StaticObstacle>>,
-    new_entities: Query<(Entity, &SimPosition, &Collider), Without<OccupiedCell>>,
-    mut commands: Commands,
-    _sim_config: Res<SimConfig>,  // Keep for signature compatibility
-) {
-    
-    
-    // Handle entities that don't have OccupiedCell yet (first time in spatial hash)
-    for (entity, pos, collider) in new_entities.iter() {
-        // Insert entity into spatial hash (automatically classifies by size and picks optimal grid)
-        let occupied = spatial_hash.insert(entity, pos.0, collider.radius);
-        commands.entity(entity).insert(occupied);
-    }
-    
-    // Collect index updates needed for swapped entities (avoid double-borrow)
-    let mut pending_index_updates: Vec<(Entity, usize, usize, usize)> = Vec::new();
-    
-    // Handle dynamic entities - check if they should update cells
-    for (entity, pos, _collider, mut occupied_cell) in query.iter_mut() {
-        // Check if entity moved closer to opposite grid
-        // Note: spatial_hash.update() internally handles remove + insert
-        if let Some((new_occupied, swapped_entity)) = spatial_hash.update_with_swap(entity, pos.0, &occupied_cell) {
-            // Entity changed cells - check if anything was swapped
-            if let Some(swapped) = swapped_entity {
-                // Queue index update for swapped entity
-                pending_index_updates.push((
-                    swapped,
-                    occupied_cell.col,
-                    occupied_cell.row,
-                    occupied_cell.vec_idx,
-                ));
-            }
-            
-            *occupied_cell = new_occupied;
-        }
-    }
-    
-    // Second pass: Apply pending index updates to swapped entities
-    for (swapped_entity, col, row, new_idx) in pending_index_updates {
-        if let Ok((_, _, _, mut swapped_occupied)) = query.get_mut(swapped_entity) {
-            // Update the vec_idx if this is the right cell
-            if swapped_occupied.col == col && swapped_occupied.row == row {
-                swapped_occupied.vec_idx = new_idx;
-            }
-        }
-    }
-}
-
-
-// ============================================================================
-// Flow Field Management
-// ============================================================================
-
-/// Initialize flow field at startup
-pub fn init_flow_field(
-    mut map_flow_field: ResMut<MapFlowField>,
-    sim_config: Res<SimConfig>,
-) {
-    let width = (sim_config.map_width / FixedNum::from_num(CELL_SIZE)).ceil().to_num::<usize>();
-    let height = (sim_config.map_height / FixedNum::from_num(CELL_SIZE)).ceil().to_num::<usize>();
-    let cell_size = FixedNum::from_num(CELL_SIZE);
-    let origin = FixedVec2::new(
-        -sim_config.map_width / FixedNum::from_num(2.0),
-        -sim_config.map_height / FixedNum::from_num(2.0),
-    );
-
-    map_flow_field.0 = FlowField::new(width, height, cell_size, origin);
-}
-
-/// Apply an obstacle to the flow field cost map
-pub fn apply_obstacle_to_flow_field(flow_field: &mut FlowField, pos: FixedVec2, radius: FixedNum) {
-    // Rasterize circle
-    // Even if center is outside, part of it might be inside.
-    // But world_to_grid returns None if outside.
-    // We should compute bounding box in grid coords.
-    
-    let min_world = pos - FixedVec2::new(radius, radius);
-    let max_world = pos + FixedVec2::new(radius, radius);
-    
-    // Convert to grid coords manually to handle out of bounds
-    let cell_size = flow_field.cell_size;
-    let origin = flow_field.origin;
-    
-    let min_local = min_world - origin;
-    let max_local = max_world - origin;
-    
-    let min_x = (min_local.x / cell_size).floor().to_num::<i32>();
-    let min_y = (min_local.y / cell_size).floor().to_num::<i32>();
-    let max_x = (max_local.x / cell_size).ceil().to_num::<i32>();
-    let max_y = (max_local.y / cell_size).ceil().to_num::<i32>();
-    
-    for y in min_y..max_y {
-        for x in min_x..max_x {
-            if x >= 0 && x < flow_field.width as i32 && y >= 0 && y < flow_field.height as i32 {
-                let cell_center = flow_field.grid_to_world(x as usize, y as usize);
-                
-                // Block cells whose center is within the obstacle radius
-                // This matches the actual collision radius used by physics
-                let dist_sq = (cell_center - pos).length_squared();
-                let threshold = radius;
-                
-                if dist_sq < threshold * threshold {
-                    flow_field.set_obstacle(x as usize, y as usize);
-                }
-            }
-        }
-    }
-}
-
-/// Apply newly added obstacles to flow field and invalidate affected cluster caches
-pub fn apply_new_obstacles(
-    mut map_flow_field: ResMut<MapFlowField>,
-    mut graph: ResMut<HierarchicalGraph>,
-    obstacles: Query<(&SimPosition, &Collider), Added<StaticObstacle>>,
-) {
-    let obstacle_count = obstacles.iter().count();
-    if obstacle_count == 0 {
-        return;
-    }
-    
-    
-    let flow_field = &mut map_flow_field.0;
-    
-    for (_i, (pos, collider)) in obstacles.iter().enumerate() {
-        apply_obstacle_to_flow_field(flow_field, pos.0, collider.radius);
-        
-        // Invalidate affected cluster caches so units reroute around the new obstacle
-        // Determine which clusters are affected by this obstacle
-        let obstacle_world_pos = pos.0;
-        let grid_pos = flow_field.world_to_grid(obstacle_world_pos);
-        
-        if let Some((grid_x, grid_y)) = grid_pos {
-            // Calculate the radius in grid cells
-            let radius_cells = (collider.radius / flow_field.cell_size).ceil().to_num::<usize>();
-            
-            // Find all affected clusters
-            let min_x = grid_x.saturating_sub(radius_cells);
-            let max_x = (grid_x + radius_cells).min(flow_field.width - 1);
-            let min_y = grid_y.saturating_sub(radius_cells);
-            let max_y = (grid_y + radius_cells).min(flow_field.height - 1);
-            
-            let min_cluster_x = min_x / CLUSTER_SIZE;
-            let max_cluster_x = max_x / CLUSTER_SIZE;
-            let min_cluster_y = min_y / CLUSTER_SIZE;
-            let max_cluster_y = max_y / CLUSTER_SIZE;
-            
-            // Invalidate all affected clusters and regenerate their flow fields
-            for cy in min_cluster_y..=max_cluster_y {
-                for cx in min_cluster_x..=max_cluster_x {
-                    let cluster_key = (cx, cy);
-                    graph.clear_cluster_cache(cluster_key);
-                    // Regenerate flow fields for this cluster immediately
-                    regenerate_cluster_flow_fields(&mut graph, flow_field, cluster_key);
-                }
-            }
-        }
-    }
-}
-
-// ============================================================================
-// Configuration
-// ============================================================================
-
-/// Initialize SimConfig from InitialConfig at startup
-pub fn init_sim_config_from_initial(
-    mut fixed_time: ResMut<Time<Fixed>>,
-    mut sim_config: ResMut<SimConfig>,
-    mut spatial_hash: ResMut<SpatialHash>,
-    initial_config: Option<Res<InitialConfig>>,
-) {
-    info!("Initializing SimConfig from InitialConfig (lightweight startup init)");
-    
-    let config = match initial_config {
-        Some(cfg) => cfg.clone(),
-        None => {
-            warn!("InitialConfig not found, using defaults ");
-            InitialConfig::default()
-        }
-    };
-    
-    // Set fixed timestep
-    fixed_time.set_timestep_seconds(1.0 / config.tick_rate);
-    
-    // Copy all values from InitialConfig to SimConfig
-    sim_config.tick_rate = config.tick_rate;
-    sim_config.unit_speed = FixedNum::from_num(config.unit_speed);
-    sim_config.map_width = FixedNum::from_num(config.map_width);
-    sim_config.map_height = FixedNum::from_num(config.map_height);
-    sim_config.unit_radius = FixedNum::from_num(config.unit_radius);
-    sim_config.collision_push_strength = FixedNum::from_num(config.collision_push_strength);
-    sim_config.collision_restitution = FixedNum::from_num(config.collision_restitution);
-    sim_config.collision_drag = FixedNum::from_num(config.collision_drag);
-    sim_config.collision_iterations = config.collision_iterations;
-    sim_config.collision_search_radius_multiplier = FixedNum::from_num(config.collision_search_radius_multiplier);
-    sim_config.obstacle_search_range = config.obstacle_search_range;
-    sim_config.epsilon = FixedNum::from_num(config.epsilon);
-    sim_config.obstacle_push_strength = FixedNum::from_num(config.obstacle_push_strength);
-    sim_config.friction = FixedNum::from_num(config.friction);
-    sim_config.min_velocity = FixedNum::from_num(config.min_velocity);
-    sim_config.max_velocity = FixedNum::from_num(config.max_velocity);
-    sim_config.braking_force = FixedNum::from_num(config.braking_force);
-    sim_config.touch_dist_multiplier = FixedNum::from_num(config.touch_dist_multiplier);
-    sim_config.check_dist_multiplier = FixedNum::from_num(config.check_dist_multiplier);
-    sim_config.arrival_threshold = FixedNum::from_num(config.arrival_threshold);
-    sim_config.max_force = FixedNum::from_num(config.max_force);
-    sim_config.steering_force = FixedNum::from_num(config.steering_force);
-    sim_config.max_acceleration = FixedNum::from_num(config.max_acceleration);
-    sim_config.repulsion_force = FixedNum::from_num(config.repulsion_force);
-    sim_config.repulsion_decay = FixedNum::from_num(config.repulsion_decay);
-    sim_config.separation_weight = FixedNum::from_num(config.separation_weight);
-    sim_config.alignment_weight = FixedNum::from_num(config.alignment_weight);
-    sim_config.cohesion_weight = FixedNum::from_num(config.cohesion_weight);
-    sim_config.neighbor_radius = FixedNum::from_num(config.neighbor_radius);
-    sim_config.separation_radius = FixedNum::from_num(config.separation_radius);
-    sim_config.boids_max_neighbors = config.boids_max_neighbors;
-    sim_config.black_hole_strength = FixedNum::from_num(config.black_hole_strength);
-    sim_config.wind_spot_strength = FixedNum::from_num(config.wind_spot_strength);
-    sim_config.force_source_radius = FixedNum::from_num(config.force_source_radius);
-    
-    // Spatial hash parallel updates
-    sim_config.spatial_hash_parallel_updates = config.spatial_hash_parallel_updates;
-    sim_config.spatial_hash_regions_per_axis = config.spatial_hash_regions_per_axis;
-    
-    // Initialize spatial hash with proper configuration
-    spatial_hash.resize(
-        sim_config.map_width,
-        sim_config.map_height,
-        &config.spatial_hash_entity_radii,
-        config.spatial_hash_radius_to_cell_ratio,
-    );
-    
-    info!("SimConfig initialized with map size: {}x{}", 
-          sim_config.map_width.to_num::<f32>(), sim_config.map_height.to_num::<f32>());
-    info!("SpatialHash initialized with {} size classes ", spatial_hash.size_classes().len());
-}
-
-/// Handle hot-reloadable runtime configuration
-pub fn update_sim_from_runtime_config(
-    config_handle: Res<GameConfigHandle>,
-    game_configs: Res<Assets<GameConfig>>,
-    mut events: MessageReader<AssetEvent<GameConfig>>,
-) {
-    for event in events.read() {
-        if event.is_modified(config_handle.0.id()) || event.is_loaded_with_dependencies(config_handle.0.id()) {
-            if let Some(_config) = game_configs.get(&config_handle.0) {
-                info!("Runtime config loaded/updated (controls, camera, debug settings)");
-                // The config is stored in the asset and accessed when needed by other systems
-                // No need to copy values here since systems read from GameConfig directly
             }
         }
     }

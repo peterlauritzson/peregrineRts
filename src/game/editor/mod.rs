@@ -8,6 +8,7 @@ use bevy::prelude::*;
 use crate::game::GameState;
 
 pub use components::*;
+pub use input::spawn_obstacle;  // Re-export for use in loading system
 use ui::*;
 use input::*;
 use generation::*;

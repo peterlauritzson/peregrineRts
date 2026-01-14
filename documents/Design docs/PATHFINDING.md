@@ -1,5 +1,18 @@
 # Peregrine Pathfinding Architecture: Hierarchical Pathfinding (HPA*)
 
+## File Structure
+
+**Graph Building**: `src/game/pathfinding/graph_build.rs` (~270 lines)
+- Incremental graph construction state machine
+- Portal discovery (vertical and horizontal)
+- Routing table generation
+
+**Graph Build Helpers**: `src/game/pathfinding/graph_build_helpers.rs` (115 lines)
+- Cluster initialization and connectivity
+- Intra-cluster portal connections via local A*
+- Flow field precomputation for cached navigation
+- Connected component analysis for reachability
+
 ## 1. The End Goal
 To support **10 million units** on **large maps (2048x2048+)** with **dynamic obstacles** (building placement), we cannot use standard A* (too slow) or pure Flow Fields (too much memory for unique targets).
 

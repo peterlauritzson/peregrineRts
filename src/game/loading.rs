@@ -148,7 +148,6 @@ fn handle_pending_map_generation(
     
     use crate::game::fixed_math::{FixedVec2, FixedNum};
     use crate::game::structures::{FlowField, CELL_SIZE};
-    use crate::game::simulation::{StaticObstacle, SimPosition, Collider, layers};
     use crate::game::pathfinding::GraphBuildStep;
     use rand::Rng;
     
@@ -207,21 +206,13 @@ fn handle_pending_map_generation(
                 let z = rng.random_range((-map_height/2.0 + margin)..(map_height/2.0 - margin));
                 let radius = rng.random_range(pending_gen.min_radius..pending_gen.max_radius);
                 
-                commands.spawn((
-                    crate::game::GameEntity,
-                    Mesh3d(resources.obstacle_mesh.clone()),
-                    MeshMaterial3d(resources.obstacle_material.clone()),
-                    Transform::from_xyz(x, 1.0, z)
-                        .with_scale(Vec3::new(radius, 1.0, radius)),
-                    GlobalTransform::default(),
-                    SimPosition(FixedVec2::from_f32(x, z)),
-                    StaticObstacle,
-                    Collider {
-                        radius: FixedNum::from_num(radius),
-                        layer: layers::OBSTACLE,
-                        mask: layers::UNIT | layers::OBSTACLE,
-                    },
-                ));
+                // Reuse the shared spawn_obstacle function instead of duplicating code
+                crate::game::editor::spawn_obstacle(
+                    &mut commands,
+                    FixedVec2::from_f32(x, z),
+                    FixedNum::from_num(radius),
+                    &resources  // Dereference the Res<EditorResources>
+                );
             }
             
             info!("Spawned {} random obstacles", pending_gen.num_obstacles);

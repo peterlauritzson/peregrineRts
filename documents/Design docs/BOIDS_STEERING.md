@@ -1,5 +1,13 @@
 # Boids Steering System - Design & Scalability
 
+## File Structure
+
+**Implementation**: `src/game/unit/boids.rs` (168 lines)
+- `apply_boids_steering()` - Main system that applies separation, alignment, and cohesion forces
+
+**Tests**: `src/game/unit/boids_tests.rs` (381 lines)
+- Comprehensive test suite verifying boids behaviors, spatial query integration, and neighbor filtering
+
 ## Overview
 
 Boids steering provides emergent flocking behavior using three classic behaviors:

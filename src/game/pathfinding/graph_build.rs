@@ -1,17 +1,22 @@
+#[path = "graph_build_helpers.rs"]
+mod graph_build_helpers;
+
 use bevy::prelude::*;
 use crate::game::GameState;
 use crate::game::loading::{LoadingProgress, TargetGameState};
 use crate::game::simulation::MapFlowField;
 use crate::game::config::InitialConfig;
 use super::graph::HierarchicalGraph;
-use super::cluster::Cluster;
 use super::components::ConnectedComponents;
 use super::types::CLUSTER_SIZE;
-use super::astar::find_path_astar_local;
-use super::cluster_flow::generate_local_flow_field;
-use std::collections::BTreeMap;
-use crate::game::fixed_math::FixedNum;
-use peregrine_macros::profile;
+use graph_build_helpers::{
+    initialize_clusters, 
+    build_connected_components, 
+};
+pub(super) use graph_build_helpers::{connect_intra_cluster, precompute_flow_fields_for_cluster};
+
+// Re-export regenerate_cluster_flow_fields for use by simulation module
+pub use graph_build_helpers::regenerate_cluster_flow_fields;
 
 #[derive(Resource, Default)]
 pub struct GraphBuildState {
@@ -305,98 +310,4 @@ pub(super) fn incremental_build_graph(
         }
         GraphBuildStep::Done => {}
     }
-}
-
-pub(super) fn connect_intra_cluster(
-    graph: &mut HierarchicalGraph,
-    flow_field: &crate::game::structures::FlowField,
-    key: (usize, usize),
-) {
-    let portals = graph.clusters[&key].portals.clone();
-    let (cx, cy) = key;
-    
-    let min_x = cx * CLUSTER_SIZE;
-    let max_x = ((cx + 1) * CLUSTER_SIZE).min(flow_field.width) - 1;
-    let min_y = cy * CLUSTER_SIZE;
-    let max_y = ((cy + 1) * CLUSTER_SIZE).min(flow_field.height) - 1;
-
-    for i in 0..portals.len() {
-        for j in i+1..portals.len() {
-            let id1 = portals[i];
-            let id2 = portals[j];
-            let node1 = graph.nodes[id1].node;
-            let node2 = graph.nodes[id2].node;
-
-            if let Some(path) = find_path_astar_local(node1, node2, flow_field, min_x, max_x, min_y, max_y) {
-                let cost = FixedNum::from_num(path.len() as f64);
-                graph.edges.entry(id1).or_default().push((id2, cost));
-                graph.edges.entry(id2).or_default().push((id1, cost));
-            }
-        }
-    }
-}
-
-pub(super) fn precompute_flow_fields_for_cluster(
-    graph: &mut HierarchicalGraph,
-    flow_field: &crate::game::structures::FlowField,
-    key: (usize, usize),
-) {
-    // Check if cluster exists before trying to access it
-    let Some(cluster) = graph.clusters.get(&key) else {
-        // Cluster doesn't exist - this can happen for edge areas or uninitialized regions
-        return;
-    };
-    
-    let portals = cluster.portals.clone();
-    for portal_id in portals {
-        if let Some(portal) = graph.nodes.get(portal_id).cloned() {
-            let field = generate_local_flow_field(key, &portal, flow_field);
-            if let Some(cluster) = graph.clusters.get_mut(&key) {
-                cluster.flow_field_cache.insert(portal_id, field);
-            }
-        }
-    }
-}
-
-/// Regenerate flow fields for a specific cluster after obstacles are added.
-/// This is called by apply_new_obstacles after clearing cluster cache.
-pub fn regenerate_cluster_flow_fields(
-    graph: &mut HierarchicalGraph,
-    flow_field: &crate::game::structures::FlowField,
-    cluster_key: (usize, usize),
-) {
-    precompute_flow_fields_for_cluster(graph, flow_field, cluster_key);
-}
-
-// ============================================================================
-// Helper Functions (extracted for profiling annotations)
-// ============================================================================
-
-/// Initialize cluster data structures
-#[profile(1)]
-fn initialize_clusters(
-    graph: &mut HierarchicalGraph,
-    width_clusters: usize,
-    height_clusters: usize,
-) {
-    for cy in 0..height_clusters {
-        for cx in 0..width_clusters {
-            graph.clusters.insert((cx, cy), Cluster {
-                id: (cx, cy),
-                portals: Vec::new(),
-                flow_field_cache: BTreeMap::new(),
-            });
-        }
-    }
-    info!("Initialized {} clusters", width_clusters * height_clusters);
-}
-
-/// Build connected components from graph
-#[profile(1)]
-fn build_connected_components(
-    components: &mut ConnectedComponents,
-    graph: &HierarchicalGraph,
-) {
-    components.build_from_graph(graph);
-    info!("Connected components built");
 }
