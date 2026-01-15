@@ -25,7 +25,9 @@ pub fn update_spatial_hash(
     new_entities: Query<(Entity, &SimPosition, &Collider), Without<OccupiedCell>>,
     mut commands: Commands,
     _sim_config: Res<SimConfig>,  // Keep for signature compatibility
+    mut pending_index_updates: Local<Vec<(Entity, usize, usize, usize)>>,
 ) {
+    pending_index_updates.clear();
     
     
     // Handle entities that don't have OccupiedCell yet (first time in spatial hash)
@@ -36,7 +38,6 @@ pub fn update_spatial_hash(
     }
     
     // Collect index updates needed for swapped entities (avoid double-borrow)
-    let mut pending_index_updates: Vec<(Entity, usize, usize, usize)> = Vec::new();
     
     // Handle dynamic entities - check if they should update cells
     for (entity, pos, _collider, mut occupied_cell) in query.iter_mut() {
@@ -59,11 +60,11 @@ pub fn update_spatial_hash(
     }
     
     // Second pass: Apply pending index updates to swapped entities
-    for (swapped_entity, col, row, new_idx) in pending_index_updates {
-        if let Ok((_, _, _, mut swapped_occupied)) = query.get_mut(swapped_entity) {
+    for (swapped_entity, col, row, new_idx) in pending_index_updates.iter() {
+        if let Ok((_, _, _, mut swapped_occupied)) = query.get_mut(*swapped_entity) {
             // Update the vec_idx if this is the right cell
-            if swapped_occupied.col == col && swapped_occupied.row == row {
-                swapped_occupied.vec_idx = new_idx;
+            if swapped_occupied.col == *col && swapped_occupied.row == *row {
+                swapped_occupied.vec_idx = *new_idx;
             }
         }
     }

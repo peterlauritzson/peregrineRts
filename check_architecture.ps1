@@ -284,6 +284,14 @@ foreach ($file in $simulationFiles) {
             continue
         }
         
+        # Check if previous line has NOLINT comment
+        if ($match.LineNumber -gt 1) {
+            $prevLine = $lines[$match.LineNumber - 2].Trim()
+            if ($prevLine -match '//\s*NOLINT') {
+                continue
+            }
+        }
+        
         $relativePath = $file.FullName.Replace("$PWD\\", "")
         Write-Warning -File $relativePath -Line $match.LineNumber `
             -Message "Clone in hot path - verify this is necessary" 

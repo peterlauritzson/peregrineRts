@@ -20,11 +20,11 @@ pub fn init_sim_config_from_initial(
 ) {
     info!("Initializing SimConfig from InitialConfig (lightweight startup init)");
     
-    let config = match initial_config {
-        Some(cfg) => cfg.clone(),
+    let config = match &initial_config {
+        Some(cfg) => cfg.as_ref(),
         None => {
             warn!("InitialConfig not found, using defaults ");
-            InitialConfig::default()
+            &InitialConfig::default()
         }
     };
     

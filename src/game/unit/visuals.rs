@@ -7,6 +7,8 @@ use super::components::{Unit, Selected, SelectionCircle, HealthBar, Health};
 use super::resources::{UnitMesh, UnitMaterials, HealthBarSettings};
 
 /// Spawns visual representations for newly created units
+/// 
+/// Note: Only runs on Added<Unit> - NOT a hot path (only processes new spawns)
 pub(super) fn spawn_unit_visuals(
     mut commands: Commands,
     query: Query<(Entity, &SimPosition), Added<Unit>>,
@@ -17,12 +19,16 @@ pub(super) fn spawn_unit_visuals(
     for (entity, pos) in query.iter() {
         let p = pos.0.to_vec2();
         commands.entity(entity).insert((
+            // NOLINT: Handle::clone() is cheap (Arc-based ref count)
             Mesh3d(unit_mesh.unit.clone()),
+            // NOLINT: Handle::clone() is cheap (Arc-based ref count)
             MeshMaterial3d(unit_materials.normal.clone()),
             Transform::from_xyz(p.x, 1.0, p.y),
         )).with_children(|parent| {
             parent.spawn((
+                // NOLINT: Handle::clone() is cheap (Arc-based ref count)
                 Mesh3d(unit_mesh.circle.clone()),
+                // NOLINT: Handle::clone() is cheap (Arc-based ref count)
                 MeshMaterial3d(unit_materials.selection_circle.clone()),
                 Transform::from_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
                     .with_translation(Vec3::new(0.0, -0.95, 0.0)),
@@ -31,7 +37,9 @@ pub(super) fn spawn_unit_visuals(
             ));
             // Health Bar
             parent.spawn((
+                // NOLINT: Handle::clone() is cheap (Arc-based ref count)
                 Mesh3d(unit_mesh.quad.clone()),
+                // NOLINT: Handle::clone() is cheap (Arc-based ref count)
                 MeshMaterial3d(unit_materials.health_bar.clone()),
                 Transform::from_xyz(0.0, 1.5, 0.0),
                 if settings.show { Visibility::Visible } else { Visibility::Hidden },
@@ -57,19 +65,27 @@ pub(super) fn sync_visuals(
 }
 
 /// Updates unit materials based on collision state
+/// 
+/// Optimized: Only processes entities whose collision state CHANGED (not all units every frame)
 pub(super) fn update_selection_visuals(
-    mut query: Query<(Option<&Colliding>, &mut MeshMaterial3d<StandardMaterial>), With<Unit>>,
+    mut query: Query<&mut MeshMaterial3d<StandardMaterial>, With<Unit>>,
     unit_materials: Res<UnitMaterials>,
+    added: Query<Entity, Added<Colliding>>,
+    mut removed: RemovedComponents<Colliding>,
 ) {
-    for (colliding, mut mat_handle) in query.iter_mut() {
-        let target_mat = if colliding.is_some() {
-            &unit_materials.colliding
-        } else {
-            &unit_materials.normal
-        };
-
-        if mat_handle.0 != *target_mat {
-            mat_handle.0 = target_mat.clone();
+    // Handle newly colliding entities
+    for entity in added.iter() {
+        if let Ok(mut mat_handle) = query.get_mut(entity) {
+            // NOLINT: Handle::clone() is cheap (Arc-based ref count)
+            mat_handle.0 = unit_materials.colliding.clone();
+        }
+    }
+    
+    // Handle entities that stopped colliding
+    for entity in removed.read() {
+        if let Ok(mut mat_handle) = query.get_mut(entity) {
+            // NOLINT: Handle::clone() is cheap (Arc-based ref count)
+            mat_handle.0 = unit_materials.normal.clone();
         }
     }
 }

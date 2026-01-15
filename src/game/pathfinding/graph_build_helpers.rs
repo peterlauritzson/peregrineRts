@@ -26,7 +26,8 @@ pub(crate) fn connect_intra_cluster(
     flow_field: &crate::game::structures::FlowField,
     key: (usize, usize),
 ) {
-    let portals = graph.clusters[&key].portals.clone();
+    let portals = &graph.clusters[&key].portals;
+    let portal_count = portals.len();
     let (cx, cy) = key;
     
     let min_x = cx * CLUSTER_SIZE;
@@ -34,8 +35,8 @@ pub(crate) fn connect_intra_cluster(
     let min_y = cy * CLUSTER_SIZE;
     let max_y = ((cy + 1) * CLUSTER_SIZE).min(flow_field.height) - 1;
 
-    for i in 0..portals.len() {
-        for j in i+1..portals.len() {
+    for i in 0..portal_count {
+        for j in i+1..portal_count {
             let id1 = portals[i];
             let id2 = portals[j];
             let node1 = graph.nodes[id1].node;
@@ -66,9 +67,9 @@ pub(crate) fn precompute_flow_fields_for_cluster(
         return;
     };
     
-    let portals = cluster.portals.clone();
-    for portal_id in portals {
-        if let Some(portal) = graph.nodes.get(portal_id).cloned() {
+    let portal_ids: Vec<usize> = cluster.portals.iter().copied().collect();
+    for portal_id in portal_ids {
+        if let Some(portal) = graph.nodes.get(portal_id) {
             let field = generate_local_flow_field(key, &portal, flow_field);
             if let Some(cluster) = graph.clusters.get_mut(&key) {
                 cluster.flow_field_cache.insert(portal_id, field);

@@ -216,8 +216,9 @@ pub fn detect_collisions(
     position_lookup: Query<(&SimPosition, &Collider)>,
     sim_config: Res<SimConfig>,
     mut events: MessageWriter<CollisionEvent>,
+    mut colliding_entities: Local<std::collections::HashSet<Entity>>,
 ) {
-    let mut colliding_entities = std::collections::HashSet::new();
+    colliding_entities.clear();
 
     // Use cached neighbor lists instead of querying spatial hash
     // Cache is updated by update_neighbor_cache system which runs before this

@@ -76,9 +76,14 @@
 ///    ```
 ///    $env:PERF_TEST_MODE="reset"; cargo test --release --test performance_scaling test_performance_scaling_suite -- --ignored --nocapture
 ///    ```
-/// 7. ** Single test run (e.g., 500k units @ 100 TPS)**:
+/// 7. **Start from specific test** (e.g., 500k units @ 100 TPS) and continue:
 ///    ```
 ///    $env:START_INDEX="8"; cargo test --release --test performance_scaling test_performance_scaling_suite -- --ignored --nocapture
+///    ```
+///
+/// 8. **Run only one specific test** (e.g., only test index 8):
+///    ```
+///    $env:RUN_INDEX="8"; cargo test --release --test performance_scaling test_performance_scaling_suite -- --ignored --nocapture
 ///    ```
 
 use bevy::prelude::*;
@@ -1155,27 +1160,33 @@ fn test_performance_scaling_suite() {
     }
     
     // Determine test range
-    let (start_index, end_index) = if let Ok(start_str) = std::env::var("START_INDEX") {
-        // Manual override to jump to specific test index
+    let (start_index, end_index, run_single) = if let Ok(run_str) = std::env::var("RUN_INDEX") {
+        // Run only a single test at the specified index
+        let index = run_str.parse::<usize>().expect("RUN_INDEX must be a number");
+        println!("Running ONLY test index {} ({})\n", index, 
+                 PERF_TESTS.get(index).map(|t| t.name).unwrap_or("INVALID INDEX"));
+        (index, index + 1, true)
+    } else if let Ok(start_str) = std::env::var("START_INDEX") {
+        // Manual override to jump to specific test index and continue
         let start = start_str.parse::<usize>().expect("START_INDEX must be a number");
-        println!("Jumping directly to test index {} ({})\n", start, 
+        println!("Jumping directly to test index {} ({}) and continuing...\n", start, 
                  PERF_TESTS.get(start).map(|t| t.name).unwrap_or("INVALID INDEX"));
-        (start, PERF_TESTS.len())
+        (start, PERF_TESTS.len(), false)
     } else {
         match mode {
             TestMode::Full | TestMode::Reset => {
                 println!("Running all tests from the beginning\n");
-                (0, PERF_TESTS.len())
+                (0, PERF_TESTS.len(), false)
             }
             TestMode::Regression => {
                 let end = checkpoint.last_passed_index.map(|i| i + 1).unwrap_or(0);
                 println!("Running regression tests (0..{})\n", end);
-                (0, end)
+                (0, end, false)
             }
             TestMode::Resume => {
                 let start = checkpoint.last_passed_index.unwrap_or(0);
                 println!("Resuming from test {} (re-validating last pass)..{}\n", start, PERF_TESTS.len());
-                (start, PERF_TESTS.len())
+                (start, PERF_TESTS.len(), false)
             }
         }
     };
@@ -1207,6 +1218,12 @@ fn test_performance_scaling_suite() {
         } else {
             println!("\n⚠ Test failed - stopping test suite");
             all_passed = false;
+            break;
+        }
+        
+        // If running single test mode, stop after this test
+        if run_single {
+            println!("\n✓ Single test run completed");
             break;
         }
     }
