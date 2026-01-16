@@ -2,11 +2,11 @@
 mod tests {
     use bevy::prelude::*;
     use crate::game::fixed_math::{FixedVec2, FixedNum};
-    use crate::game::simulation::{SimPosition, SimVelocity, BoidsNeighborCache};
+    use crate::game::simulation::{SimPosition, SimVelocity, BoidsNeighborCache, SimTick};
     use crate::game::spatial_hash::SpatialHash;
     use crate::game::simulation::SimConfig;
-    use super::super::Unit;
-    use super::super::boids::apply_boids_steering;
+    use crate::game::unit::Unit;
+    use crate::game::unit::boids::apply_boids_steering;
 
     #[test]
     fn test_boids_uses_spatial_query() {
@@ -32,18 +32,21 @@ mod tests {
         sim_config.unit_speed = FixedNum::from_num(5.0);
         sim_config.tick_rate = 30.0;
         app.insert_resource(sim_config);
+        app.init_resource::<SimTick>();
         
         // Spawn test units
         let entity_a = app.world_mut().spawn((
             Unit,
             SimPosition(FixedVec2::new(FixedNum::from_num(0.0), FixedNum::from_num(0.0))),
             SimVelocity(FixedVec2::ZERO),
+            BoidsNeighborCache::default(),
         )).id();
         
         let entity_b = app.world_mut().spawn((
             Unit,
             SimPosition(FixedVec2::new(FixedNum::from_num(3.0), FixedNum::from_num(0.0))),
             SimVelocity(FixedVec2::new(FixedNum::from_num(1.0), FixedNum::from_num(0.0))),
+            BoidsNeighborCache::default(),
         )).id();
         
         // Update spatial hash manually
@@ -92,12 +95,14 @@ mod tests {
         sim_config.unit_speed = FixedNum::from_num(5.0);
         sim_config.tick_rate = 30.0;
         app.insert_resource(sim_config);
+        app.init_resource::<SimTick>();
         
         // Spawn a single unit
         let entity = app.world_mut().spawn((
             Unit,
             SimPosition(FixedVec2::ZERO),
             SimVelocity(FixedVec2::ZERO),
+            BoidsNeighborCache::default(),
         )).id();
         
         // Update spatial hash
@@ -138,6 +143,7 @@ mod tests {
         sim_config.unit_speed = FixedNum::from_num(5.0);
         sim_config.tick_rate = 30.0;
         app.insert_resource(sim_config);
+        app.init_resource::<SimTick>();
         
         // Spawn two units very close together
         let entity_a = app.world_mut().spawn((
@@ -204,6 +210,7 @@ mod tests {
         sim_config.unit_speed = FixedNum::from_num(5.0);
         sim_config.tick_rate = 30.0;
         app.insert_resource(sim_config);
+        app.init_resource::<SimTick>();
         
         // Spawn entity A stationary, B moving
         let entity_a = app.world_mut().spawn((
@@ -271,6 +278,7 @@ mod tests {
         sim_config.unit_speed = FixedNum::from_num(5.0);
         sim_config.tick_rate = 30.0;
         app.insert_resource(sim_config);
+        app.init_resource::<SimTick>();
         
         // Spawn entity A at origin, and B and C to the right
         // Center of mass of B and C is at (10, 0)
@@ -349,24 +357,28 @@ mod tests {
         sim_config.unit_speed = FixedNum::from_num(5.0);
         sim_config.tick_rate = 30.0;
         app.insert_resource(sim_config);
+        app.init_resource::<SimTick>();
         
         // Spawn entity A at origin, B nearby (within radius), C far away (beyond radius)
         let entity_a = app.world_mut().spawn((
             Unit,
             SimPosition(FixedVec2::new(FixedNum::from_num(0.0), FixedNum::from_num(0.0))),
             SimVelocity(FixedVec2::ZERO),
+            BoidsNeighborCache::default(),
         )).id();
         
         let entity_b = app.world_mut().spawn((
             Unit,
             SimPosition(FixedVec2::new(FixedNum::from_num(3.0), FixedNum::from_num(0.0))), // Within radius
             SimVelocity(FixedVec2::new(FixedNum::from_num(2.0), FixedNum::from_num(0.0))),
+            BoidsNeighborCache::default(),
         )).id();
         
         let entity_c = app.world_mut().spawn((
             Unit,
             SimPosition(FixedVec2::new(FixedNum::from_num(20.0), FixedNum::from_num(0.0))), // Beyond radius
             SimVelocity(FixedVec2::new(FixedNum::from_num(10.0), FixedNum::from_num(0.0))),
+            BoidsNeighborCache::default(),
         )).id();
         
         // Update spatial hash
