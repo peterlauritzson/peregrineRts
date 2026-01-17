@@ -83,7 +83,9 @@ fn find_horizontal_strips(
             let is_walkable = if x < max_x && y < flow_field.height {
                 let idx = flow_field.get_index(x, y);
                 if idx < flow_field.cost_field.len() {
-                    flow_field.cost_field[idx] == 1 // Only walkable tiles (not obstacles=255)
+                    // Walkable = any cost < 255 (obstacles are 255)
+                    // This allows variable terrain costs: 1=normal, 2-254=slow terrain, 255=impassable
+                    flow_field.cost_field[idx] < 255
                 } else {
                     false
                 }

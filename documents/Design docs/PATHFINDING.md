@@ -1466,3 +1466,349 @@ impl RoutingCache {
 - Automatic cache warming
 - Memory: ~100KB for 6,000 hot entries
 - Expected speedup: 2-3x for common destinations
+
+---
+
+## 12. Region Fragmentation with Circular Obstacles
+
+### The Problem
+
+**What it is:**
+When using axis-aligned rectangle decomposition with circular (or irregular) obstacles, the system creates excessive region fragmentation. A single circular obstacle can generate 10-30 small rectangular regions as the algorithm tries to "trace" the curved boundary with horizontal and vertical strips.
+
+**Why it happens:**
+- The maximal rectangles algorithm scans horizontally, creating strips of walkable tiles
+- Circular obstacles have concave exterior curves
+- Each "step" down a circle's edge creates a new thin rectangle
+- This occurs even with large gaps between obstacles - it's the curvature itself that causes fragmentation
+
+**Example:**
+```
+Map with 2 circular obstacles (radius 5):
+- Expected: ~5-10 regions in the cluster
+- Actual: 20-40 regions (many thin strips following curves)
+- Result: Exceeds MAX_REGIONS or MAX_ISLANDS limits
+```
+
+**Why it matters:**
+1. **Memory overhead:** More regions → larger local routing tables (`[MAX_REGIONS][MAX_REGIONS]`)
+2. **Island fragmentation:** Small regions often form separate islands (tortuosity threshold)
+3. **Performance impact:** More region lookups, more portal traversals
+4. **Routing table size:** More islands → exponentially larger routing tables
+5. **Visual noise:** Debug visualization shows many tiny rectangles instead of clean regions
+
+### Proposed Solutions
+
+#### **Solution 1: Core + Fringe Decomposition** ⭐ Recommended
+
+**Concept:** Separate open areas from obstacle boundaries
+
+**Algorithm:**
+1. Compute clearance map (distance from each cell to nearest obstacle)
+2. Identify "safe zones" - contiguous areas with clearance ≥ threshold (e.g., 3 tiles)
+3. Decompose safe zones into large rectangles (few regions)
+4. Decompose remaining boundary areas with current algorithm (many small regions)
+5. Optionally: Boundary regions form separate islands for localized routing
+
+**Pros:**
+- 90% of cluster area becomes 1-5 large regions
+- Small regions only exist near obstacles where needed
+- Preserves support for arbitrary obstacle shapes
+- Most pathfinding uses simple routing through large regions
+- Small regions only matter when entering/exiting tight spaces
+
+**Cons:**
+- More complex decomposition algorithm
+- Need to implement clearance map (simple flood fill)
+- Two different region types to handle
+
+**Implementation complexity:** Medium
+
+**Expected improvement:** 70-90% reduction in region count
+
+---
+
+#### **Solution 2: Dead-End Region Merging**
+
+**Concept:** After rectangle generation, merge regions with limited connectivity
+
+**Algorithm:**
+1. Build regions using current algorithm
+2. Analyze portal configuration for each region
+3. Identify "edge-following" regions:
+   - Has portals on ≤ 2 edges (obstacle-bounded on 2-3 sides)
+   - AND has high aspect ratio (length/width > 4:1)
+   - OR has small area (< threshold)
+4. Merge these regions with their largest or most-connected neighbor
+5. Accept that merged regions may be slightly non-convex
+
+**Pros:**
+- Directly targets the curve-following artifacts
+- Uses connectivity information already being computed
+- Can reduce region count by 50-80%
+- Simple heuristic to implement
+
+**Cons:**
+- Merged regions lose strict convexity
+- Need relaxed point-in-region test (still fast, just different)
+- Merge order matters (need good heuristic)
+- Might create slightly suboptimal paths within merged regions
+
+**Implementation complexity:** Low-Medium
+
+**Expected improvement:** 50-80% reduction in region count
+
+---
+
+#### **Solution 3: Aspect Ratio Filtering**
+
+**Concept:** Detect and merge thin strips during decomposition
+
+**Algorithm:**
+1. During rectangle generation, compute aspect ratio for each rectangle
+2. If `length/width > threshold` (e.g., 5:1) AND region has ≤ 2 portal edges
+3. Mark as "detail region" and merge with neighbor immediately
+4. Prefer merging into regions with similar orientation
+
+**Pros:**
+- Easy to implement (add check during existing algorithm)
+- Targets exact problem (long thin regions)
+- Low complexity
+
+**Cons:**
+- Might catch legitimate corridors (false positives)
+- Hard to distinguish "curve follower" from "narrow passage"
+- May need careful threshold tuning
+
+**Implementation complexity:** Low
+
+**Expected improvement:** 40-60% reduction in region count
+
+---
+
+#### **Solution 4: Portal Density Scoring**
+
+**Concept:** Score regions by connectivity density, merge high-scoring small regions
+
+**Algorithm:**
+1. After decomposition, compute score: `portal_count / region_area`
+2. High score = many portals for small area (likely detail region)
+3. Low score = dead-end or large important region
+4. Merge high-scoring regions below size threshold into neighbors
+
+**Pros:**
+- More nuanced than simple portal counting
+- Preserves large important regions automatically
+- Can be combined with other approaches
+
+**Cons:**
+- Requires tuning two thresholds (density and size)
+- May not catch all problematic regions
+
+**Implementation complexity:** Low-Medium
+
+**Expected improvement:** 30-50% reduction in region count
+
+---
+
+#### **Solution 5: Restrict Obstacle Shapes**
+
+**Concept:** Enforce rectangular obstacles only
+
+**Options:**
+- **Strict:** Only axis-aligned rectangles allowed
+- **Moderate:** Axis-aligned shapes (rects + straight walls)
+- **Flexible:** Compound rectangles (L/T/U shapes from multiple rects)
+
+**Implementation:**
+- Editor snaps to grid, enforces shape constraints
+- Optional "complexity budget" - limit obstacles per cluster
+- Visual feedback showing invalid placements
+
+**Pros:**
+- Perfect clean regions (natural alignment)
+- No fragmentation at all
+- Very predictable performance
+- Still allows complex layouts (via multiple rectangles)
+
+**Cons:**
+- Less artistic freedom for level designers
+- Can't represent organic/natural obstacles
+- Requires editor changes
+- Users might try to "cheat" with many small rectangles
+
+**Implementation complexity:** Medium (requires editor changes)
+
+**Expected improvement:** 95%+ reduction (near-perfect regions)
+
+---
+
+#### **Solution 6: Obstacle Dilation for Pathfinding**
+
+**Concept:** Treat obstacles as larger for navigation purposes
+
+**Algorithm:**
+1. During decomposition, use dilated obstacles (add 1-2 tile radius)
+2. Small gaps between circles become filled
+3. Actual collision detection still uses real obstacle bounds
+4. Units maintain clearance from obstacles automatically
+
+**Pros:**
+- Dramatically reduces fragmentation (gaps disappear)
+- Improves movement realism (units need space to maneuver)
+- Simple to implement (just modify decomposition input)
+- Better performance (fewer regions)
+
+**Cons:**
+- Some technically-reachable areas become impassable
+- Narrow passages may close completely
+- Changes gameplay (can't squeeze through tight gaps)
+
+**Implementation complexity:** Very Low
+
+**Expected improvement:** 60-80% reduction in region count
+
+**Gameplay consideration:** May actually improve realism - units shouldn't squeeze through 1-tile gaps anyway
+
+---
+
+#### **Solution 7: Quadtree/BSP Decomposition**
+
+**Concept:** Recursively split space instead of horizontal scanning
+
+**Algorithm:**
+```
+function decompose_quadtree(bounds):
+    if bounds is mostly walkable:
+        return single region
+    if bounds is mostly obstacle:
+        return empty
+    if bounds is mixed:
+        split into 4 quadrants
+        return regions from all quadrants
+```
+
+**Pros:**
+- Natural hierarchy (big regions in open space)
+- Adapts to obstacle distribution
+- Well-studied algorithm
+
+**Cons:**
+- Regions are axis-aligned squares (not optimally shaped)
+- Different algorithm entirely (major rewrite)
+- May still create many small regions near boundaries
+- More complex to implement
+
+**Implementation complexity:** High (complete algorithm replacement)
+
+**Expected improvement:** Variable (40-70% depending on obstacle layout)
+
+---
+
+#### **Solution 8: Two-Tier Region System**
+
+**Concept:** Use different region granularity based on context
+
+**Structure:**
+- **Macro regions:** Large, possibly non-convex, for strategic routing
+- **Micro regions:** Small convex, only used when near obstacles
+- Units switch between modes based on environment complexity
+
+**Algorithm:**
+1. Create both macro (coarse) and micro (fine) regions
+2. Units far from obstacles use macro regions only
+3. Units near obstacles switch to micro regions
+4. Routing table uses macro regions to save memory
+
+**Pros:**
+- Best of both worlds (speed in open areas, precision near obstacles)
+- Can tune granularity independently
+- Flexible system
+
+**Cons:**
+- More complex runtime logic (mode switching)
+- Doubled memory (store both region types)
+- Need heuristic for "near obstacles"
+
+**Implementation complexity:** High
+
+**Expected improvement:** Effective region count reduced 60-80% for routing
+
+---
+
+#### **Solution 9: Cluster Complexity Budget**
+
+**Concept:** Accept fragmentation but handle it differently
+
+**Algorithm:**
+1. If cluster has > threshold regions (e.g., 16), mark as "complex cluster"
+2. Complex clusters use different storage:
+   - Store region adjacency graph instead of full routing table
+   - Use A* within cluster instead of lookup tables
+   - Or: Approximate as single region for external routing
+3. Most clusters remain simple (fast lookup tables)
+
+**Pros:**
+- No algorithm changes to decomposition
+- Heterogeneous approach (optimize for common case)
+- Graceful degradation (complex areas slower but still work)
+
+**Cons:**
+- Inconsistent performance (some clusters fast, some slow)
+- More complex data structures
+- Need to maintain two code paths
+
+**Implementation complexity:** Medium
+
+**Expected improvement:** No reduction in regions, but mitigates performance impact
+
+---
+
+#### **Solution 10: Relax Convexity Requirement**
+
+**Concept:** Accept non-convex regions, adapt movement logic
+
+**Changes:**
+- Allow region merging even if result is L-shaped or U-shaped
+- Use proper point-in-polygon test (ray casting) instead of convex test
+- Movement: Always go to portal centers (don't assume straight line valid)
+
+**Pros:**
+- Solves fragmentation completely
+- Can merge aggressively
+- Still works for pathfinding (just different movement)
+
+**Cons:**
+- Loses "straight line guarantee" within regions
+- More complex point-in-polygon test (still fast, ~10 operations)
+- Need to change movement logic
+- Potential for units taking suboptimal paths within regions
+
+**Implementation complexity:** Medium
+
+**Expected improvement:** 80-95% reduction (aggressive merging)
+
+---
+
+### Recommendation
+
+**Immediate fix:** Solution 6 (Obstacle Dilation) - one line change, big impact
+**Best long-term:** Solution 1 (Core + Fringe) - optimal results, preserves flexibility
+**Quick improvement:** Solution 2 or 3 (Dead-End Merging or Aspect Ratio) - moderate effort, good results
+
+**Hybrid approach:**
+1. Start with obstacle dilation (quick win)
+2. Implement aspect ratio filtering (another quick win)
+3. If still needed, add core + fringe decomposition (sophisticated solution)
+
+**Decision criteria:**
+- **Need perfect results?** → Solution 1 or 5
+- **Want quick fix?** → Solution 6 or 3
+- **Okay with approximate?** → Solution 9 or 10
+- **Limited obstacle shapes acceptable?** → Solution 5
+
+### Current Status
+
+**As implemented:** Basic maximal rectangles algorithm with no fragmentation mitigation
+**Observed:** 1990 regions across 400 clusters (avg 5 per cluster), with 144 clusters exceeding MAX_ISLANDS=4
+**Impact:** System functional but suboptimal; routing table size acceptable (~13MB) but could be 5-10× smaller with fragmentation fixes
