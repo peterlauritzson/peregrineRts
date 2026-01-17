@@ -161,7 +161,7 @@ fn test_pathfinding_around_wall() {
                             i, pos, current_index, waypoints.len(), 
                             waypoints.get(*current_index));
                     },
-                    Path::Hierarchical { goal, goal_cluster } => {
+                    Path::Hierarchical { goal, goal_cluster, goal_island: _ } => {
                         println!("Step {}: Unit at {:?}, H-Path to cluster {:?}, Final Goal: {:?}", 
                             i, pos, goal_cluster, goal);
                     }

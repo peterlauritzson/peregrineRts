@@ -8,7 +8,6 @@
     key_camera_backward: KeyS,
     key_camera_left: KeyA,
     key_camera_right: KeyD,
-    key_debug_flow: KeyF,
     key_debug_graph: KeyG,
     key_debug_path: KeyH,
     key_spawn_black_hole: KeyB,
@@ -28,7 +27,7 @@
     selection_click_radius: 1.0,
     
     // Debug Visualization (hot-reloadable)
-    debug_flow_field_view_radius: 50.0,
+    debug_view_radius: 50.0,
     debug_path_trace_max_steps: 200,
     debug_unit_lod_height_threshold: 50.0,
 )

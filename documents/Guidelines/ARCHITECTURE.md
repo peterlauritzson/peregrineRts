@@ -33,6 +33,41 @@
 *   **Instant Feedback**: When a player clicks, play the sound and show the marker *immediately* (Frame 0), even if the network command takes 100ms to execute.
 *   **Crisp Movement**: Physics should be snappy (high acceleration/deceleration), not "floaty".
 
+### 5. Module API Structure (Visibility Control)
+*   **Minimal Public API**: Use Rust's visibility modifiers to control what's exposed:
+    *   `pub` - Fully public, available to all external crates (use sparingly)
+    *   `pub(crate)` - Available anywhere within the peregrine crate
+    *   `pub(super)` - Available only to parent module
+    *   (default) - Private to the module
+*   **Example Structure** (`mod.rs`):
+    ```rust
+    // ============================================================================
+    // PUBLIC API - Minimal external interface
+    // ============================================================================
+    pub use graph::{HierarchicalGraph, GraphStats};
+    pub use systems::process_path_requests;
+    
+    // ============================================================================
+    // CRATE-INTERNAL API - Available within peregrine crate only
+    // ============================================================================
+    pub(crate) use types::{Node, Portal, Region};
+    pub(crate) use helpers::internal_function;
+    ```
+*   **Hot Path vs Cold Path**:
+    *   **Hot Path** (called millions of times): Keep fields `pub` for zero-cost access
+        - Example: `graph.clusters.get(id)` for movement lookups
+    *   **Cold Path** (called occasionally): Use methods for encapsulation
+        - Example: `graph.build_graph()`, `graph.get_stats()`
+*   **Why Not `public_api.rs`?** 
+    *   Rust's visibility modifiers are more idiomatic and powerful
+    *   IDE autocomplete naturally respects visibility
+    *   No need for separate files - use `mod.rs` to organize re-exports
+*   **Guidelines**:
+    1. Keep public API as small as possible
+    2. Document all `pub` items with `///` doc comments
+    3. Use `pub(crate)` for implementation details shared across modules
+    4. Prefer methods over exposing fields (unless hot-path performance critical)
+
 ---
 
 ## Technical Architecture: The "Starcraft 2" Standard

@@ -16,7 +16,11 @@ pub struct LoadingProgress {
 impl Plugin for LoadingPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LoadingProgress>();
-        app.add_systems(OnEnter(GameState::Loading), (setup_loading_screen, handle_pending_map_generation).chain());
+        app.add_systems(OnEnter(GameState::Loading), (
+            setup_loading_screen, 
+            handle_pending_map_generation,
+            build_graph_after_map_ready,
+        ).chain());
         app.add_systems(OnExit(GameState::Loading), cleanup_loading_screen);
         app.add_systems(Update, update_loading_screen.run_if(in_state(GameState::Loading)));
         app.add_systems(Update, check_loading_complete.run_if(in_state(GameState::Loading)));
@@ -136,7 +140,6 @@ fn handle_pending_map_generation(
     mut spatial_hash: ResMut<crate::game::spatial_hash::SpatialHash>,
     mut map_flow_field: ResMut<crate::game::simulation::MapFlowField>,
     mut graph: ResMut<crate::game::pathfinding::HierarchicalGraph>,
-    mut build_state: ResMut<crate::game::pathfinding::GraphBuildState>,
     mut map_status: ResMut<crate::game::simulation::MapStatus>,
     mut meshes: ResMut<Assets<Mesh>>,
     ground_plane_query: Query<(Entity, &Mesh3d), With<crate::game::GroundPlane>>,
@@ -148,7 +151,6 @@ fn handle_pending_map_generation(
     
     use crate::game::fixed_math::{FixedVec2, FixedNum};
     use crate::game::structures::{FlowField, CELL_SIZE};
-    use crate::game::pathfinding::GraphBuildStep;
     use rand::Rng;
     
     info!("=== GENERATING RANDOM MAP DURING LOADING ===");
@@ -159,7 +161,7 @@ fn handle_pending_map_generation(
     
     // Reset Graph and Build State
     graph.reset();
-    build_state.step = GraphBuildStep::Done;
+
     
     // Update SimConfig with new map dimensions
     sim_config.map_width = FixedNum::from_num(map_width);
@@ -206,12 +208,23 @@ fn handle_pending_map_generation(
                 let z = rng.random_range((-map_height/2.0 + margin)..(map_height/2.0 - margin));
                 let radius = rng.random_range(pending_gen.min_radius..pending_gen.max_radius);
                 
+                let pos = FixedVec2::from_f32(x, z);
+                let rad = FixedNum::from_num(radius);
+                
                 // Reuse the shared spawn_obstacle function instead of duplicating code
                 crate::game::editor::spawn_obstacle(
                     &mut commands,
-                    FixedVec2::from_f32(x, z),
-                    FixedNum::from_num(radius),
+                    pos,
+                    rad,
                     &resources  // Dereference the Res<EditorResources>
+                );
+                
+                // CRITICAL: Apply obstacle to flow field immediately, before building graph
+                // Otherwise the graph will be built on an empty map!
+                crate::game::simulation::apply_obstacle_to_flow_field(
+                    &mut map_flow_field.0,
+                    pos,
+                    rad
                 );
             }
             
@@ -224,14 +237,43 @@ fn handle_pending_map_generation(
     // Mark map as not loaded from file (since we generated it)
     map_status.loaded = false;
     
-    // Trigger graph building by setting build state to NotStarted
-    // This will cause the incremental graph building system to kick in
-    graph.reset();
-    build_state.step = GraphBuildStep::NotStarted;
-    info!("Graph build triggered - will build incrementally during gameplay");
+    // Build graph using new region-based system (synchronous, fast)
+    info!("Building pathfinding graph with region-based system...");
+    graph.build_graph(&map_flow_field.0, false);
+
+    info!("Pathfinding graph build complete!");
     
     // Remove the pending generation resource
     commands.remove_resource::<PendingMapGeneration>();
     
     info!("=== RANDOM MAP GENERATION COMPLETE ===");
+}
+
+/// Build pathfinding graph after map is ready (either loaded or generated)
+/// This runs after handle_pending_map_generation, so if a map was generated,
+/// the graph is already built. This handles the case where no map generation
+/// happened (e.g., loading existing map or starting editor)
+fn build_graph_after_map_ready(
+    mut graph: ResMut<crate::game::pathfinding::HierarchicalGraph>,
+    map_flow_field: Res<crate::game::simulation::MapFlowField>,
+    mut loading_progress: ResMut<LoadingProgress>,
+) {
+    // Skip if graph was already built (e.g., by map generation)
+    if graph.initialized {
+        loading_progress.task = "Ready!".to_string();
+        loading_progress.progress = 1.0;
+        return;
+    }
+    
+    // Build graph for existing map
+    loading_progress.task = "Building Pathfinding Graph...".to_string();
+    loading_progress.progress = 0.5;
+    
+    info!("Building pathfinding graph with region-based system...");
+    graph.build_graph(&map_flow_field.0, false);
+
+    info!("Pathfinding graph build complete!");
+    
+    loading_progress.task = "Ready!".to_string();
+    loading_progress.progress = 1.0;
 }

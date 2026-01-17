@@ -205,7 +205,6 @@ impl Default for SimConfig {
 /// Debug visualization settings
 #[derive(Resource)]
 pub struct DebugConfig {
-    pub show_flow_field: bool,
     pub show_pathfinding_graph: bool,
     pub show_paths: bool,
 }
@@ -213,7 +212,6 @@ pub struct DebugConfig {
 impl Default for DebugConfig {
     fn default() -> Self {
         Self { 
-            show_flow_field: false,
             show_pathfinding_graph: false,
             show_paths: false,
         }

@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use crate::game::structures::{FlowField, CELL_SIZE};
 use crate::game::fixed_math::{FixedVec2, FixedNum};
 use crate::game::simulation::{StaticObstacle, SimPosition, Collider, MapFlowField};
-use crate::game::pathfinding::{CLUSTER_SIZE, HierarchicalGraph, GraphBuildState, GraphBuildStep};
+use crate::game::pathfinding::{CLUSTER_SIZE, HierarchicalGraph};
 use crate::game::config::{GameConfig, GameConfigHandle};
 use crate::game::map::{MapData, MapObstacle, save_map, MAP_VERSION};
 use super::components::*;
@@ -25,7 +25,6 @@ pub fn editor_button_system(
     game_configs: Res<Assets<GameConfig>>,
     dialog_query: Query<Entity, With<GenerationDialogRoot>>,
     mut graph: ResMut<HierarchicalGraph>,
-    mut build_state: ResMut<GraphBuildState>,
     mut active_field: ResMut<ActiveInputField>,
 ) {
     let Some(_config) = game_configs.get(&config_handle.0) else { return };
@@ -161,7 +160,7 @@ pub fn editor_button_system(
                         }
                         
                         graph.reset();
-                        build_state.step = GraphBuildStep::Done;
+
 
                         // Reset FlowField
                         let map_width = editor_state.current_map_size.x;
@@ -191,7 +190,7 @@ pub fn editor_button_system(
                         
                         // Reset Graph Build State to trigger incremental build
                         graph.reset();
-                        build_state.step = GraphBuildStep::NotStarted;
+
                     }
                     EditorButtonAction::SaveMap => {
                         // Check if graph is initialized before saving
@@ -208,7 +207,8 @@ pub fn editor_button_system(
                             });
                         }
                         
-                        info!("Saving map with {} portals and {} clusters", graph.nodes.len(), graph.clusters.len());
+                        let stats = graph.get_stats();
+                        info!("Saving map with {} regions in {} clusters", stats.region_count, stats.cluster_count);
                         
                         let map_data = MapData {
                             version: MAP_VERSION,

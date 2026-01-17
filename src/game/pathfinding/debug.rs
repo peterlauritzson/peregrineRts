@@ -22,6 +22,8 @@ pub(super) fn draw_graph_gizmos(
     let Some(config) = game_configs.get(&config_handle.0) else { return };
     let Ok((camera, camera_transform)) = q_camera.single() else { return };
 
+    // Legend is displayed in the console when G key is pressed (see toggle_debug)
+
     // Get camera view center (raycast to ground)
     let camera_pos = camera_transform.translation();
     let center_pos = if let Ok(ray) = camera.viewport_to_world(camera_transform, Vec2::new(640.0, 360.0)) {
@@ -39,15 +41,84 @@ pub(super) fn draw_graph_gizmos(
         camera_pos
     };
 
-    let view_radius = config.debug_flow_field_view_radius;
+    let view_radius = config.debug_view_radius;
     let camera_center = Vec2::new(center_pos.x, center_pos.z);
+    
+    // NEW: Draw regions and islands with different colors
+    for (cluster_id, cluster) in &graph.clusters {
+        let cluster_x_tiles = cluster_id.0 * super::types::CLUSTER_SIZE;
+        let cluster_y_tiles = cluster_id.1 * super::types::CLUSTER_SIZE;
+        
+        // Draw each region with a color based on its island
+        for i in 0..cluster.region_count {
+            if let Some(region) = &cluster.regions[i] {
+                // Color based on island ID (cycle through colors)
+                let island_hue = (region.island.0 as f32 * 0.25) % 1.0;
+                let color = Color::hsl(island_hue * 360.0, 0.8, 0.6).with_alpha(0.3);
+                
+                // NOTE: Region bounds are in cluster-local fixed-point coordinates (0-CLUSTER_SIZE)
+                // Need to convert to world coordinates via grid coordinates
+                // region.bounds uses fixed-point numbers representing tile positions
+                let min_grid_x = cluster_x_tiles + region.bounds.min.x.floor().to_num::<usize>();
+                let min_grid_y = cluster_y_tiles + region.bounds.min.y.floor().to_num::<usize>();
+                let max_grid_x = cluster_x_tiles + region.bounds.max.x.ceil().to_num::<usize>();
+                let max_grid_y = cluster_y_tiles + region.bounds.max.y.ceil().to_num::<usize>();
+                
+                let min_world = flow_field.grid_to_world(min_grid_x, min_grid_y);
+                let max_world = flow_field.grid_to_world(max_grid_x, max_grid_y);
+                
+                let center = Vec3::new(
+                    (min_world.x.to_num::<f32>() + max_world.x.to_num::<f32>()) / 2.0,
+                    0.5,
+                    (min_world.y.to_num::<f32>() + max_world.y.to_num::<f32>()) / 2.0
+                );
+                let size = Vec2::new(
+                    max_world.x.to_num::<f32>() - min_world.x.to_num::<f32>(),
+                    max_world.y.to_num::<f32>() - min_world.y.to_num::<f32>()
+                );
+                
+                // Check if in view
+                let center_2d = Vec2::new(center.x, center.z);
+                let dx = center_2d.x - camera_center.x;
+                let dy = center_2d.y - camera_center.y;
+                let distance = (dx * dx + dy * dy).sqrt();
+                if distance > view_radius + size.length() {
+                    continue;
+                }
+                
+                gizmos.rect(
+                    Isometry3d::new(
+                        center,
+                        Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+                    ),
+                    size,
+                    color,
+                );
+                
+                // Draw region portals (connections to other regions)
+                for portal in &region.portals {
+                    // Portal center is also in cluster-local coordinates
+                    let portal_grid_x = cluster_x_tiles + portal.center.x.to_num::<usize>();
+                    let portal_grid_y = cluster_y_tiles + portal.center.y.to_num::<usize>();
+                    let portal_world = flow_field.grid_to_world(portal_grid_x, portal_grid_y);
+                    
+                    let portal_center = Vec3::new(
+                        portal_world.x.to_num(),
+                        0.7,
+                        portal_world.y.to_num()
+                    );
+                    gizmos.sphere(portal_center, 0.2, Color::srgb(1.0, 1.0, 0.0));
+                }
+            }
+        }
+    }
+    
+    // Draw inter-cluster portals (for cross-cluster routing)
 
-    // Draw nodes (portals) with frustum culling
-    for portal in &graph.nodes {
+    for portal in graph.portals.values() {
         let pos = flow_field.grid_to_world(portal.node.x, portal.node.y);
         let portal_pos = Vec2::new(pos.x.to_num(), pos.y.to_num());
         
-        // Cull portals outside view radius
         let dx = portal_pos.x - camera_center.x;
         let dy = portal_pos.y - camera_center.y;
         let distance = (dx * dx + dy * dy).sqrt();
@@ -56,57 +127,10 @@ pub(super) fn draw_graph_gizmos(
         }
 
         gizmos.sphere(
-            Vec3::new(pos.x.to_num(), 1.0, pos.y.to_num()),
-            0.3,
+            Vec3::new(pos.x.to_num(), 1.2, pos.y.to_num()),
+            0.25,
             Color::srgb(0.0, 1.0, 1.0),
         );
-
-        // Draw portal range
-        let min_pos = flow_field.grid_to_world(portal.range_min.x, portal.range_min.y);
-        let max_pos = flow_field.grid_to_world(portal.range_max.x, portal.range_max.y);
-        
-        gizmos.line(
-            Vec3::new(min_pos.x.to_num(), 1.0, min_pos.y.to_num()),
-            Vec3::new(max_pos.x.to_num(), 1.0, max_pos.y.to_num()),
-            Color::srgb(0.0, 1.0, 1.0),
-        );
-    }
-
-    // Draw edges with frustum culling (both endpoints must be visible)
-    for (from_id, edges) in &graph.edges {
-        if let Some(from_portal) = graph.nodes.get(*from_id) {
-            let start = flow_field.grid_to_world(from_portal.node.x, from_portal.node.y);
-            let start_pos = Vec2::new(start.x.to_num(), start.y.to_num());
-            
-            // Cull edges where start portal is outside view
-            let dx = start_pos.x - camera_center.x;
-            let dy = start_pos.y - camera_center.y;
-            let start_distance = (dx * dx + dy * dy).sqrt();
-            if start_distance > view_radius {
-                continue;
-            }
-
-            for (to_id, _) in edges {
-                if let Some(to_portal) = graph.nodes.get(*to_id) {
-                    let end = flow_field.grid_to_world(to_portal.node.x, to_portal.node.y);
-                    let end_pos = Vec2::new(end.x.to_num(), end.y.to_num());
-                    
-                    // Cull edges where end portal is outside view
-                    let dx = end_pos.x - camera_center.x;
-                    let dy = end_pos.y - camera_center.y;
-                    let end_distance = (dx * dx + dy * dy).sqrt();
-                    if end_distance > view_radius {
-                        continue;
-                    }
-
-                    gizmos.line(
-                        Vec3::new(start.x.to_num(), 1.0, start.y.to_num()),
-                        Vec3::new(end.x.to_num(), 1.0, end.y.to_num()),
-                        Color::srgb(1.0, 1.0, 0.0),
-                    );
-                }
-            }
-        }
     }
 }
 

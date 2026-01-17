@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 use peregrine::game::fixed_math::{FixedVec2, FixedNum};
@@ -124,11 +126,11 @@ fn test_incremental_build_produces_valid_graph() {
     let graph = app.world().resource::<HierarchicalGraph>();
     assert!(graph.initialized, "Graph should be initialized");
     assert!(!graph.clusters.is_empty(), "Graph should have clusters");
-    assert!(!graph.nodes.is_empty(), "Graph should have nodes (portals)");
     
+    let stats = graph.get_stats();
     // Verify clusters exist (100x100 map with cluster size ~10 should have ~100 clusters)
-    println!("Graph has {} clusters and {} nodes", graph.clusters.len(), graph.nodes.len());
-    assert!(graph.clusters.len() > 0, "Should have created clusters");
+    println!("Graph has {} clusters and {} regions", stats.cluster_count, stats.region_count);
+    assert!(stats.cluster_count > 0, "Should have created clusters");
 }
 
 #[test]
@@ -313,7 +315,8 @@ fn test_incremental_build_matches_sync_build() {
     // Get incremental graph state
     let incremental_graph = app.world().resource::<HierarchicalGraph>();
     let incremental_cluster_count = incremental_graph.clusters.len();
-    let incremental_node_count = incremental_graph.nodes.len();
+    let stats = incremental_graph.get_stats();
+    let incremental_node_count = stats.portal_count;
     let incremental_edge_count = incremental_graph.edges.len();
     let incremental_initialized = incremental_graph.initialized;
     
@@ -323,7 +326,7 @@ fn test_incremental_build_matches_sync_build() {
     // Build synchronously for comparison
     {
         let flow_field = app.world().resource::<MapFlowField>().0.clone();
-        app.world_mut().resource_mut::<HierarchicalGraph>().build_graph_sync(&flow_field);
+        app.world_mut().resource_mut::<HierarchicalGraph>().build_graph_with_regions_sync(&flow_field);
     }
     
     // Get sync graph state

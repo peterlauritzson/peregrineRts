@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use crate::game::fixed_math::{FixedVec2, FixedNum};
 use serde::{Serialize, Deserialize};
-use std::cmp::Ordering;
+use smallvec::SmallVec;
 
 /// Fixed cluster size for hierarchical pathfinding (25×25 cells).
 ///
@@ -9,11 +9,26 @@ use std::cmp::Ordering;
 /// but increase intra-cluster pathfinding cost. 25×25 provides good balance.
 pub const CLUSTER_SIZE: usize = 25;
 
+/// Maximum number of regions per cluster.
+/// Typical clusters: 1-10 regions (open terrain vs. complex rooms)
+/// Complex clusters: up to 32 regions (mazes, tight corridors)
+pub const MAX_REGIONS: usize = 32;
+
+/// Maximum number of islands (connected components) per cluster.
+/// Most clusters: 1 island (fully connected)
+/// Split clusters: 2-3 islands (river, wall, U-shaped building)
+pub const MAX_ISLANDS: usize = 4;
+
+/// Tortuosity threshold for splitting islands.
+/// If path_distance / euclidean_distance > this value, regions are separate islands.
+pub const TORTUOSITY_THRESHOLD: f32 = 3.0;
+
+/// Value indicating no path exists between two regions (different islands).
+pub const NO_PATH: u8 = 255;
+
 #[derive(Event, Message, Debug, Clone)]
 pub struct PathRequest {
     pub entity: Entity,
-    #[allow(dead_code)]
-    pub start: FixedVec2,
     pub goal: FixedVec2,
 }
 
@@ -24,6 +39,7 @@ pub enum Path {
     Hierarchical {
         goal: FixedVec2,
         goal_cluster: (usize, usize),
+        goal_island: IslandId,
     }
 }
 
@@ -39,53 +55,6 @@ pub struct Node {
     pub y: usize,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) struct State {
-    pub cost: FixedNum,
-    pub node: Node,
-}
-
-impl Ord for State {
-    fn cmp(&self, other: &Self) -> Ordering {
-        other.cost.cmp(&self.cost)
-            .then_with(|| self.node.x.cmp(&other.node.x))
-            .then_with(|| self.node.y.cmp(&other.node.y))
-    }
-}
-
-impl PartialOrd for State {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) struct GraphState {
-    pub cost: FixedNum,
-    pub portal_id: usize,
-}
-
-impl Ord for GraphState {
-    fn cmp(&self, other: &Self) -> Ordering {
-        other.cost.cmp(&self.cost)
-            .then_with(|| self.portal_id.cmp(&other.portal_id))
-    }
-}
-
-impl PartialOrd for GraphState {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct LocalFlowField {
-    pub width: usize,
-    pub height: usize,
-    pub vectors: Vec<FixedVec2>, // Row-major, size width * height
-    pub integration_field: Vec<u32>,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Portal {
     pub id: usize,
@@ -93,4 +62,111 @@ pub struct Portal {
     pub range_min: Node,
     pub range_max: Node,
     pub cluster: (usize, usize),
+}
+
+// ============================================================================
+// NEW: Region-Based Pathfinding Types
+// ============================================================================
+
+/// A convex polygon/rectangle representing a navigable region within a cluster.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Region {
+    /// Unique identifier within the cluster
+    pub id: RegionId,
+    /// Bounding rectangle (for point-in-region fast rejection)
+    pub bounds: Rect,
+    /// Vertices of the convex polygon (typically 4 for rectangles)
+    pub vertices: SmallVec<[FixedVec2; 8]>,
+    /// Which island this region belongs to
+    pub island: IslandId,
+    /// Connections to other regions (shared edges/portals)
+    pub portals: SmallVec<[RegionPortal; 8]>,
+}
+
+/// A portal connecting two regions within a cluster
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RegionPortal {
+    /// The shared edge between this region and the next
+    pub edge: LineSegment,
+    /// Midpoint of the edge (for navigation)
+    pub center: FixedVec2,
+    /// ID of the connected region
+    pub next_region: RegionId,
+}
+
+/// Region identifier (0-31 within a cluster)
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RegionId(pub u8);
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct IslandId(pub u8);
+
+/// A line segment representing a portal edge
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct LineSegment {
+    pub start: FixedVec2,
+    pub end: FixedVec2,
+}
+
+impl LineSegment {
+    pub fn center(&self) -> FixedVec2 {
+        (self.start + self.end) / FixedNum::from_num(2)
+    }
+    
+    pub fn length(&self) -> FixedNum {
+        (self.end - self.start).length()
+    }
+}
+
+/// Axis-aligned bounding box
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct Rect {
+    pub min: FixedVec2,
+    pub max: FixedVec2,
+}
+
+impl Rect {
+    pub fn new(min: FixedVec2, max: FixedVec2) -> Self {
+        Self { min, max }
+    }
+    
+    pub fn contains(&self, point: FixedVec2) -> bool {
+        point.x >= self.min.x && point.x <= self.max.x &&
+        point.y >= self.min.y && point.y <= self.max.y
+    }
+    
+    pub fn center(&self) -> FixedVec2 {
+        (self.min + self.max) / FixedNum::from_num(2)
+    }
+    
+    pub fn width(&self) -> FixedNum {
+        self.max.x - self.min.x
+    }
+    
+    pub fn height(&self) -> FixedNum {
+        self.max.y - self.min.y
+    }
+}
+
+/// Island (connected component of regions)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Island {
+    pub id: IslandId,
+    /// Representative position (center of a region in this island)
+    pub representative: FixedVec2,
+    /// Regions belonging to this island
+    pub regions: SmallVec<[RegionId; MAX_REGIONS]>,
+}
+
+/// Unique identifier for a (cluster, island) pair in the macro graph
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ClusterIslandId {
+    pub cluster: (usize, usize),
+    pub island: IslandId,
+}
+
+impl ClusterIslandId {
+    pub fn new(cluster: (usize, usize), island: IslandId) -> Self {
+        Self { cluster, island }
+    }
 }

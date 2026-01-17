@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use bevy::prelude::*;
 use peregrine::game::pathfinding::{HierarchicalGraph, PathfindingPlugin};
 use peregrine::game::config::GameConfigPlugin;
@@ -68,7 +70,7 @@ fn test_graph_build_is_deterministic() {
     for ((cluster_id1, cluster1), (cluster_id2, cluster2)) in graph1.clusters.iter().zip(graph2.clusters.iter()) {
         assert_eq!(cluster_id1, cluster_id2, "Cluster IDs should be in same order");
         assert_eq!(cluster1.portals.len(), cluster2.portals.len(), "Clusters should have same portal count");
-        assert_eq!(cluster1.flow_field_cache.len(), cluster2.flow_field_cache.len(), "Clusters should have same cache size");
+        // Note: flow_field_cache removed in region-based system
     }
     
     println!("Graph build is deterministic: {} nodes, {} edge entries, {} clusters",

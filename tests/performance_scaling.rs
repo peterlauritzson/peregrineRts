@@ -630,6 +630,7 @@ fn profiled_process_path_requests(
             commands.entity(request.entity).insert(peregrine::game::pathfinding::Path::Hierarchical {
                 goal: request.goal,
                 goal_cluster,
+                goal_island: peregrine::game::pathfinding::IslandId(0), // Default to island 0
             });
         }
     }
@@ -836,7 +837,7 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
     let mut connected_components = ConnectedComponents::default();
     {
         let flow_field_ref = app.world().resource::<MapFlowField>();
-        hierarchical_graph.build_graph_sync(&flow_field_ref.0);
+        hierarchical_graph.build_graph(&flow_field_ref.0, true); // true = use legacy for existing benchmarks
         connected_components.build_from_graph(&hierarchical_graph);
     }
     let graph_build_time = graph_build_start.elapsed();

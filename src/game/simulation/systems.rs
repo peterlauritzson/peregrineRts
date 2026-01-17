@@ -13,7 +13,7 @@ mod systems_config;
 
 use bevy::prelude::*;
 use crate::game::fixed_math::{FixedVec2, FixedNum};
-use crate::game::pathfinding::{Path, PathRequest, HierarchicalGraph, CLUSTER_SIZE};
+use crate::game::pathfinding::{Path, PathRequest, HierarchicalGraph, CLUSTER_SIZE, world_to_cluster_local};
 use peregrine_macros::profile;
 
 use super::components::*;
@@ -73,11 +73,10 @@ pub fn process_input(
     moves.sort_by_key(|e| e.player_id);
     
     for event in moves {
-        if let Ok(pos) = query.get(event.entity) {
+        if let Ok(_pos) = query.get(event.entity) {
             // Send Path Request instead of setting target directly
             path_requests.write(PathRequest {
                 entity: event.entity,
-                start: pos.0,
                 goal: event.target,
             });
             // Remove old path component to stop movement until path is found
@@ -120,7 +119,7 @@ pub fn follow_path(
     mut query: Query<(Entity, &SimPosition, &SimVelocity, &mut SimAcceleration, &mut Path, &CachedNeighbors)>,
     no_path_query: Query<Entity, (Without<Path>, With<SimPosition>)>,
     sim_config: Res<SimConfig>,
-    mut graph: ResMut<HierarchicalGraph>,
+    graph: Res<HierarchicalGraph>,
     map_flow_field: Res<MapFlowField>,
 ) {
     
@@ -193,8 +192,10 @@ pub fn follow_path(
                 }
                 seek(pos.0, target, vel.0, &mut acc.0, speed, max_force);
             },
-            Path::Hierarchical { goal, goal_cluster } => {
-                // Lazy routing table walk: lookup next portal on-demand
+            Path::Hierarchical { goal, goal_cluster, goal_island } => {
+                // NEW: Region-based hierarchical pathfinding
+                // No flow fields! Uses convex regions + local routing tables
+                
                 let current_grid = flow_field.world_to_grid(pos.0);
                 if let Some((gx, gy)) = current_grid {
                     let cx = gx / CLUSTER_SIZE;
@@ -202,56 +203,128 @@ pub fn follow_path(
                     let current_cluster = (cx, cy);
                     
                     if current_cluster == *goal_cluster {
-                        // In final cluster - navigate directly to goal
-                        let delta = *goal - pos.0;
-                        if delta.length_squared() < threshold_sq {
-                            commands.entity(entity).remove::<Path>();
-                            acc.0 = acc.0 - vel.0 * sim_config.braking_force;
-                            continue;
-                        }
-                        seek(pos.0, *goal, vel.0, &mut acc.0, speed, max_force);
-                    } else {
-                        // Lookup next portal from routing table
-                        if let Some(next_portal_id) = graph.get_next_portal(current_cluster, *goal_cluster) {
-                            if let Some(portal) = graph.nodes.get(next_portal_id).cloned() {
-                                // Navigate to portal using cluster's flow field
-                                if let Some(cluster) = graph.clusters.get_mut(&current_cluster) {
-                                    let local_field = cluster.get_or_generate_flow_field(next_portal_id, &portal, flow_field);
+                        // Same cluster - use local routing or direct movement
+                        if let Some(cluster) = graph.clusters.get(&current_cluster) {
+                            // Convert world coordinates to cluster-local coordinates
+                            let current_region = world_to_cluster_local(pos.0, current_cluster, flow_field)
+                                .and_then(|local_pos| {
+                                    crate::game::pathfinding::get_region_id(
+                                        &cluster.regions, 
+                                        cluster.region_count, 
+                                        local_pos
+                                    )
+                                });
+                            let goal_region = world_to_cluster_local(*goal, current_cluster, flow_field)
+                                .and_then(|local_goal| {
+                                    crate::game::pathfinding::get_region_id(
+                                        &cluster.regions, 
+                                        cluster.region_count, 
+                                        local_goal
+                                    )
+                                });
+                            
+                            match (current_region, goal_region) {
+                                (Some(curr_reg), Some(goal_reg)) if curr_reg == goal_reg => {
+                                    // Same region - move directly (convexity guarantees no obstacles)
+                                    let delta = *goal - pos.0;
+                                    if delta.length_squared() < threshold_sq {
+                                        commands.entity(entity).remove::<Path>();
+                                        acc.0 = acc.0 - vel.0 * sim_config.braking_force;
+                                        continue;
+                                    }
+                                    seek(pos.0, *goal, vel.0, &mut acc.0, speed, max_force);
+                                }
+                                (Some(curr_reg), Some(goal_reg)) => {
+                                    // Different region in same cluster - use local routing
+                                    let next_region_id = cluster.local_routing[curr_reg.0 as usize][goal_reg.0 as usize];
                                     
-                                    let min_x = cx * CLUSTER_SIZE;
-                                    let min_y = cy * CLUSTER_SIZE;
-                                    
-                                    if gx >= min_x && gy >= min_y {
-                                        let lx = gx - min_x;
-                                        let ly = gy - min_y;
-                                        let idx = ly * local_field.width + lx;
-                                        
-                                        if idx < local_field.vectors.len() {
-                                            let dir = local_field.vectors[idx];
-                                            if dir != FixedVec2::ZERO {
-                                                let desired_vel = dir * speed;
-                                                let steer = desired_vel - vel.0;
-                                                let steer_len_sq = steer.length_squared();
-                                                let final_steer = if steer_len_sq > max_force * max_force {
-                                                    steer.normalize() * max_force
-                                                } else {
-                                                    steer
-                                                };
-                                                acc.0 = acc.0 + final_steer;
+                                    if next_region_id == crate::game::pathfinding::NO_PATH {
+                                        // No path - fallback to direct movement
+                                        seek(pos.0, *goal, vel.0, &mut acc.0, speed, max_force);
+                                    } else {
+                                        // Find portal to next region
+                                        if let Some(current_region_data) = &cluster.regions[curr_reg.0 as usize] {
+                                            // Find portal to next_region_id
+                                            let target = if let Some(portal) = current_region_data.portals.iter()
+                                                .find(|p| p.next_region.0 == next_region_id) {
+                                                // Move toward portal center
+                                                portal.center
                                             } else {
-                                                let target_pos = flow_field.grid_to_world(portal.node.x, portal.node.y);
-                                                seek(pos.0, target_pos, vel.0, &mut acc.0, speed, max_force);
-                                            }
+                                                // No portal found, move toward goal directly
+                                                *goal
+                                            };
+                                            
+                                            seek(pos.0, target, vel.0, &mut acc.0, speed, max_force);
+                                        } else {
+                                            seek(pos.0, *goal, vel.0, &mut acc.0, speed, max_force);
                                         }
                                     }
-                                } else {
-                                    // Fallback: seek directly to portal
-                                    let target_pos = flow_field.grid_to_world(portal.node.x, portal.node.y);
-                                    seek(pos.0, target_pos, vel.0, &mut acc.0, speed, max_force);
+                                }
+                                _ => {
+                                    // Can't determine region - fallback to direct movement
+                                    seek(pos.0, *goal, vel.0, &mut acc.0, speed, max_force);
                                 }
                             }
+                        } else {
+                            // No cluster data - fallback
+                            seek(pos.0, *goal, vel.0, &mut acc.0, speed, max_force);
+                        }
+                    } else {
+                        // Different cluster - use island-aware routing
+                        if let Some(current_cluster_data) = graph.clusters.get(&current_cluster) {
+                            let current_region = world_to_cluster_local(pos.0, current_cluster, flow_field)
+                                .and_then(|local_pos| {
+                                    crate::game::pathfinding::get_region_id(
+                                        &current_cluster_data.regions, 
+                                        current_cluster_data.region_count, 
+                                        local_pos
+                                    )
+                                });
+                            
+                            if let Some(curr_reg) = current_region {
+                                let current_island = current_cluster_data.regions[curr_reg.0 as usize]
+                                    .as_ref()
+                                    .map(|r| r.island)
+                                    .unwrap_or(crate::game::pathfinding::IslandId(0));
+                                
+                                let current_island_id = crate::game::pathfinding::ClusterIslandId::new(
+                                    current_cluster,
+                                    current_island
+                                );
+                                let goal_island_id = crate::game::pathfinding::ClusterIslandId::new(
+                                    *goal_cluster,
+                                    *goal_island
+                                );
+                                
+                                // Lookup next portal from island routing table
+                                if let Some(next_portal_id) = graph.get_next_portal_for_island(
+                                    current_island_id,
+                                    goal_island_id
+                                ) {
+
+                                    if let Some(portal) = graph.portals.get(&next_portal_id) {
+                                        let portal_pos = flow_field.grid_to_world(portal.node.x, portal.node.y);
+                                        seek(pos.0, portal_pos, vel.0, &mut acc.0, speed, max_force);
+                                    } else {
+                                        // Portal not found - move toward goal
+                                        seek(pos.0, *goal, vel.0, &mut acc.0, speed, max_force);
+                                    }
+                                } else {
+                                    // No route - move toward goal directly
+                                    seek(pos.0, *goal, vel.0, &mut acc.0, speed, max_force);
+                                }
+                            } else {
+                                // Can't determine current region - move toward goal
+                                seek(pos.0, *goal, vel.0, &mut acc.0, speed, max_force);
+                            }
+                        } else {
+                            // No cluster data - fallback to direct movement
+                            seek(pos.0, *goal, vel.0, &mut acc.0, speed, max_force);
                         }
                     }
+                } else {
+                    // Off grid - move toward goal
+                    seek(pos.0, *goal, vel.0, &mut acc.0, speed, max_force);
                 }
             }
         }

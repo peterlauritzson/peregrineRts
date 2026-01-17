@@ -90,7 +90,6 @@ impl Plugin for SimulationPlugin {
         app.add_systems(Update, (
             systems::update_sim_from_runtime_config,
             debug::toggle_debug,
-            debug::draw_flow_field_gizmos,
             debug::draw_force_sources,
             debug::draw_unit_paths,
         ).run_if(in_state(GameState::InGame).or(in_state(GameState::Editor)).or(in_state(GameState::Loading))));

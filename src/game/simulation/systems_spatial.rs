@@ -7,7 +7,7 @@
 
 use bevy::prelude::*;
 use crate::game::fixed_math::{FixedVec2, FixedNum};
-use crate::game::pathfinding::{HierarchicalGraph, CLUSTER_SIZE, regenerate_cluster_flow_fields};
+use crate::game::pathfinding::{HierarchicalGraph, CLUSTER_SIZE};
 use crate::game::spatial_hash::SpatialHash;
 use crate::game::structures::{FlowField, CELL_SIZE};
 
@@ -133,7 +133,7 @@ pub fn apply_obstacle_to_flow_field(flow_field: &mut FlowField, pos: FixedVec2, 
 /// Apply newly added obstacles to flow field and invalidate affected cluster caches
 pub fn apply_new_obstacles(
     mut map_flow_field: ResMut<MapFlowField>,
-    mut graph: ResMut<HierarchicalGraph>,
+    _graph: ResMut<HierarchicalGraph>,
     obstacles: Query<(&SimPosition, &Collider), Added<StaticObstacle>>,
 ) {
     let obstacle_count = obstacles.iter().count();
@@ -167,13 +167,12 @@ pub fn apply_new_obstacles(
             let min_cluster_y = min_y / CLUSTER_SIZE;
             let max_cluster_y = max_y / CLUSTER_SIZE;
             
-            // Invalidate all affected clusters and regenerate their flow fields
+            // Affected clusters - region-based system rebuilds entire graph when obstacles change
+            // TODO: Implement incremental region decomposition for dynamic obstacles
             for cy in min_cluster_y..=max_cluster_y {
                 for cx in min_cluster_x..=max_cluster_x {
-                    let cluster_key = (cx, cy);
-                    graph.clear_cluster_cache(cluster_key);
-                    // Regenerate flow fields for this cluster immediately
-                    regenerate_cluster_flow_fields(&mut graph, flow_field, cluster_key);
+                    let _cluster_key = (cx, cy);
+                    // Region decomposition would need to be rerun here
                 }
             }
         }

@@ -4,7 +4,7 @@ use crate::game::structures::{FlowField, CELL_SIZE};
 use crate::game::fixed_math::{FixedVec2, FixedNum};
 use crate::game::simulation::{StaticObstacle, MapFlowField, SimConfig};
 use crate::game::camera::RtsCamera;
-use crate::game::pathfinding::{HierarchicalGraph, GraphBuildState, GraphBuildStep};
+use crate::game::pathfinding::HierarchicalGraph;
 use crate::game::spatial_hash::SpatialHash;
 use crate::game::config::{GameConfig, GameConfigHandle};
 use rand::Rng;
@@ -24,7 +24,6 @@ pub fn handle_generation(
     loading_query: Query<Entity, With<LoadingOverlayRoot>>,
     mut map_flow_field: ResMut<MapFlowField>,
     mut graph: ResMut<HierarchicalGraph>,
-    mut build_state: ResMut<GraphBuildState>,
     mut camera_query: Query<&mut Transform, With<RtsCamera>>,
     mut sim_config: ResMut<SimConfig>,
     mut spatial_hash: ResMut<SpatialHash>,
@@ -67,7 +66,7 @@ pub fn handle_generation(
     
     // Reset Graph and Build State
     graph.reset();
-    build_state.step = GraphBuildStep::Done;
+
     info!("Reset graph");
     
     // Use params from dialog
@@ -125,11 +124,12 @@ pub fn handle_generation(
     // This ensures clusters and portals are valid for the new map size
     // before apply_new_obstacles tries to regenerate cluster flow fields
     info!("Building hierarchical graph for new map...");
-    graph.build_graph_sync(&map_flow_field.0);
-    graph.initialized = true;
-    info!("Graph built - {} clusters, {} portals", 
-        graph.clusters.len(), 
-        graph.nodes.len()
+    graph.build_graph(&map_flow_field.0, false); // false = use new region-based system
+    let stats = graph.get_stats();
+    info!("Graph built - {} clusters, {} regions, {} islands", 
+        stats.cluster_count, 
+        stats.region_count,
+        stats.island_count
     );
 
     // Spawn obstacles (if any)
@@ -162,8 +162,9 @@ pub fn check_finalization_complete(
 
     if graph.initialized {
         editor_state.is_finalizing = false;
-        info!("Map finalization COMPLETE! Graph has {} portals and {} clusters", 
-              graph.nodes.len(), graph.clusters.len());
+        let stats = graph.get_stats();
+        info!("Map finalization COMPLETE! Graph has {} regions in {} clusters", 
+              stats.region_count, stats.cluster_count);
         info!("You can now save the map.");
         // Remove loading overlay
         for entity in loading_query.iter() {

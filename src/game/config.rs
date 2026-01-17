@@ -76,7 +76,6 @@ pub struct GameConfig {
     pub key_camera_backward: KeyCode,
     pub key_camera_left: KeyCode,
     pub key_camera_right: KeyCode,
-    pub key_debug_flow: KeyCode,
     pub key_debug_graph: KeyCode,
     pub key_debug_path: KeyCode,
     pub key_spawn_black_hole: KeyCode,
@@ -96,7 +95,7 @@ pub struct GameConfig {
     pub selection_click_radius: f32,
     
     // Debug visualization (hot-reloadable)
-    pub debug_flow_field_view_radius: f32,
+    pub debug_view_radius: f32,
     pub debug_path_trace_max_steps: usize,
     pub debug_unit_lod_height_threshold: f32,
 }
