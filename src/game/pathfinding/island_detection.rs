@@ -39,7 +39,7 @@ pub(crate) fn identify_islands(cluster: &mut Cluster) {
         
         // Start a new island
         let island_id = IslandId(island_count as u8);
-        let mut island_regions = SmallVec::new();
+        let mut island_regions: SmallVec<[super::types::RegionId; MAX_REGIONS]> = SmallVec::new();
         
         // Flood fill from seed, adding regions that are "well connected"
         let mut to_visit = vec![seed];
@@ -58,6 +58,24 @@ pub(crate) fn identify_islands(cluster: &mut Cluster) {
                 if is_well_connected(cluster, current, candidate) {
                     assigned[candidate] = true;
                     to_visit.push(candidate);
+                }
+            }
+        }
+        
+        // Skip creating island if it's a single tiny isolated region with no portals
+        // These are unusable for pathfinding anyway
+        if island_regions.len() == 1 {
+            let first_region_id = island_regions[0];
+            let region_idx = first_region_id.0 as usize;
+            if let Some(region) = &cluster.regions[region_idx] {
+                // Check if region has ANY portals to other regions
+                if region.portals.is_empty() {
+                    // Isolated region with no connections - skip it
+                    // Mark as assigned to island 0 (fallback) to avoid re-processing
+                    if let Some(region_mut) = &mut cluster.regions[region_idx] {
+                        region_mut.island = IslandId(0);
+                    }
+                    continue;
                 }
             }
         }

@@ -128,9 +128,11 @@ impl HierarchicalGraph {
             
             // Explore neighbors via portals
             if let Some(cluster) = self.clusters.get(&current.cluster) {
+                let mut found_any_portal = false;
                 // Get portals accessible from this island
                 for direction in super::types::Direction::ALL {
                     if let Some(portal_id) = cluster.neighbor_connectivity[current.island.0 as usize][direction.as_index()] {
+                        found_any_portal = true;
                         // Find which (cluster, island) this portal leads to
                         if let Some(_portal) = self.portals.get(&portal_id) {
                             // Find the connected portal (cross-cluster edge)
@@ -169,7 +171,19 @@ impl HierarchicalGraph {
                         }
                     }
                 }
+                
+                // Debug: Warn if an island has no portals (isolated island)
+                if !found_any_portal && current == source {
+                    warn!("[ROUTING] Source island {:?} has NO accessible portals - isolated island!", current);
+                }
             }
+        }
+        
+        // Debug: Log if we found very few destinations (might indicate connectivity issues)
+        let destination_count = next_portal.len();
+        if destination_count < 5 && destination_count > 0 {
+            warn!("[ROUTING] Source {:?} only reached {} destinations (possible connectivity issue)", 
+                source, destination_count);
         }
         
         // Store routing table for this source

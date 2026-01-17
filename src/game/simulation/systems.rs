@@ -281,12 +281,37 @@ pub fn follow_path(
                                     )
                                 });
                             
-                            if let Some(curr_reg) = current_region {
-                                let current_island = current_cluster_data.regions[curr_reg.0 as usize]
+                            // Determine current island - if region lookup fails, find nearest region
+                            let current_island = if let Some(curr_reg) = current_region {
+                                // In a region - use its island
+                                current_cluster_data.regions[curr_reg.0 as usize]
                                     .as_ref()
                                     .map(|r| r.island)
-                                    .unwrap_or(crate::game::pathfinding::IslandId(0));
-                                
+                            } else {
+                                // Not in any region - find nearest region's island
+                                world_to_cluster_local(pos.0, current_cluster, flow_field)
+                                    .and_then(|local_pos| {
+                                        let mut nearest_island = None;
+                                        let mut min_dist_sq = f32::MAX;
+                                        
+                                        for region_opt in &current_cluster_data.regions[0..current_cluster_data.region_count] {
+                                            if let Some(region) = region_opt {
+                                                let center = region.bounds.center();
+                                                let dx = center.x - local_pos.x;
+                                                let dy = center.y - local_pos.y;
+                                                let dist_sq = dx * dx + dy * dy;
+                                                
+                                                if dist_sq < FixedNum::from_num(min_dist_sq) {
+                                                    min_dist_sq = dist_sq.to_num::<f32>();
+                                                    nearest_island = Some(region.island);
+                                                }
+                                            }
+                                        }
+                                        nearest_island
+                                    })
+                            };
+                            
+                            if let Some(current_island) = current_island {
                                 let current_island_id = crate::game::pathfinding::ClusterIslandId::new(
                                     current_cluster,
                                     current_island
@@ -296,6 +321,14 @@ pub fn follow_path(
                                     *goal_island
                                 );
                                 
+                                // Debug logging for first few frames
+                                static LOGGED_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                                if LOGGED_COUNT.load(std::sync::atomic::Ordering::Relaxed) < 10 {
+                                    info!("[NAV] Unit at cluster {:?} island {} -> goal cluster {:?} island {}",
+                                        current_cluster, current_island.0, goal_cluster, goal_island.0);
+                                    LOGGED_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                
                                 // Lookup next portal from island routing table
                                 if let Some(next_portal_id) = graph.get_next_portal_for_island(
                                     current_island_id,
@@ -304,6 +337,12 @@ pub fn follow_path(
 
                                     if let Some(portal) = graph.portals.get(&next_portal_id) {
                                         let portal_pos = flow_field.grid_to_world(portal.node.x, portal.node.y);
+                                        
+                                        // Debug: Log which portal was chosen
+                                        if LOGGED_COUNT.load(std::sync::atomic::Ordering::Relaxed) < 10 {
+                                            info!("  -> Portal {} at ({}, {})", next_portal_id, portal.node.x, portal.node.y);
+                                        }
+                                        
                                         seek(pos.0, portal_pos, vel.0, &mut acc.0, speed, max_force);
                                     } else {
                                         // Portal not found - move toward goal
@@ -311,10 +350,17 @@ pub fn follow_path(
                                     }
                                 } else {
                                     // No route - move toward goal directly
+                                    if LOGGED_COUNT.load(std::sync::atomic::Ordering::Relaxed) < 10 {
+                                        warn!("  -> NO ROUTE FOUND! Falling back to direct movement");
+                                    }
+                                    warn_once!("[PATHFINDING] No route from {:?} to {:?} - falling back to direct movement. \
+                                        This usually means routing table is incomplete or islands are unreachable.",
+                                        current_island_id, goal_island_id);
                                     seek(pos.0, *goal, vel.0, &mut acc.0, speed, max_force);
                                 }
                             } else {
-                                // Can't determine current region - move toward goal
+                                // Can't determine current island - move toward goal
+                                warn_once!("[PATHFINDING] Can't determine current island for cluster {:?} - falling back to direct movement", current_cluster);
                                 seek(pos.0, *goal, vel.0, &mut acc.0, speed, max_force);
                             }
                         } else {

@@ -17,7 +17,9 @@ pub const MAX_REGIONS: usize = 32;
 /// Maximum number of islands (connected components) per cluster.
 /// Most clusters: 1 island (fully connected)
 /// Split clusters: 2-3 islands (river, wall, U-shaped building)
-pub const MAX_ISLANDS: usize = 4;
+/// Complex obstacle layouts: up to 16 islands
+/// Increased from 4 to handle complex random obstacle scenarios
+pub const MAX_ISLANDS: usize = 16;
 
 /// Tortuosity threshold for splitting islands.
 /// If path_distance / euclidean_distance > this value, regions are separate islands.
