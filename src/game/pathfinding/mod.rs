@@ -9,11 +9,14 @@ mod region_decomposition;
 mod region_connectivity;
 mod island_detection;
 
+#[cfg(test)]
+mod tests;
+
 // ============================================================================
 // PUBLIC API
 // ============================================================================
 
-pub use types::{PathRequest, Path, Portal, Node, CLUSTER_SIZE, Region, RegionId, IslandId};
+pub use types::{PathRequest, Path, Portal, Node, CLUSTER_SIZE, Region, RegionId, IslandId, Direction};
 pub use graph::{HierarchicalGraph, GraphStats};
 pub use systems::process_path_requests;
 

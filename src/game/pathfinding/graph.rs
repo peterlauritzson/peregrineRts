@@ -46,6 +46,11 @@ pub struct HierarchicalGraph {
     pub portals: BTreeMap<usize, Portal>,
     pub next_portal_id: usize,
     
+    /// Portal-to-island mapping: which island can access this portal in its cluster?
+    /// Maps portal_id -> island_id in that portal's cluster
+    /// This is populated during populate_island_portal_connectivity
+    pub portal_island_map: BTreeMap<usize, IslandId>,
+    
     /// Portal-to-portal connections for cross-cluster navigation
     /// Maps portal_id to list of (connected_portal_id, cost)
     pub portal_connections: BTreeMap<usize, Vec<(usize, FixedNum)>>,
@@ -124,8 +129,8 @@ impl HierarchicalGraph {
             // Explore neighbors via portals
             if let Some(cluster) = self.clusters.get(&current.cluster) {
                 // Get portals accessible from this island
-                for direction in 0..4 {
-                    if let Some(portal_id) = cluster.neighbor_connectivity[current.island.0 as usize][direction] {
+                for direction in super::types::Direction::ALL {
+                    if let Some(portal_id) = cluster.neighbor_connectivity[current.island.0 as usize][direction.as_index()] {
                         // Find which (cluster, island) this portal leads to
                         if let Some(_portal) = self.portals.get(&portal_id) {
                             // Find the connected portal (cross-cluster edge)
@@ -135,30 +140,27 @@ impl HierarchicalGraph {
                                         let neighbor_cluster = neighbor_portal.cluster;
                                         
                                         // Determine which island in the neighbor cluster this portal connects to
-                                        // For now, assume portal connects to island 0 (we'll refine this)
-                                        if let Some(neighbor_cluster_data) = self.clusters.get(&neighbor_cluster) {
-                                            for island_idx in 0..neighbor_cluster_data.island_count {
-                                                let neighbor_island = IslandId(island_idx as u8);
-                                                let neighbor = ClusterIslandId::new(neighbor_cluster, neighbor_island);
+                                        // Use the portal_island_map we populated earlier
+                                        if let Some(&neighbor_island) = self.portal_island_map.get(&neighbor_portal_id) {
+                                            let neighbor = ClusterIslandId::new(neighbor_cluster, neighbor_island);
+                                            
+                                            let new_cost = cost + edge_cost;
+                                            let should_update = distances.get(&neighbor)
+                                                .map_or(true, |&old_cost| new_cost < old_cost);
+                                            
+                                            if should_update {
+                                                distances.insert(neighbor, new_cost);
                                                 
-                                                let new_cost = cost + edge_cost;
-                                                let should_update = distances.get(&neighbor)
-                                                    .map_or(true, |&old_cost| new_cost < old_cost);
+                                                // Determine which portal to record
+                                                let portal_to_record = if current == source {
+                                                    // First hop from source
+                                                    portal_id
+                                                } else {
+                                                    // Inherit first portal from current
+                                                    first_portal.unwrap_or(portal_id)
+                                                };
                                                 
-                                                if should_update {
-                                                    distances.insert(neighbor, new_cost);
-                                                    
-                                                    // Determine which portal to record
-                                                    let portal_to_record = if current == source {
-                                                        // First hop from source
-                                                        portal_id
-                                                    } else {
-                                                        // Inherit first portal from current
-                                                        first_portal.unwrap_or(portal_id)
-                                                    };
-                                                    
-                                                    heap.push(Reverse((new_cost, neighbor, Some(portal_to_record))));
-                                                }
+                                                heap.push(Reverse((new_cost, neighbor, Some(portal_to_record))));
                                             }
                                         }
                                     }
@@ -193,9 +195,10 @@ impl HierarchicalGraph {
     /// Populate neighbor_connectivity: link each island to portals in each direction
     /// 
     /// For each cluster, determines which portals each island can access.
-    /// Direction mapping: 0=North, 1=South, 2=East, 3=West
+    /// Uses Direction enum for type-safe indexing (North=0, South=1, East=2, West=3)
     fn populate_island_portal_connectivity(&mut self, flow_field: &crate::game::structures::FlowField) {
         use super::region_decomposition::{get_region_id, world_to_cluster_local};
+        use super::types::Direction;
         
         info!("[CONNECTIVITY] Linking islands to their boundary portals...");
         
@@ -214,13 +217,13 @@ impl HierarchicalGraph {
                 let cluster_max_y = cluster_y_tiles + CLUSTER_SIZE - 1;
                 
                 let _direction = if portal.node.y == cluster_y_tiles {
-                    1 // South edge
+                    Direction::South
                 } else if portal.node.y == cluster_max_y {
-                    0 // North edge
+                    Direction::North
                 } else if portal.node.x == cluster_x_tiles {
-                    3 // West edge
+                    Direction::West
                 } else if portal.node.x == cluster_max_x {
-                    2 // East edge
+                    Direction::East
                 } else {
                     continue; // Portal not on cluster edge (shouldn't happen)
                 };
@@ -245,7 +248,7 @@ impl HierarchicalGraph {
         }
         
         // Now apply updates (need to do this in a second pass to avoid borrow checker issues)
-        let mut updates: Vec<((usize, usize), usize, usize, usize)> = Vec::new();
+        let mut updates: Vec<((usize, usize), usize, Direction, usize, IslandId)> = Vec::new();
         
         for (&cluster_id, cluster) in &self.clusters {
             for (&portal_id, portal) in &self.portals {
@@ -259,13 +262,13 @@ impl HierarchicalGraph {
                 let cluster_max_y = cluster_y_tiles + CLUSTER_SIZE - 1;
                 
                 let direction = if portal.node.y == cluster_y_tiles {
-                    1
+                    Direction::South
                 } else if portal.node.y == cluster_max_y {
-                    0
+                    Direction::North
                 } else if portal.node.x == cluster_x_tiles {
-                    3
+                    Direction::West
                 } else if portal.node.x == cluster_max_x {
-                    2
+                    Direction::East
                 } else {
                     continue;
                 };
@@ -273,20 +276,58 @@ impl HierarchicalGraph {
                 let portal_world = flow_field.grid_to_world(portal.node.x, portal.node.y);
                 
                 if let Some(portal_local) = world_to_cluster_local(portal_world, cluster_id, flow_field) {
-                    if let Some(region_id) = get_region_id(&cluster.regions, cluster.region_count, portal_local) {
-                        if let Some(region) = &cluster.regions[region_id.0 as usize] {
-                            let island_idx = region.island.0 as usize;
-                            updates.push((cluster_id, island_idx, direction, portal_id));
+                    // Try to find the region this portal is in
+                    let region_id = get_region_id(&cluster.regions, cluster.region_count, portal_local);
+                    
+                    let island_id = if let Some(region_id) = region_id {
+                        // Portal is directly in a region - use that island
+                        cluster.regions[region_id.0 as usize].as_ref().map(|r| r.island)
+                    } else {
+                        // Portal is NOT in any region (edge tile near obstacle)
+                        // Find the nearest region and use its island
+                        // This handles cases where portals are on cluster boundaries near obstacles
+                        let mut nearest_island = None;
+                        let mut min_distance_sq = f32::MAX;
+                        
+                        for region_opt in &cluster.regions[0..cluster.region_count] {
+                            if let Some(region) = region_opt {
+                                // Calculate distance from portal to region center
+                                let center = region.bounds.center();
+                                let dx = center.x - portal_local.x;
+                                let dy = center.y - portal_local.y;
+                                let dist_sq = dx * dx + dy * dy;
+                                
+                                if dist_sq < FixedNum::from_num(min_distance_sq) {
+                                    min_distance_sq = dist_sq.to_num::<f32>();
+                                    nearest_island = Some(region.island);
+                                }
+                            }
                         }
+                        
+                        if nearest_island.is_none() {
+                            warn!("[CONNECTIVITY] Portal {} at ({},{}) in cluster {:?} has no nearby regions!",
+                                portal_id, portal.node.x, portal.node.y, cluster_id);
+                        }
+                        
+                        nearest_island
+                    };
+                    
+                    if let Some(island_id) = island_id {
+                        let island_idx = island_id.0 as usize;
+                        updates.push((cluster_id, island_idx, direction, portal_id, island_id));
                     }
                 }
             }
         }
         
         // Apply updates
-        for (cluster_id, island_idx, direction, portal_id) in updates {
+        for (cluster_id, island_idx, direction, portal_id, island_id) in updates {
+            // Store portal->island mapping
+            self.portal_island_map.insert(portal_id, island_id);
+            
+            // Store island->portal mapping in neighbor_connectivity
             if let Some(cluster) = self.clusters.get_mut(&cluster_id) {
-                cluster.neighbor_connectivity[island_idx][direction] = Some(portal_id);
+                cluster.neighbor_connectivity[island_idx][direction.as_index()] = Some(portal_id);
             }
         }
         

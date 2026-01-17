@@ -48,7 +48,7 @@ pub struct Cluster {
     pub local_routing: [[u8; MAX_REGIONS]; MAX_REGIONS],
     
     /// Neighbor connectivity: [island_id][direction] -> Option<portal_id>
-    /// Direction: 0=North, 1=East, 2=South, 3=West
+    /// Direction: 0=North, 1=South, 2=East, 3=West (use Direction enum for type safety)
     pub neighbor_connectivity: [[Option<usize>; 4]; MAX_ISLANDS],
 }
 

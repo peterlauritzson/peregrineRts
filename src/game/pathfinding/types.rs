@@ -26,6 +26,35 @@ pub const TORTUOSITY_THRESHOLD: f32 = 3.0;
 /// Value indicating no path exists between two regions (different islands).
 pub const NO_PATH: u8 = 255;
 
+/// Cardinal directions for portal/neighbor connectivity.
+/// 
+/// This enum ensures type-safe direction indexing and prevents documentation/implementation mismatches.
+/// The repr(u8) ensures zero-cost conversion to array indices.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Direction {
+    North = 0,
+    South = 1,
+    East = 2,
+    West = 3,
+}
+
+impl Direction {
+    /// Convert to array index for neighbor_connectivity lookups
+    #[inline]
+    pub fn as_index(self) -> usize {
+        self as usize
+    }
+    
+    /// All four cardinal directions
+    pub const ALL: [Direction; 4] = [
+        Direction::North,
+        Direction::South,
+        Direction::East,
+        Direction::West,
+    ];
+}
+
 #[derive(Event, Message, Debug, Clone)]
 pub struct PathRequest {
     pub entity: Entity,
