@@ -7,10 +7,13 @@ impl SpatialHash {
     /// Query all entities within radius of position
     /// Excludes the query entity itself if provided
     /// 
+    /// Populates `out_entities` instead of allocating a new Vec to avoid runtime allocations.
+    /// Clears `out_entities` before populating.
+    /// 
     /// NOTE: Only returns Entity IDs. Callers must query SimPosition component for positions.
-    pub fn get_potential_collisions(&self, pos: FixedVec2, query_radius: FixedNum, exclude_entity: Option<Entity>) -> Vec<Entity> {
+    pub fn get_potential_collisions(&self, pos: FixedVec2, query_radius: FixedNum, exclude_entity: Option<Entity>, out_entities: &mut Vec<Entity>) {
         let mut seen = HashSet::new();
-        let mut result = Vec::new();
+        out_entities.clear();
         
         // Query each size class (both Grid A and Grid B)
         for size_class in &self.size_classes {
@@ -23,7 +26,7 @@ impl SpatialHash {
             for cell in cells_a {
                 for &entity in cell {
                     if Some(entity) != exclude_entity && seen.insert(entity) {
-                        result.push(entity);
+                        out_entities.push(entity);
                     }
                 }
             }
@@ -33,20 +36,21 @@ impl SpatialHash {
             for cell in cells_b {
                 for &entity in cell {
                     if Some(entity) != exclude_entity && seen.insert(entity) {
-                        result.push(entity);
+                        out_entities.push(entity);
                     }
                 }
             }
         }
-        
-        result
     }
 
     /// General proximity query for boids, aggro, and other proximity-based systems.
     /// Returns all entities within the specified radius, excluding the query entity itself.
     /// 
+    /// Populates `out_entities` instead of allocating a new Vec to avoid runtime allocations.
+    /// Clears `out_entities` before populating.
+    /// 
     /// NOTE: Only returns Entity IDs. Callers must query SimPosition component for positions.
-    pub fn query_radius(&self, query_entity: Entity, pos: FixedVec2, radius: FixedNum) -> Vec<Entity> {
-        self.get_potential_collisions(pos, radius, Some(query_entity))
+    pub fn query_radius(&self, query_entity: Entity, pos: FixedVec2, radius: FixedNum, out_entities: &mut Vec<Entity>) {
+        self.get_potential_collisions(pos, radius, Some(query_entity), out_entities)
     }
 }

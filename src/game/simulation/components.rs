@@ -118,7 +118,8 @@ pub struct CachedNeighbors {
 impl Default for CachedNeighbors {
     fn default() -> Self {
         Self {
-            neighbors: Vec::new(),
+            // Preallocate with typical capacity (boids_max_neighbors default is 8)
+            neighbors: Vec::with_capacity(8),
             last_query_pos: FixedVec2::ZERO,
             // Initialize to high value to force update on first tick
             frames_since_update: 999,
@@ -147,6 +148,7 @@ pub struct BoidsNeighborCache {
 impl Default for BoidsNeighborCache {
     fn default() -> Self {
         Self {
+            // MEMORY_OK: SmallVec has inline storage, no heap allocation for small sizes
             neighbors: smallvec::SmallVec::new(),
             last_query_pos: FixedVec2::ZERO,
             // Initialize to high value to force update on first tick

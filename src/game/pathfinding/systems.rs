@@ -150,6 +150,7 @@ pub fn process_path_requests(
             }
             
             // Create Path component with validated goal
+            // MEMORY_OK: ECS component insert, not collection growth
             commands.entity(request.entity).insert(super::types::Path::Hierarchical {
                 goal: walkable_goal,  // Use snapped position
                 goal_cluster,

@@ -49,9 +49,6 @@ pub fn update_neighbor_cache(
     const MAX_FRAMES_NORMAL: u32 = 10;  // Force refresh every 10 frames for slow movers
     const MAX_FRAMES_FAST: u32 = 2;      // Force refresh every 2 frames for fast movers
     
-    // Count total units for conditional logging
-    let total_units = query.iter().count();
-    
     for (entity, pos, velocity, mut cache, collider) in query.iter_mut() {
         cache.frames_since_update += 1;
         
@@ -74,20 +71,13 @@ pub fn update_neighbor_cache(
             // Cache MISS - perform full spatial query
             let search_radius = collider.radius * sim_config.collision_search_radius_multiplier;
             
-            // Use detailed logging version if we have very few units
-            cache.neighbors = if total_units <= 5 {
-                spatial_hash.get_potential_collisions(
-                    pos.0, 
-                    search_radius, 
-                    Some(entity)
-                )
-            } else {
-                spatial_hash.get_potential_collisions(
-                    pos.0, 
-                    search_radius, 
-                    Some(entity)
-                )
-            };
+            // Reuse existing Vec capacity - spatial_hash clears and populates directly
+            spatial_hash.get_potential_collisions(
+                pos.0, 
+                search_radius, 
+                Some(entity),
+                &mut cache.neighbors
+            );
             
             cache.last_query_pos = pos.0;
             cache.frames_since_update = 0;
@@ -124,6 +114,9 @@ pub fn update_boids_neighbor_cache(
     const MOVEMENT_THRESHOLD: f32 = 1.0;  // More lenient than collision (0.5)
     const MAX_FRAMES: u32 = 5;            // Slower than collision (2-10)
     
+    // Reusable temporary Vec for spatial queries (avoids per-entity allocation)
+    let mut nearby_entities = Vec::with_capacity(32);
+    
     for (entity, pos, _vel, mut cache) in query.iter_mut() {
         cache.frames_since_update += 1;
         
@@ -135,7 +128,7 @@ pub fn update_boids_neighbor_cache(
             // Cache MISS - rebuild neighbor list
             
             // Query spatial hash with boids neighbor radius (5.0 units)
-            let nearby_entities = spatial_hash.query_radius(entity, pos.0, sim_config.neighbor_radius);
+            spatial_hash.query_radius(entity, pos.0, sim_config.neighbor_radius, &mut nearby_entities);
             
             // Get closest N neighbors efficiently using partial sort
             // Query SimPosition and SimVelocity components for each nearby entity

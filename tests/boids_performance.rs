@@ -137,10 +137,12 @@ fn test_spatial_query_correctness() {
     
     // Query with radius 10 from center
     let hash = app.world().resource::<SpatialHash>();
-    let results = hash.query_radius(
+    let mut results = Vec::new();
+    hash.query_radius(
         entity_center,
         FixedVec2::ZERO,
-        FixedNum::from_num(10.0)
+        FixedNum::from_num(10.0),
+        &mut results
     );
     
     // Should find entity_near but not entity_far

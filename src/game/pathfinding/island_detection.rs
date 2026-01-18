@@ -50,6 +50,7 @@ pub(crate) fn identify_islands(cluster: &mut Cluster) {
         }
         
         let representative = cluster.regions[0].as_ref().map(|r| r.bounds.center()).unwrap_or(FixedVec2::ZERO);
+        // NOLINT: MEMORY_OK: setup only - graph building precomputation
         cluster.islands[0] = Some(Island { id: island_id, representative, regions: island_regions.clone() });
         
         for &region_id in &island_regions {
@@ -119,6 +120,7 @@ pub(crate) fn identify_islands(cluster: &mut Cluster) {
         cluster.islands[island_count] = Some(Island {
             id: island_id,
             representative,
+            // NOLINT: MEMORY_OK: setup only - graph building precomputation
             regions: island_regions.clone(),
         });
         

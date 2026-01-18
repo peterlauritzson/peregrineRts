@@ -24,7 +24,8 @@ fn test_query_radius_finds_entities_within_range() {
     hash.insert(entity_c, pos_c, FixedNum::from_num(0.5));
 
     // Query from entity_a with radius 10 (should find B and C, but not self)
-    let results = hash.query_radius(entity_a, pos_a, FixedNum::from_num(10.0));
+    let mut results = Vec::new();
+    hash.query_radius(entity_a, pos_a, FixedNum::from_num(10.0), &mut results);
 
     assert_eq!(results.len(), 2, "Should find 2 neighbors within radius");
     assert!(results.iter().any(|e| *e == entity_b), "Should find entity B");
@@ -54,7 +55,8 @@ fn test_query_radius_excludes_entities_outside_range() {
     hash.insert(entity_c, pos_c, FixedNum::from_num(0.5));
 
     // Query with radius 5 (should find B but not C)
-    let results = hash.query_radius(entity_a, pos_a, FixedNum::from_num(5.0));
+    let mut results = Vec::new();
+    hash.query_radius(entity_a, pos_a, FixedNum::from_num(5.0), &mut results);
 
     // Note: query_radius returns all entities in the grid cells, not filtered by actual distance
     // So this test verifies the grid-based spatial partitioning works
@@ -79,7 +81,8 @@ fn test_spatial_hash_excludes_self() {
     hash.insert(entity, pos, FixedNum::from_num(0.5));
 
     // Query from same entity - should NOT include self
-    let results = hash.query_radius(entity, pos, FixedNum::from_num(10.0));
+    let mut results = Vec::new();
+    hash.query_radius(entity, pos, FixedNum::from_num(10.0), &mut results);
 
     assert_eq!(results.len(), 0, "Entity should not find itself in query results");
 }
@@ -103,12 +106,14 @@ fn test_spatial_hash_query_finds_neighbors() {
     hash.insert(entity_b, pos_b, FixedNum::from_num(0.5));
 
     // A should find B but not itself
-    let results = hash.query_radius(entity_a, pos_a, FixedNum::from_num(5.0));
+    let mut results = Vec::new();
+    hash.query_radius(entity_a, pos_a, FixedNum::from_num(5.0), &mut results);
     assert_eq!(results.len(), 1, "A should find exactly one neighbor (B)");
     assert_eq!(results[0], entity_b, "A should find B");
 
     // B should find A but not itself
-    let results = hash.query_radius(entity_b, pos_b, FixedNum::from_num(5.0));
+    results.clear();
+    hash.query_radius(entity_b, pos_b, FixedNum::from_num(5.0), &mut results);
     assert_eq!(results.len(), 1, "B should find exactly one neighbor (A)");
     assert_eq!(results[0], entity_a, "B should find A");
 }
@@ -126,7 +131,8 @@ fn test_spatial_hash_empty_cell_returns_empty() {
     let pos = FixedVec2::new(FixedNum::from_num(0.0), FixedNum::from_num(0.0));
 
     // Empty hash - should return empty results
-    let results = hash.query_radius(entity, pos, FixedNum::from_num(10.0));
+    let mut results = Vec::new();
+    hash.query_radius(entity, pos, FixedNum::from_num(10.0), &mut results);
     assert_eq!(results.len(), 0, "Empty hash should return no results");
 }
 
@@ -154,11 +160,13 @@ fn test_spatial_hash_boundary_cases() {
     hash.insert(entity_edge, pos_edge, FixedNum::from_num(0.5));
 
     // Query from corner with small radius - should not find center or edge
-    let results = hash.query_radius(entity_corner, pos_corner, FixedNum::from_num(5.0));
+    let mut results = Vec::new();
+    hash.query_radius(entity_corner, pos_corner, FixedNum::from_num(5.0), &mut results);
     assert_eq!(results.len(), 0, "Corner entity should not find distant entities");
 
     // Query from center with large radius - should find edge
-    let results = hash.query_radius(entity_center, pos_center, FixedNum::from_num(60.0));
+    results.clear();
+    hash.query_radius(entity_center, pos_center, FixedNum::from_num(60.0), &mut results);
     assert!(results.len() >= 1, "Center should find at least one other entity with large radius");
 }
 
@@ -191,7 +199,8 @@ fn test_query_radius_returns_same_results_as_brute_force() {
     let query_radius = FixedNum::from_num(12.0);
 
     // Get results from spatial hash
-    let spatial_results = hash.query_radius(query_entity, query_pos, query_radius);
+    let mut spatial_results = Vec::new();
+    hash.query_radius(query_entity, query_pos, query_radius, &mut spatial_results);
 
     // Brute force: check all entities manually
     let mut brute_force_results = Vec::new();
@@ -240,7 +249,8 @@ fn test_get_potential_collisions_excludes_self() {
     hash.insert(entity, pos, FixedNum::from_num(0.5));
 
     // Query with exclude_entity set - should NOT include self
-    let results = hash.get_potential_collisions(pos, FixedNum::from_num(10.0), Some(entity));
+    let mut results = Vec::new();
+    hash.get_potential_collisions(pos, FixedNum::from_num(10.0), Some(entity), &mut results);
 
     assert_eq!(results.len(), 0, "get_potential_collisions should not include excluded entity");
 }
@@ -262,7 +272,8 @@ fn test_get_potential_collisions_includes_all_without_exclusion() {
     hash.insert(entity2, pos, FixedNum::from_num(0.5));
 
     // Query with None - should include all entities
-    let results = hash.get_potential_collisions(pos, FixedNum::from_num(10.0), None);
+    let mut results = Vec::new();
+    hash.get_potential_collisions(pos, FixedNum::from_num(10.0), None, &mut results);
 
     assert_eq!(results.len(), 2, "get_potential_collisions should include all entities when exclude_entity is None");
 }
@@ -285,7 +296,8 @@ fn test_get_potential_collisions_finds_neighbors_excludes_self() {
     hash.insert(entity2, pos2, FixedNum::from_num(0.5));
 
     // Query from entity1 with exclusion - should find entity2 but not entity1
-    let results = hash.get_potential_collisions(pos1, FixedNum::from_num(10.0), Some(entity1));
+    let mut results = Vec::new();
+    hash.get_potential_collisions(pos1, FixedNum::from_num(10.0), Some(entity1), &mut results);
 
     assert_eq!(results.len(), 1, "Should find 1 neighbor");
     assert_eq!(results[0], entity2, "Should find entity2");

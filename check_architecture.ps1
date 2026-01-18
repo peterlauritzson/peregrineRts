@@ -7,6 +7,13 @@
     - Non-deterministic operations (HashMap iteration, thread_rng, etc.)
     - Hardcoded magic numbers
     - File size limits
+    - Non-preallocated dynamic structures (Vec::new, HashMap::new, etc.)
+    
+    Memory Safety Guidelines:
+    - All collections must be created with capacity OR
+    - Must be proven to never grow after initialization OR  
+    - Should use frozen/immutable alternatives where possible
+    - Use // MEMORY_OK: <reason> to suppress false positives
 .PARAMETER Verbose
     Show detailed information about checks
 #>
@@ -307,6 +314,132 @@ foreach ($file in $simulationFiles) {
 if ($cloneViolations -eq 0) {
     Write-Pass "No excessive cloning detected"
 }
+
+# ============================================================================
+# CHECK 7: Memory-Unsafe Dynamic Structures
+# ============================================================================
+Write-Section "Checking for Non-Preallocated Dynamic Structures"
+
+$dynamicStructViolations = 0
+
+# Patterns for structures that should have capacity or be frozen
+$dynamicStructPatterns = @(
+    @{ Pattern = 'Vec::new\(\)'; Type = 'Vec'; Message = 'Vec::new() without capacity - use Vec::with_capacity() or prove it never grows after init' }
+    @{ Pattern = 'HashMap::new\(\)'; Type = 'HashMap'; Message = 'HashMap::new() without capacity - use HashMap::with_capacity() or replace with frozen structure' }
+    @{ Pattern = 'HashSet::new\(\)'; Type = 'HashSet'; Message = 'HashSet::new() without capacity - use HashSet::with_capacity() or replace with frozen structure' }
+    @{ Pattern = 'BTreeMap::new\(\)'; Type = 'BTreeMap'; Message = 'BTreeMap::new() without capacity - consider pre-sized or frozen alternative' }
+    @{ Pattern = 'BTreeSet::new\(\)'; Type = 'BTreeSet'; Message = 'BTreeSet::new() without capacity - consider pre-sized or frozen alternative' }
+    @{ Pattern = 'VecDeque::new\(\)'; Type = 'VecDeque'; Message = 'VecDeque::new() without capacity - use VecDeque::with_capacity()' }
+    @{ Pattern = 'String::new\(\)'; Type = 'String'; Message = 'String::new() without capacity - use String::with_capacity() or &str' }
+)
+
+# Check for dynamic push/insert patterns
+$growthPatterns = @(
+    @{ Pattern = '\.push\('; Method = 'push'; Message = 'Dynamic growth via push() - ensure collection is pre-allocated or frozen after init' }
+    @{ Pattern = '\.insert\('; Method = 'insert'; Message = 'Dynamic growth via insert() - ensure collection is pre-allocated or frozen after init' }
+    @{ Pattern = '\.push_str\('; Method = 'push_str'; Message = 'Dynamic growth via push_str() - consider using fixed-capacity buffer' }
+    @{ Pattern = '\.extend\('; Method = 'extend'; Message = 'Dynamic growth via extend() - ensure collection has sufficient capacity' }
+    @{ Pattern = '\.append\('; Method = 'append'; Message = 'Dynamic growth via append() - ensure collection has sufficient capacity' }
+)
+
+# Files to check (all Rust files, but focus on game logic)
+$allRustFiles = Get-ChildItem -Path "src/game" -Filter "*.rs" -Recurse
+
+foreach ($file in $allRustFiles) {
+    $content = Get-Content $file.FullName -Raw
+    $lines = Get-Content $file.FullName
+    
+    # Skip test modules
+    if ($content -match '#\[cfg\(test\)\]' -or $file.Name -match 'test') {
+        continue
+    }
+    
+    # Check for unpreallocated structures
+    foreach ($check in $dynamicStructPatterns) {
+        $matches = Select-String -Path $file.FullName -Pattern $check.Pattern -AllMatches
+        foreach ($match in $matches) {
+            $lineContent = $lines[$match.LineNumber - 1].Trim()
+            
+            # Skip comments
+            if ($lineContent -match '^\s*//') {
+                continue
+            }
+            
+            # Check for NOLINT or MEMORY_OK comments
+            if ($match.LineNumber -gt 1) {
+                $prevLine = $lines[$match.LineNumber - 2].Trim()
+                if ($prevLine -match '//\s*(NOLINT|MEMORY_OK|OK:)') {
+                    continue
+                }
+            }
+            if ($lineContent -match '//\s*(NOLINT|MEMORY_OK|OK:)') {
+                continue
+            }
+            
+            # Check if it's in a system or component (more critical for hot paths)
+            $contextStart = [Math]::Max(0, $match.LineNumber - 10)
+            $contextEnd = [Math]::Min($lines.Count - 1, $match.LineNumber + 2)
+            $context = $lines[$contextStart..$contextEnd] -join "`n"
+            
+            # Flag if in a struct field, resource, or component
+            $isCritical = $context -match '\bstruct\s+\w+' -or 
+                          $context -match '#\[derive\(.*Component' -or 
+                          $context -match '#\[derive\(.*Resource' -or
+                          $file.Name -match '(components|resources|systems)\.rs'
+            
+            if ($isCritical) {
+                $relativePath = $file.FullName.Replace("$PWD\\", "")
+                Write-Violation -File $relativePath -Line $match.LineNumber -Message $check.Message -Code $lineContent
+                $dynamicStructViolations++
+            }
+        }
+    }
+    
+    # Check for growth operations in simulation paths
+    if ($file.FullName -match '(simulation|pathfinding|unit)') {
+        foreach ($check in $growthPatterns) {
+            $matches = Select-String -Path $file.FullName -Pattern $check.Pattern -AllMatches
+            foreach ($match in $matches) {
+                $lineContent = $lines[$match.LineNumber - 1].Trim()
+                
+                # Skip comments
+                if ($lineContent -match '^\s*//') {
+                    continue
+                }
+                
+                # Check for NOLINT or MEMORY_OK comments
+                if ($match.LineNumber -gt 1) {
+                    $prevLine = $lines[$match.LineNumber - 2].Trim()
+                    if ($prevLine -match '//\s*(NOLINT|MEMORY_OK|OK:)') {
+                        continue
+                    }
+                }
+                if ($lineContent -match '//\s*(NOLINT|MEMORY_OK|OK:)') {
+                    continue
+                }
+                
+                # Check if it's in a hot path (system function)
+                $contextStart = [Math]::Max(0, $match.LineNumber - 10)
+                $contextEnd = [Math]::Min($lines.Count - 1, $match.LineNumber + 5)
+                $context = $lines[$contextStart..$contextEnd] -join "`n"
+                
+                if ($context -match '\bfn\s+\w+.*\(.*\b(Query|Res|Local)\b' -or $file.Name -match 'systems\.rs') {
+                    $relativePath = $file.FullName.Replace("$PWD\\", "")
+                    Write-Warning -File $relativePath -Line $match.LineNumber `
+                        -Message "$($check.Message)"
+                }
+            }
+        }
+    }
+}
+
+if ($dynamicStructViolations -eq 0) {
+    Write-Pass "No uncontrolled dynamic structures found"
+}
+
+Write-Host ""
+Write-Host "TIP: Mark safe dynamic allocations with // MEMORY_OK: <reason> comment" -ForegroundColor Gray
+Write-Host "     Examples: 'preallocated with capacity', 'frozen after init', 'setup only'" -ForegroundColor Gray
 
 # ============================================================================
 # SUMMARY

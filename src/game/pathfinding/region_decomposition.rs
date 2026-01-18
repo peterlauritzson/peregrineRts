@@ -72,6 +72,7 @@ pub(crate) fn decompose_cluster_into_regions(
         regions.push(Region {
             id: RegionId(i as u8),
             bounds: rect,
+            // NOLINT: MEMORY_OK: setup only - graph building precomputation
             vertices: vertices.clone(),
             island: IslandId(0), // Will be set during island detection
             portals: SmallVec::new(),

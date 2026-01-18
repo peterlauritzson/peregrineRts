@@ -100,7 +100,7 @@ use peregrine::game::simulation::collision;
 use peregrine::game::simulation::systems;
 use peregrine::game::spatial_hash::SpatialHash;
 use peregrine::game::pathfinding::{
-    PathRequest, HierarchicalGraph, ConnectedComponents,
+    PathRequest, HierarchicalGraph,
 };
 use peregrine::game::structures::FlowField;
 use peregrine::game::fixed_math::{FixedNum, FixedVec2};
@@ -828,20 +828,17 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
         ));
     }
     
-    // Build pathfinding graph and connectivity components AFTER obstacles are in flow field
+    // Build pathfinding graph AFTER obstacles are in flow field
     // This matches real game behavior where graph sees actual obstacles
     // NOTE: This is a one-time precomputation cost (happens during loading), NOT included in tick timing
     let graph_build_start = Instant::now();
     let mut hierarchical_graph = HierarchicalGraph::default();
-    let mut connected_components = ConnectedComponents::default();
     {
         let flow_field_ref = app.world().resource::<MapFlowField>();
-        hierarchical_graph.build_graph(&flow_field_ref.0, true); // true = use legacy for existing benchmarks
-        connected_components.build_from_graph(&hierarchical_graph);
+        hierarchical_graph.build_graph(&flow_field_ref.0, false); // false = use new region-based pathfinding
     }
     let graph_build_time = graph_build_start.elapsed();
     app.insert_resource(hierarchical_graph);
-    app.insert_resource(connected_components);
     
     // Add pathfinding request generator (deterministic)
     app.insert_resource(PathRequestGenerator {

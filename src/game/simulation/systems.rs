@@ -65,6 +65,7 @@ pub fn process_input(
     for event in stops {
         commands.entity(event.entity).remove::<Path>();
         // Also reset velocity?
+        // MEMORY_OK: ECS component insert, not collection growth
         commands.entity(event.entity).insert(SimVelocity(FixedVec2::ZERO));
     }
 
