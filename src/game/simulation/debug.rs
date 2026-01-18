@@ -110,7 +110,7 @@ pub fn draw_unit_paths(
                     current_pos = next_pos;
                 }
             },
-            Path::Hierarchical { goal, goal_cluster, goal_island } => {
+            Path::Hierarchical { goal, goal_cluster, goal_region: _, goal_island } => {
                 // Draw path as: unit -> portal -> portal -> ... -> goal
                 use crate::game::pathfinding::{get_region_id, ClusterIslandId, CLUSTER_SIZE, world_to_cluster_local};
                 

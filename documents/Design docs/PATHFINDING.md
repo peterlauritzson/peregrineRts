@@ -107,90 +107,269 @@ Units entering from the south heading to a destination on the east side will rou
 
 ### Level 2: Meso Navigation (Region-to-Region Within Cluster)
 
-**Purpose:** Navigate within a cluster using shared edges between regions
+**Purpose:** Navigate within a cluster by following region-to-region paths with micro-portals
 
-**Concept:** Regions are convex areas. Regions share boundaries (edges). Movement between regions happens by crossing shared edges.
+**Concept:** Regions are convex areas within a cluster. Adjacent regions share boundaries. To avoid oscillation when moving toward region centroids (where obstacles could bounce units back and forth), we create **micro-portals** at the center of each shared boundary.
 
-**Structure:**
+**[IMPLEMENTED]** Structure:
 ```rust
 struct Region {
-    bounds: ConvexPolygon,     // Geometry (typically 4-8 vertices)
-    island_id: IslandId,       // Which island this region belongs to
-    neighbors: SmallVec<[RegionId; 8]>,  // Adjacent regions (share an edge)
+    bounds: Rectangle,           // Bounding box
+    island_id: IslandId,        // Which island this region belongs to
+    is_dangerous: bool,         // True if non-convex or contains obstacles
+    portals: SmallVec<[RegionPortal; 8]>,  // Connections to adjacent regions
+}
+
+// Micro-portal between two adjacent regions
+struct RegionPortal {
+    edge: LineSegment,          // The shared boundary segment
+    center: FixedVec2,          // Center of shared boundary (navigation target)
+    next_region: RegionId,      // Which region this portal leads to
 }
 
 struct Cluster {
-    regions: [Option<Region>; MAX_REGIONS],
+    regions: [Option<Region>; MAX_REGIONS],  // Fixed-size array (32 max)
     region_count: usize,
     
-    // Routing table: Given current region and target region, which region is next?
-    // Returns NO_PATH (255) if regions are in different islands
-    local_routing: [[RegionId; MAX_REGIONS]; MAX_REGIONS],
+    // Routing table: local_routing[from_region][to_region] = next_region_id
+    // Pre-allocated 2D array, NOT HashMap (for memory efficiency)
+    // Value NO_PATH (255) = different islands, need macro routing
+    local_routing: [[u8; MAX_REGIONS]; MAX_REGIONS],
 }
 ```
 
-**Navigation Logic:**
+**Implementation Note**: Micro-portals are stored IN each region's `portals` field, not as a separate array. This is more memory-efficient than a separate `micro_portals` array.
+
+**Actual Files**:
+- Types: `src/game/pathfinding/types.rs:119-133` (RegionPortal struct)
+- Cluster: `src/game/pathfinding/cluster.rs:32-69`
+- Portal Creation: `src/game/pathfinding/region_connectivity.rs:16-47`
+- Routing Table: `src/game/pathfinding/region_connectivity.rs:130-189`
+
+**Micro-Portal Placement:**
+- Calculated during region decomposition
+- Placed at **center of the touching boundary** between two adjacent regions
+- "Center" means: midpoint of the overlapping segment where regions share a border
+- Example: If Region A (x=0-10) touches Region B (x=5-15) at their vertical edge, the micro-portal is at x=7.5 (center of the 5-10 overlap)
+
+**[IMPLEMENTED]** Navigation Logic:
 ```rust
-fn navigate_region_to_region(unit_pos: Vec2, target_pos: Vec2, cluster: &Cluster) -> Vec2 {
-    let current_region = find_region_containing(unit_pos, cluster);
+fn navigate_region_to_region(unit: &Unit, target_pos: FixedVec2, cluster: &Cluster) -> FixedVec2 {
+    let current_region = find_region_containing(unit.pos, cluster);
     let target_region = find_region_containing(target_pos, cluster);
     
     if current_region == target_region {
-        // Same region - handled by Micro level
+        // Same region - use Level 3 (micro navigation)
         return target_pos;
     }
     
-    let next_region = cluster.local_routing[current_region][target_region];
+    // Look up next region ID from routing table
+    let next_region_id = cluster.local_routing[current_region.0][target_region.0];
     
-    if next_region == NO_PATH {
-        // Different islands - shouldn't happen if macro routing is correct
-        error!("Region routing failed: different islands");
-        return unit_pos; // Stop moving
+    if next_region_id == NO_PATH {
+        // NO_PATH (255): Regions in different islands
+        // This should be handled by macro routing (Level 1)
+        warn!("Region routing failed: different islands!");
+        return unit.pos; // Stop moving
     }
     
-    // Find shared edge between current and next region
-    let shared_edge = find_shared_edge(
-        &cluster.regions[current_region],
-        &cluster.regions[next_region]
-    );
+    // Find the micro-portal (RegionPortal) leading to next_region
+    let current_region_data = &cluster.regions[current_region.0];
+    let portal = current_region_data.portals.iter()
+        .find(|p| p.next_region.0 == next_region_id)
+        .expect("Portal should exist for routed region");
     
-    // Move toward shared edge (center point or clamped projection)
-    return shared_edge.center();
+    // Navigate to the micro-portal center (center of shared boundary)
+    return portal.center;
 }
 ```
 
-**NO "Portal Objects":** Regions connect via their shared geometry, not through separate portal entities. The shared edge IS the connection.
+**Actual Implementation Location**: `src/game/simulation/systems.rs:287-308`
+
+**Design Decision - Micro-Portals vs. Region Centroids:**
+
+**Option A: Region Centroids** (REJECTED)
+- Navigate toward next region's centroid
+- **Pros:** Simple, no extra data structures
+- **Cons:** Can cause oscillation when obstacles route units back across boundary
+
+**Option B: Micro-Portals** [IMPLEMENTED]
+- Create portal at center of shared boundary
+- **Pros:** 
+  - Prevents oscillation (clear crossing point)
+  - More predictable paths
+  - Similar to cluster-level portal concept (consistent architecture)
+- **Cons:** 
+  - Additional memory (~64-128 portals per cluster)
+  - Need to calculate shared boundary centers during build
+
+**Memory Efficiency Note:**
+- Uses **pre-allocated fixed arrays**, NOT HashMap
+- `local_routing[32][32] = 1KB` per cluster
+- `RegionPortal` stored in each region's SmallVec (typically 2-4 portals per region)
+  - Average: 10 regions × 3 portals × 40 bytes ≈ 1.2KB per cluster
+- Total meso-level: ~2.2KB per cluster
+- With 10,000 clusters: ~22MB total (acceptable)
+
+**Comparison to Alternative Approaches**:
+- Separate `micro_portals` array would use ~2KB more per cluster (rejected for memory)
+- HashMap-based routing would add heap allocations and pointer chasing (rejected for performance)
+- Current approach balances memory efficiency with O(1) routing lookups
+
+**Future Enhancement: Diagonal Portals** (IMPLEMENTATION IN PROGRESS)
+- **Concept**: Add portals at cluster corners (NE, NW, SE, SW) in addition to edges (N, S, E, W)
+- **Benefit**: 8 portals per cluster instead of 4 = 2× better path granularity
+- **Pros**:
+  - Better routing in open areas (units wouldn't pick suboptimal cardinal-only paths)
+  - More natural diagonal movement
+  - Only 2× routing table size increase
+- **Challenge**: Corner positions are shared by 4 clusters simultaneously
+  - Example: Corner at (64, 64) is NE for cluster (0,0), NW for (1,0), SE for (0,1), SW for (1,1)
+  - Need to handle portal ownership carefully (which cluster creates the corner portal?)
+  - Portal connectivity needs to map 4 different cluster perspectives for same physical corner
+  
+**Implementation Approach: Ownership Rule + Global Lookup**
+- **Creation Rule**: Only the cluster with minimum (x, y) coordinates creates shared corner portals
+  - Example: For corner shared by clusters (0,0), (1,0), (0,1), (1,1) → only (0,0) creates it
+  - Deterministic and avoids duplicates
+- **Global Portal Lookup**: HashMap<IVec2, PortalId> for position-based portal queries
+  - Other clusters look up the portal by position during graph construction
+  - O(n) lookup cost acceptable during precomputation (not runtime)
+- **Connectivity Update**: All 4 sharing clusters update their neighbor_connectivity arrays
+  - Cluster (0,0): neighbor_connectivity[island][NE] = portal_id
+  - Cluster (1,1): neighbor_connectivity[island][SW] = portal_id
+  - Cluster (1,0): neighbor_connectivity[island][NW] = portal_id  (connects to (0,1), not (0,0))
+  - Cluster (0,1): neighbor_connectivity[island][SE] = portal_id  (connects to (1,0), not (0,0))
+- **Runtime**: No change - local_routing table lookup remains O(1), portal lookup remains O(1)
+- **Cost**: Precomputation only - acceptable since routing tables are built once and cached per map
 
 ---
 
 ### Level 3: Micro Navigation (Within Region)
 
-**Purpose:** Direct movement within a single convex region
+**Purpose:** Direct movement within a single region
 
-**Concept:** Convex regions guarantee straight-line movement is obstacle-free
+**Concept:** Most regions are convex, allowing direct straight-line movement. Non-convex or obstacle-containing regions are marked "dangerous" for future enhancement.
 
-**Navigation Logic:**
+**[IMPLEMENTED]** Navigation Logic:
 ```rust
-fn navigate_within_region(unit_pos: Vec2, target_pos: Vec2, region: &Region) -> Vec2 {
-    // Case 1: Region is convex (most common)
-    if region.is_convex {
-        // Straight line is always safe within convex region
+fn navigate_within_region(unit_pos: FixedVec2, target_pos: FixedVec2, region: &Region) -> FixedVec2 {
+    // Case 1: Region is safe/convex (most common - 95%+ of cases)
+    if !region.is_dangerous {
+        // Straight line is safe within convex region
         return target_pos;
     }
     
-    // Case 2: Region is marked "dangerous" (complex, non-convex)
-    // TODO: IMPROVE - Add local A* for dangerous regions
-    // For now, fall back to direct movement and rely on collision avoidance
+    // Case 2: Region is marked "dangerous" (non-convex or has obstacles)
+    // [NOT YET IMPLEMENTED] TODO: Add local A* or flow field for dangerous regions
+    // For now: Fall back to direct movement, rely on collision avoidance
+    // Units will use boids/steering to avoid immediate obstacles
     return target_pos;
 }
 ```
 
-**Dangerous Regions:** When region decomposition creates complex areas or must merge non-convex regions (to stay within MAX_REGIONS), mark them as "dangerous". 
+**Dangerous Regions - Design Trade-off:**
 
-**Graceful Degradation:** 
-- Initially: Use direct movement anyway, rely on collision detection
-- Future: Add local A* or navigation mesh for dangerous regions
-- Performance: 95%+ of regions are convex, so this path is rarely taken
+**Why mark regions as dangerous instead of subdividing further?**
+- **Problem:** Curving obstacles can create 10+ tiny convex regions
+- **Memory explosion:** 10 regions² = 100 routing table entries per cluster
+- **Solution:** Create one larger "dangerous" region covering the curved obstacle area
+  - Fewer regions → smaller routing table
+  - Accepts that within-region navigation is more complex
+  - Trade memory for accuracy
+
+**Future Enhancement Options:**
+
+**Option A: Local A*** (NOT YET IMPLEMENTED)
+- Run A* within dangerous region using tile grid
+- **Pros:** Accurate paths, handles any obstacle configuration
+- **Cons:** Runtime cost (but only for dangerous regions, typically <5% of movement)
+
+**Option B: Local Flow Fields** (NOT YET IMPLEMENTED)  
+- Pre-compute flow field for dangerous region during graph build
+- **Pros:** O(1) runtime lookup, very fast
+- **Cons:** Memory cost per dangerous region (~256 bytes for 16x16 region)
+
+**Option C: Boids/Steering Only** [CURRENTLY IMPLEMENTED]
+- Rely on existing collision avoidance
+- **Pros:** Zero additional cost
+- **Cons:** May produce suboptimal wiggling near obstacles
+- **Status:** Works acceptably in practice for most cases
+
+**Current Status:** Using Option C. Dangerous regions exist in the data structure but within-region navigation just uses direct pathing + collision avoidance. This works well enough for initial deployment and can be enhanced later if needed.
+
+---
+
+## Implementation Status & Architecture Summary
+
+### What's Currently Implemented ✓
+
+**Level 1 - Macro (Island→Island)** [FULLY IMPLEMENTED]
+- ✓ Island detection with boundary-focused algorithm
+- ✓ Interior isolated regions merged into nearest boundary island  
+- ✓ Island routing table (BTreeMap<ClusterIslandId, BTreeMap<ClusterIslandId, PortalId>>)
+- ✓ Efficient routing around cross-cluster obstacles
+- **Files:** `island_detection.rs`, `graph.rs:71-158`
+
+**Level 2 - Meso (Region→Region)** [FULLY IMPLEMENTED]
+- ✓ Region decomposition with obstacle dilation
+- ✓ Micro-portals (RegionPortal) at centers of shared boundaries
+- ✓ Local routing table (`local_routing[from][to] = next_region`)
+- ✓ Dijkstra-based routing table construction
+- ✓ Portal-center navigation to prevent oscillation
+- **Files:** `region_decomposition.rs`, `region_connectivity.rs`, `systems.rs:287-308`
+
+**Level 3 - Micro (Within Region)** [PARTIALLY IMPLEMENTED]
+- ✓ Direct movement in safe/convex regions
+- ✓ Dangerous region flagging
+- ⚠️ **TODO:** Local A* or flow fields for dangerous regions (currently uses direct + collision avoidance)
+
+### Key Design Decisions
+
+**Why Micro-Portals Instead of Region Centroids?**
+- Problem: Moving toward next region's centroid can cause oscillation
+  - Unit crosses boundary → gets routed back → crosses again → infinite loop
+- Solution: Portal at center of shared boundary provides clear, stable crossing point
+- Implementation: `RegionPortal.center` = midpoint of overlapping boundary segment
+
+**Why Store Portals in Regions Instead of Separate Array?**
+- Memory: Each region has 2-4 portals on average (SmallVec doesn't heap-allocate)
+- Locality: Portal data is co-located with region data (better cache behavior)
+- Simplicity: No need for separate portal index management
+- Trade-off: Slightly more complex lookup (iterate portals) vs. simpler memory model
+
+**Why Pre-Allocated Arrays Instead of HashMap?**
+- HashMap: Heap allocations, pointer indirection, hash computation overhead
+- Arrays: Stack/data segment allocation, direct indexing, cache-friendly
+- Cost: Arrays use more memory if sparse (but routing tables are dense)
+- Decision: Pathfinding is hot path → optimize for speed, not memory
+
+### Future Enhancements (NOT YET IMPLEMENTED)
+
+**Dangerous Region Pathfinding**
+- Current: Direct movement + collision avoidance
+- Option A: Local A* within dangerous regions
+  - Pros: Accurate, handles any obstacle configuration
+  - Cons: Runtime cost (but only ~5% of regions are dangerous)
+- Option B: Pre-computed local flow fields
+  - Pros: O(1) lookup at runtime
+  - Cons: ~256 bytes memory per dangerous region
+
+**Portal Granularity Improvements**
+- Current: 4 portals per cluster (N, S, E, W edges)
+- Option A: 8 portals (add NE, NW, SE, SW corners)
+  - Benefit: Better routing in open areas (reduces suboptimal paths)
+  - Cost: 2× routing table memory
+- Option B: 2-3 portals per edge (distributed along edge)
+  - Benefit: 3× granularity for better path quality
+  - Cost: 3× routing table memory
+
+**Super-Cluster Merging**
+- Current: Each cluster has its own routing table
+- Idea: Merge adjacent empty clusters into "super-clusters"
+  - Unit gets access to portals from all merged clusters
+  - Better routing without runtime selection overhead
+  - Complexity: Determining when safe to merge, handling internal portals
 
 ---
 

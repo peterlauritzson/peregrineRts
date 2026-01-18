@@ -230,16 +230,25 @@ impl HierarchicalGraph {
                 let cluster_max_x = cluster_x_tiles + CLUSTER_SIZE - 1;
                 let cluster_max_y = cluster_y_tiles + CLUSTER_SIZE - 1;
                 
-                let _direction = if portal.node.y == cluster_y_tiles {
-                    Direction::South
+                // Detect portal direction (including diagonals) - check corners first
+                let _direction = if portal.node.x == cluster_x_tiles && portal.node.y == cluster_y_tiles {
+                    Direction::SouthWest  // Bottom-left corner
+                } else if portal.node.x == cluster_max_x && portal.node.y == cluster_y_tiles {
+                    Direction::SouthEast  // Bottom-right corner
+                } else if portal.node.x == cluster_x_tiles && portal.node.y == cluster_max_y {
+                    Direction::NorthWest  // Top-left corner
+                } else if portal.node.x == cluster_max_x && portal.node.y == cluster_max_y {
+                    Direction::NorthEast  // Top-right corner
+                } else if portal.node.y == cluster_y_tiles {
+                    Direction::South  // Bottom edge
                 } else if portal.node.y == cluster_max_y {
-                    Direction::North
+                    Direction::North  // Top edge
                 } else if portal.node.x == cluster_x_tiles {
-                    Direction::West
+                    Direction::West  // Left edge
                 } else if portal.node.x == cluster_max_x {
-                    Direction::East
+                    Direction::East  // Right edge
                 } else {
-                    continue; // Portal not on cluster edge (shouldn't happen)
+                    continue; // Portal not on cluster edge or corner (shouldn't happen)
                 };
                 
                 // Find which island can access this portal
@@ -275,16 +284,25 @@ impl HierarchicalGraph {
                 let cluster_max_x = cluster_x_tiles + CLUSTER_SIZE - 1;
                 let cluster_max_y = cluster_y_tiles + CLUSTER_SIZE - 1;
                 
-                let direction = if portal.node.y == cluster_y_tiles {
-                    Direction::South
+                // Detect portal direction - check corners first, then edges
+                let direction = if portal.node.x == cluster_max_x && portal.node.y == cluster_max_y {
+                    Direction::NorthEast  // Top-right corner
+                } else if portal.node.x == cluster_x_tiles && portal.node.y == cluster_max_y {
+                    Direction::NorthWest  // Top-left corner
+                } else if portal.node.x == cluster_max_x && portal.node.y == cluster_y_tiles {
+                    Direction::SouthEast  // Bottom-right corner
+                } else if portal.node.x == cluster_x_tiles && portal.node.y == cluster_y_tiles {
+                    Direction::SouthWest  // Bottom-left corner
                 } else if portal.node.y == cluster_max_y {
-                    Direction::North
-                } else if portal.node.x == cluster_x_tiles {
-                    Direction::West
+                    Direction::North  // Top edge
+                } else if portal.node.y == cluster_y_tiles {
+                    Direction::South  // Bottom edge
                 } else if portal.node.x == cluster_max_x {
-                    Direction::East
+                    Direction::East  // Right edge
+                } else if portal.node.x == cluster_x_tiles {
+                    Direction::West  // Left edge
                 } else {
-                    continue;
+                    continue; // Portal not on this cluster's boundary
                 };
                 
                 let portal_world = flow_field.grid_to_world(portal.node.x, portal.node.y);
@@ -301,7 +319,7 @@ impl HierarchicalGraph {
                         // Find the nearest region and use its island
                         // This handles cases where portals are on cluster boundaries near obstacles
                         let mut nearest_island = None;
-                        let mut min_distance_sq = f32::MAX;
+                        let mut min_distance_sq = 1_000_000.0; // Large enough for pathfinding, won't overflow
                         
                         for region_opt in &cluster.regions[0..cluster.region_count] {
                             if let Some(region) = region_opt {
@@ -472,6 +490,81 @@ impl HierarchicalGraph {
                     }
                     if let Some(sx) = start_segment {
                         super::cluster::create_portal_horizontal(self, sx, max_x - 1, y1, y2, cx, cy, cx, cy + 1);
+                    }
+                }
+            }
+            
+            // Diagonal portals at cluster corners
+            // Each of the 4 clusters at a corner gets its own diagonal portal (like edge portals)
+            // But there are only 2 diagonal paths: NE-SW and NW-SE
+            
+            for cy in 0..height_clusters.saturating_sub(1) {
+                for cx in 0..width_clusters.saturating_sub(1) {
+                    // Four clusters meet at this corner area
+                    // Each cluster needs a portal just inside its own boundary
+                    
+                    // Check if the corner area is walkable (center of the 2x2 corner area)
+                    let check_x = (cx + 1) * CLUSTER_SIZE;
+                    let check_y = (cy + 1) * CLUSTER_SIZE;
+                    if check_x >= flow_field.width || check_y >= flow_field.height {
+                        continue;
+                    }
+                    
+                    // Check multiple tiles around corner for walkability
+                    let mut walkable = false;
+                    for dx in 0..2 {
+                        for dy in 0..2 {
+                            let x = check_x.saturating_sub(1) + dx;
+                            let y = check_y.saturating_sub(1) + dy;
+                            if x < flow_field.width && y < flow_field.height {
+                                let idx = flow_field.get_index(x, y);
+                                if flow_field.cost_field[idx] != 255 {
+                                    walkable = true;
+                                }
+                            }
+                        }
+                    }
+                    if !walkable {
+                        continue;
+                    }
+                    
+                    // Path 1: NE-SW diagonal
+                    // Cluster (cx, cy) NE corner connects to Cluster (cx+1, cy+1) SW corner
+                    let ne_x = (cx + 1) * CLUSTER_SIZE - 1;  // Max x of cluster (cx, cy)
+                    let ne_y = (cy + 1) * CLUSTER_SIZE - 1;  // Max y of cluster (cx, cy)
+                    let sw_x = (cx + 1) * CLUSTER_SIZE;      // Min x of cluster (cx+1, cy+1)
+                    let sw_y = (cy + 1) * CLUSTER_SIZE;      // Min y of cluster (cx+1, cy+1)
+                    
+                    // Only create if both positions are in bounds and walkable
+                    if ne_x < flow_field.width && ne_y < flow_field.height &&
+                       sw_x < flow_field.width && sw_y < flow_field.height {
+                        let idx_ne = flow_field.get_index(ne_x, ne_y);
+                        let idx_sw = flow_field.get_index(sw_x, sw_y);
+                        if flow_field.cost_field[idx_ne] != 255 && flow_field.cost_field[idx_sw] != 255 {
+                            super::cluster::create_portal_diagonal(
+                                self, ne_x, ne_y, cx, cy,
+                                sw_x, sw_y, cx + 1, cy + 1,
+                            );
+                        }
+                    }
+                    
+                    // Path 2: NW-SE diagonal  
+                    // Cluster (cx+1, cy) NW corner connects to Cluster (cx, cy+1) SE corner
+                    let nw_x = (cx + 1) * CLUSTER_SIZE;      // Min x of cluster (cx+1, cy)
+                    let nw_y = (cy + 1) * CLUSTER_SIZE - 1;  // Max y of cluster (cx+1, cy)
+                    let se_x = (cx + 1) * CLUSTER_SIZE - 1;  // Max x of cluster (cx, cy+1)
+                    let se_y = (cy + 1) * CLUSTER_SIZE;      // Min y of cluster (cx, cy+1)
+                    
+                    if nw_x < flow_field.width && nw_y < flow_field.height &&
+                       se_x < flow_field.width && se_y < flow_field.height {
+                        let idx_nw = flow_field.get_index(nw_x, nw_y);
+                        let idx_se = flow_field.get_index(se_x, se_y);
+                        if flow_field.cost_field[idx_nw] != 255 && flow_field.cost_field[idx_se] != 255 {
+                            super::cluster::create_portal_diagonal(
+                                self, nw_x, nw_y, cx + 1, cy,
+                                se_x, se_y, cx, cy + 1,
+                            );
+                        }
                     }
                 }
             }

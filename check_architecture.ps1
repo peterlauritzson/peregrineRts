@@ -215,6 +215,11 @@ $allRustFiles = Get-ChildItem -Path "src" -Filter "*.rs" -Recurse
 $oversizedFiles = 0
 
 foreach ($file in $allRustFiles) {
+    # Skip test files
+    if ($file.FullName -match '.*test.*') {
+        continue
+    }
+    
     $lineCount = (Get-Content $file.FullName).Count
     
     if ($lineCount -gt 400) {

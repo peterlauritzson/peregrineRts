@@ -3,40 +3,15 @@ use bevy::state::app::StatesPlugin;
 use peregrine::game::fixed_math::{FixedVec2, FixedNum};
 use peregrine::game::simulation::{SimulationPlugin, MapFlowField, SimPosition, SimPositionPrev, SimVelocity, SimAcceleration, Collider, StaticObstacle, CachedNeighbors, BoidsNeighborCache, OccupiedCell, layers};
 use peregrine::game::config::GameConfigPlugin;
-use peregrine::game::pathfinding::{PathfindingPlugin, PathRequest, Path, GraphBuildState, GraphBuildStep};
+use peregrine::game::pathfinding::{PathfindingPlugin, PathRequest, Path, HierarchicalGraph};
 use peregrine::game::loading::LoadingProgress;
 use peregrine::game::GameState;
 
 /// Helper function to run incremental graph build to completion in tests
 fn build_graph_incremental(app: &mut App) {
-    // Insert LoadingProgress resource if not already present
-    if !app.world().contains_resource::<LoadingProgress>() {
-        app.world_mut().insert_resource(LoadingProgress::default());
-    }
-    
-    // Reset build state to start fresh
-    app.world_mut().resource_mut::<GraphBuildState>().step = GraphBuildStep::NotStarted;
-    
-    // Set state to Loading to enable incremental build system
-    app.world_mut().resource_mut::<NextState<GameState>>().set(GameState::Loading);
-    app.update(); // Apply state change - this triggers OnEnter(Loading) which needs LoadingProgress
-    
-    // Run incremental build until done (max 1000 iterations to prevent infinite loop)
-    for _i in 0..1000 {
-        app.world_mut().run_schedule(Update);
-        
-        let step = app.world().resource::<GraphBuildState>().step;
-        if step == GraphBuildStep::Done {
-            break;
-        }
-    }
-    
-    let step = app.world().resource::<GraphBuildState>().step;
-    assert_eq!(step, GraphBuildStep::Done, "Graph build should complete");
-    
-    // Return to InGame state
-    app.world_mut().resource_mut::<NextState<GameState>>().set(GameState::InGame);
-    app.update(); // Apply state change
+    // Build the graph from the current MapFlowField
+    let flow_field = app.world().resource::<MapFlowField>().0.clone();
+    app.world_mut().resource_mut::<HierarchicalGraph>().build_graph(&flow_field, false);
 }
 
 #[test]
@@ -121,7 +96,6 @@ fn test_pathfinding_around_wall() {
     // 4. Send Path Request
     app.world_mut().write_message(PathRequest {
         entity: unit_entity,
-        start: start_pos,
         goal: goal_pos,
     });
 
@@ -161,7 +135,7 @@ fn test_pathfinding_around_wall() {
                             i, pos, current_index, waypoints.len(), 
                             waypoints.get(*current_index));
                     },
-                    Path::Hierarchical { goal, goal_cluster, goal_island: _ } => {
+                    Path::Hierarchical { goal, goal_cluster, goal_region: _, goal_island: _ } => {
                         println!("Step {}: Unit at {:?}, H-Path to cluster {:?}, Final Goal: {:?}", 
                             i, pos, goal_cluster, goal);
                     }
@@ -254,7 +228,6 @@ fn test_pathfinding_close_target_line_of_sight() {
 
     app.world_mut().write_message(PathRequest {
         entity: unit_entity,
-        start: start_pos,
         goal: goal_pos,
     });
 
@@ -360,7 +333,6 @@ fn test_pathfinding_close_target_obstacle() {
 
     app.world_mut().write_message(PathRequest {
         entity: unit_entity,
-        start: start_pos,
         goal: goal_pos,
     });
 

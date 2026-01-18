@@ -630,6 +630,7 @@ fn profiled_process_path_requests(
             commands.entity(request.entity).insert(peregrine::game::pathfinding::Path::Hierarchical {
                 goal: request.goal,
                 goal_cluster,
+                goal_region: None, // Will be determined during movement
                 goal_island: peregrine::game::pathfinding::IslandId(0), // Default to island 0
             });
         }
@@ -661,7 +662,6 @@ fn generate_pathfinding_requests(
                     
                     writer.write(PathRequest {
                         entity,
-                        start: FixedVec2::ZERO, // System will use actual position
                         goal: FixedVec2::new(
                             FixedNum::from_num(goal_x),
                             FixedNum::from_num(goal_y),
@@ -694,7 +694,6 @@ fn generate_pathfinding_requests(
                     if let Some(&entity) = entities.get(idx) {
                         writer.write(PathRequest {
                             entity,
-                            start: FixedVec2::ZERO,
                             goal: common_goal,
                         });
                     }

@@ -48,8 +48,8 @@ pub struct Cluster {
     pub local_routing: [[u8; MAX_REGIONS]; MAX_REGIONS],
     
     /// Neighbor connectivity: [island_id][direction] -> Option<portal_id>
-    /// Direction: 0=North, 1=South, 2=East, 3=West (use Direction enum for type safety)
-    pub neighbor_connectivity: [[Option<usize>; 4]; MAX_ISLANDS],
+    /// Direction: 0=North, 1=South, 2=East, 3=West, 4=NE, 5=NW, 6=SE, 7=SW (use Direction enum for type safety)
+    pub neighbor_connectivity: [[Option<usize>; 8]; MAX_ISLANDS],
 }
 
 impl Cluster {
@@ -61,7 +61,7 @@ impl Cluster {
             islands: [const { None }; MAX_ISLANDS],
             island_count: 0,
             local_routing: [[NO_PATH; MAX_REGIONS]; MAX_REGIONS],
-            neighbor_connectivity: [[None; 4]; MAX_ISLANDS],
+            neighbor_connectivity: [[None; 8]; MAX_ISLANDS],
         }
     }
     
@@ -131,6 +131,40 @@ pub(super) fn create_portal_horizontal(
     });
     
     let cost = FixedNum::from_num(1.0);
+    graph.portal_connections.entry(id1).or_default().push((id2, cost));
+    graph.portal_connections.entry(id2).or_default().push((id1, cost));
+}
+
+/// Create a diagonal portal connecting two clusters at different positions
+pub(super) fn create_portal_diagonal(
+    graph: &mut super::graph::HierarchicalGraph,
+    x1: usize, y1: usize,
+    c1x: usize, c1y: usize,
+    x2: usize, y2: usize,
+    c2x: usize, c2y: usize,
+) {
+    let id1 = graph.next_portal_id;
+    graph.next_portal_id += 1;
+    graph.portals.insert(id1, Portal { 
+        id: id1, 
+        node: Node { x: x1, y: y1 }, 
+        range_min: Node { x: x1, y: y1 },
+        range_max: Node { x: x1, y: y1 },
+        cluster: (c1x, c1y) 
+    });
+
+    let id2 = graph.next_portal_id;
+    graph.next_portal_id += 1;
+    graph.portals.insert(id2, Portal { 
+        id: id2, 
+        node: Node { x: x2, y: y2 }, 
+        range_min: Node { x: x2, y: y2 },
+        range_max: Node { x: x2, y: y2 },
+        cluster: (c2x, c2y) 
+    });
+    
+    // Diagonal distance: sqrt(2) ≈ 1.414
+    let cost = FixedNum::from_num(1.414);
     graph.portal_connections.entry(id1).or_default().push((id2, cost));
     graph.portal_connections.entry(id2).or_default().push((id1, cost));
 }

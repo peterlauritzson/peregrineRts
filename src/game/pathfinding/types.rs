@@ -28,7 +28,7 @@ pub const TORTUOSITY_THRESHOLD: f32 = 3.0;
 /// Value indicating no path exists between two regions (different islands).
 pub const NO_PATH: u8 = 255;
 
-/// Cardinal directions for portal/neighbor connectivity.
+/// Directions for portal/neighbor connectivity (cardinal + diagonal).
 /// 
 /// This enum ensures type-safe direction indexing and prevents documentation/implementation mismatches.
 /// The repr(u8) ensures zero-cost conversion to array indices.
@@ -39,6 +39,10 @@ pub enum Direction {
     South = 1,
     East = 2,
     West = 3,
+    NorthEast = 4,
+    NorthWest = 5,
+    SouthEast = 6,
+    SouthWest = 7,
 }
 
 impl Direction {
@@ -48,12 +52,16 @@ impl Direction {
         self as usize
     }
     
-    /// All four cardinal directions
-    pub const ALL: [Direction; 4] = [
+    /// All eight directions (cardinal + diagonal)
+    pub const ALL: [Direction; 8] = [
         Direction::North,
         Direction::South,
         Direction::East,
         Direction::West,
+        Direction::NorthEast,
+        Direction::NorthWest,
+        Direction::SouthEast,
+        Direction::SouthWest,
     ];
 }
 
@@ -70,6 +78,7 @@ pub enum Path {
     Hierarchical {
         goal: FixedVec2,
         goal_cluster: (usize, usize),
+        goal_region: Option<RegionId>,  // Cached goal region (None if not in any region)
         goal_island: IslandId,
     }
 }
@@ -112,6 +121,9 @@ pub struct Region {
     pub island: IslandId,
     /// Connections to other regions (shared edges/portals)
     pub portals: SmallVec<[RegionPortal; 8]>,
+    /// Whether this region is non-convex or complex (requires special pathfinding)
+    /// Non-convex regions cannot guarantee straight-line movement is obstacle-free
+    pub is_dangerous: bool,
 }
 
 /// A portal connecting two regions within a cluster
