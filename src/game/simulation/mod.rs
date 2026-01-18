@@ -56,7 +56,8 @@ impl Plugin for SimulationPlugin {
             FixedNum::from_num(100.0),
             FixedNum::from_num(100.0),
             &[0.5, 10.0],  // Default entity radii
-            4.0            // Default radius to cell ratio
+            4.0,           // Default radius to cell ratio
+            10_000         // Default max entities (will be overwritten by InitialConfig)
         ));
         app.insert_resource(MapFlowField(Default::default()));
         app.init_resource::<MapStatus>();
@@ -121,7 +122,7 @@ impl Plugin for SimulationPlugin {
             // Integration
             physics::apply_velocity.in_set(SimSet::Integration),
             
-            // Physics
+            // Physics - Spatial Hash (full rebuild every frame)
             systems::update_spatial_hash
                 .in_set(SimSet::Physics)
                 .before(collision::update_neighbor_cache)

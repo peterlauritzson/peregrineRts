@@ -235,7 +235,7 @@ pub struct OccupiedCell {
     pub col: usize,
     /// Cell row
     pub row: usize,
-    /// Index in cell's Vec<Entity> for O(1) removal via swap_remove
+    /// Index in arena entity_storage where this entity is stored
     pub vec_idx: usize,
 }
 

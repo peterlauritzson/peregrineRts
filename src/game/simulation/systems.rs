@@ -23,7 +23,7 @@ use super::physics::seek;
 
 // Re-export systems from submodules
 pub use systems_spatial::{update_spatial_hash, init_flow_field, apply_obstacle_to_flow_field, apply_new_obstacles};
-pub use systems_config::{init_sim_config_from_initial, update_sim_from_runtime_config};
+pub use systems_config::{init_sim_config_from_initial, update_sim_from_runtime_config, SpatialHashRebuilt};
 
 // ============================================================================
 // Tick Management

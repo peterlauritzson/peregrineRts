@@ -61,6 +61,7 @@ pub struct InitialConfig {
     // Spatial Hash Settings (Staggered Multi-Resolution)
     pub spatial_hash_entity_radii: Vec<f32>,
     pub spatial_hash_radius_to_cell_ratio: f32,
+    pub spatial_hash_max_entity_count: usize,  // Maximum entities per grid (pre-allocated capacity)
     
     // Spatial Hash Parallel Updates
     pub spatial_hash_parallel_updates: bool,
@@ -191,6 +192,7 @@ impl Default for InitialConfig {
             pathfinding_build_batch_size: 5,
             spatial_hash_entity_radii: vec![0.5, 10.0, 25.0],
             spatial_hash_radius_to_cell_ratio: 4.0,
+            spatial_hash_max_entity_count: 100_000,  // Default: 100k entities (80MB per grid)
             spatial_hash_parallel_updates: true,
             spatial_hash_regions_per_axis: 10,
         }

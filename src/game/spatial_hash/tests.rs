@@ -1,6 +1,11 @@
 use super::*;
 use crate::game::fixed_math::FixedVec2;
 
+// Helper to create non-placeholder entities for testing
+fn test_entity(id: u32) -> Entity {
+    Entity::from_bits((id as u64) << 32 | 1)
+}
+
 #[test]
 fn test_query_radius_finds_entities_within_range() {
     let mut hash = SpatialHash::new(
@@ -8,6 +13,7 @@ fn test_query_radius_finds_entities_within_range() {
         FixedNum::from_num(100.0),
         &[0.5, 10.0, 25.0],
         4.0,
+        10_000
     );
 
     let entity_a = Entity::from_bits(1);
@@ -40,6 +46,7 @@ fn test_query_radius_excludes_entities_outside_range() {
         FixedNum::from_num(100.0),
         &[0.5, 10.0, 25.0],
         4.0,
+        10_000
     );
 
     let entity_a = Entity::from_bits(1);
@@ -73,6 +80,7 @@ fn test_spatial_hash_excludes_self() {
         FixedNum::from_num(100.0),
         &[0.5, 10.0, 25.0],
         4.0,
+        10_000
     );
 
     let entity = Entity::from_bits(1);
@@ -94,26 +102,34 @@ fn test_spatial_hash_query_finds_neighbors() {
         FixedNum::from_num(100.0),
         &[0.5, 10.0, 25.0],
         4.0,
+        10_000
     );
 
-    let entity_a = Entity::from_bits(1);
-    let entity_b = Entity::from_bits(2);
+    let entity_a = Entity::from_bits(0x0000000100000001); // Non-placeholder entity
+    let entity_b = Entity::from_bits(0x0000000200000001); // Non-placeholder entity
 
     let pos_a = FixedVec2::new(FixedNum::from_num(0.0), FixedNum::from_num(0.0));
     let pos_b = FixedVec2::new(FixedNum::from_num(2.0), FixedNum::from_num(2.0));
 
-    hash.insert(entity_a, pos_a, FixedNum::from_num(0.5));
-    hash.insert(entity_b, pos_b, FixedNum::from_num(0.5));
+    let occupied_a = hash.insert(entity_a, pos_a, FixedNum::from_num(0.5));
+    let occupied_b = hash.insert(entity_b, pos_b, FixedNum::from_num(0.5));
+    
+    println!("Entity A: {:?} at {:?}, occupied: {:?}", entity_a, pos_a, occupied_a);
+    println!("Entity B: {:?} at {:?}, occupied: {:?}", entity_b, pos_b, occupied_b);
+    println!("Size classes: {}", hash.size_classes().len());
+    println!("Total entries: {}", hash.total_entries());
 
     // A should find B but not itself
     let mut results = Vec::new();
     hash.query_radius(entity_a, pos_a, FixedNum::from_num(5.0), &mut results);
+    println!("A's query results: {:?}", results);
     assert_eq!(results.len(), 1, "A should find exactly one neighbor (B)");
     assert_eq!(results[0], entity_b, "A should find B");
 
     // B should find A but not itself
     results.clear();
     hash.query_radius(entity_b, pos_b, FixedNum::from_num(5.0), &mut results);
+    println!("B's query results: {:?}", results);
     assert_eq!(results.len(), 1, "B should find exactly one neighbor (A)");
     assert_eq!(results[0], entity_a, "B should find A");
 }
@@ -125,6 +141,7 @@ fn test_spatial_hash_empty_cell_returns_empty() {
         FixedNum::from_num(100.0),
         &[0.5, 10.0, 25.0],
         4.0,
+        10_000
     );
 
     let entity = Entity::from_bits(1);
@@ -143,6 +160,7 @@ fn test_spatial_hash_boundary_cases() {
         FixedNum::from_num(100.0),
         &[0.5, 10.0, 25.0],
         4.0,
+        10_000
     );
 
     // Test entities at boundaries of the map
@@ -177,6 +195,7 @@ fn test_query_radius_returns_same_results_as_brute_force() {
         FixedNum::from_num(100.0),
         &[0.5, 10.0, 25.0],
         4.0,
+        10_000
     );
 
     // Create multiple entities at various positions
@@ -241,6 +260,7 @@ fn test_get_potential_collisions_excludes_self() {
         FixedNum::from_num(100.0),
         &[0.5, 10.0, 25.0],
         4.0,
+        10_000
     );
 
     let entity = Entity::from_bits(1);
@@ -262,10 +282,11 @@ fn test_get_potential_collisions_includes_all_without_exclusion() {
         FixedNum::from_num(100.0),
         &[0.5, 10.0, 25.0],
         4.0,
+        10_000
     );
 
-    let entity1 = Entity::from_bits(1);
-    let entity2 = Entity::from_bits(2);
+    let entity1 = test_entity(1);
+    let entity2 = test_entity(2);
     let pos = FixedVec2::new(FixedNum::from_num(0.0), FixedNum::from_num(0.0));
 
     hash.insert(entity1, pos, FixedNum::from_num(0.5));
@@ -285,6 +306,7 @@ fn test_get_potential_collisions_finds_neighbors_excludes_self() {
         FixedNum::from_num(100.0),
         &[0.5, 10.0, 25.0],
         4.0,
+        10_000
     );
 
     let entity1 = Entity::from_bits(1);
@@ -303,3 +325,55 @@ fn test_get_potential_collisions_finds_neighbors_excludes_self() {
     assert_eq!(results[0], entity2, "Should find entity2");
     assert!(results.iter().all(|e| *e != entity1), "Should not find self");
 }
+
+#[test]
+fn test_compaction_removes_tombstones() {
+    let mut hash = SpatialHash::new(
+        FixedNum::from_num(100.0),
+        FixedNum::from_num(100.0),
+        &[0.5],
+        4.0,
+        10_000
+    );
+
+    let entities: Vec<_> = (0..10).map(|i| test_entity(i)).collect();
+    let pos = FixedVec2::new(FixedNum::from_num(0.0), FixedNum::from_num(0.0));
+
+    // Insert 10 entities
+    let occupied_cells: Vec<_> = entities.iter()
+        .map(|&e| hash.insert(e, pos, FixedNum::from_num(0.5)))
+        .collect();
+
+    println!("Inserted {} entities", entities.len());
+    println!("Total entries before removal: {}", hash.total_entries());
+
+    // Remove half of them (creates tombstones)
+    for i in 0..5 {
+        hash.remove(entities[i], &occupied_cells[i]);
+    }
+
+    println!("Total entries after removal: {}", hash.total_entries());
+
+    // Check fragmentation before compaction
+    let frag_before = hash.fragmentation_ratio();
+    println!("Fragmentation before compaction: {:.1}%", frag_before * 100.0);
+    assert!(frag_before > 0.0, "Should have fragmentation after removals");
+
+    // Compact
+    let compacted = hash.compact_if_fragmented(0.0); // Threshold 0 to force compaction
+    println!("Compaction performed: {}", compacted);
+
+    // Check fragmentation after compaction
+    let frag_after = hash.fragmentation_ratio();
+    println!("Fragmentation after compaction: {:.1}%", frag_after * 100.0);
+    println!("Total entries after compaction: {}", hash.total_entries());
+
+    // Verify remaining entities are still queryable
+    let mut results = Vec::new();
+    hash.get_potential_collisions(pos, FixedNum::from_num(10.0), None, &mut results);
+    println!("Query results: {} entities found", results.len());
+    
+    assert_eq!(frag_after, 0.0, "Fragmentation should be 0 after compaction");
+    assert_eq!(results.len(), 5, "Should still find the 5 non-removed entities");
+}
+

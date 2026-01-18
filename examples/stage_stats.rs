@@ -24,6 +24,7 @@ fn main() {
         FixedNum::from_num(map_size),
         &[0.5, 10.0],  // Expected entity sizes
         4.0,  // radius to cell ratio
+        10_000,  // 10k entity capacity for example
     ));
     
     app.insert_resource(SimConfig {

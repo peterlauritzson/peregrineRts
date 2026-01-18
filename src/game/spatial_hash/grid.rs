@@ -1,10 +1,32 @@
 use bevy::prelude::*;
 use crate::game::fixed_math::{FixedNum, FixedVec2};
 
-/// One grid in a staggered pair
+/// Tracks which entities belong to a cell in the arena storage
+#[derive(Debug, Clone, Copy)]
+pub struct CellRange {
+    pub start: usize,  // Index into entity_storage
+    pub count: usize,  // Number of entities in this cell
+}
+
+impl CellRange {
+    pub fn new() -> Self {
+        Self { start: 0, count: 0 }
+    }
+    
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+}
+
+/// One grid in a staggered pair using arena-based storage
 #[derive(Debug, Clone)]
 pub struct StaggeredGrid {
-    cells: Vec<Vec<Entity>>,
+    /// ARENA: One big pre-allocated Vec for all entities in this grid
+    entity_storage: Vec<Entity>,
+    
+    /// METADATA: Each cell tracks which range of entity_storage it owns
+    pub cell_ranges: Vec<CellRange>,
+    
     pub cols: usize,
     pub rows: usize,
     cell_size: FixedNum,
@@ -15,15 +37,34 @@ pub struct StaggeredGrid {
     half_map_width: FixedNum,
     half_map_height: FixedNum,
     half_cell: FixedNum,  // 0.5 for cell center calculations
+    
+    /// Current number of entities stored in entity_storage
+    entity_count: usize,
 }
 
 impl StaggeredGrid {
     pub fn new(map_width: FixedNum, map_height: FixedNum, cell_size: FixedNum, offset: FixedVec2) -> Self {
+        Self::with_capacity(map_width, map_height, cell_size, offset, 10_000_000)
+    }
+    
+    pub fn with_capacity(
+        map_width: FixedNum, 
+        map_height: FixedNum, 
+        cell_size: FixedNum, 
+        offset: FixedVec2,
+        max_entities: usize,
+    ) -> Self {
         let cols = (map_width / cell_size).ceil().to_num::<usize>() + 2;  // Extra padding
         let rows = (map_height / cell_size).ceil().to_num::<usize>() + 2;
+        let num_cells = cols * rows;
         
         Self {
-            cells: vec![Vec::new(); cols * rows],
+            // Pre-allocate entity storage to max capacity (zero allocation guarantee)
+            entity_storage: Vec::with_capacity(max_entities),
+            
+            // One range per cell
+            cell_ranges: vec![CellRange::new(); num_cells],
+            
             cols,
             rows,
             cell_size,
@@ -33,6 +74,7 @@ impl StaggeredGrid {
             half_map_width: map_width / FixedNum::from_num(2.0),
             half_map_height: map_height / FixedNum::from_num(2.0),
             half_cell: FixedNum::from_num(0.5),
+            entity_count: 0,
         }
     }
     
@@ -56,48 +98,133 @@ impl StaggeredGrid {
         FixedVec2::new(center_x - self.half_map_width, center_y - self.half_map_height)
     }
     
-    /// Insert entity into cell and return Vec index
+    /// Insert entity into cell (appends to entity_storage)
+    /// Returns the index in entity_storage where entity was placed
+    /// 
+    /// NOTE: With full rebuild every frame, ranges are always contiguous.
+    /// Each cell's range extends as we append entities to that cell.
     pub fn insert_entity(&mut self, col: usize, row: usize, entity: Entity) -> usize {
-        let idx = row * self.cols + col;
+        let cell_idx = row * self.cols + col;
+        
         // Bounds check to prevent crashes
-        if idx >= self.cells.len() {
-            error!("insert_entity: idx {} out of bounds (cells.len={}), col={}, row={}, cols={}", 
-                   idx, self.cells.len(), col, row, self.cols);
-            // Clamp to last valid cell as fallback
-            let idx = self.cells.len().saturating_sub(1);
-            let vec_idx = self.cells[idx].len();
-            self.cells[idx].push(entity);
-            return vec_idx;
+        if cell_idx >= self.cell_ranges.len() {
+            error!(
+                "insert_entity: cell_idx {} out of bounds (cell_ranges.len={}), col={}, row={}, cols={}", 
+                cell_idx, self.cell_ranges.len(), col, row, self.cols
+            );
+            return usize::MAX;
         }
-        let vec_idx = self.cells[idx].len();
-        self.cells[idx].push(entity);
-        vec_idx
+        
+        // Check capacity before push (zero-allocation guarantee)
+        if self.entity_storage.len() >= self.entity_storage.capacity() {
+            #[cfg(debug_assertions)]
+            panic!(
+                "StaggeredGrid entity_storage overflow! {} >= capacity {}", 
+                self.entity_storage.len(), 
+                self.entity_storage.capacity()
+            );
+            
+            #[cfg(not(debug_assertions))]
+            {
+                warn!("StaggeredGrid entity_storage overflow - insertion dropped");
+                return usize::MAX;
+            }
+        }
+        
+        // Append entity to storage
+        let storage_idx = self.entity_storage.len();
+        self.entity_storage.push(entity);
+        self.entity_count += 1;
+        
+        // Update cell range
+        // With full rebuild, ranges are always contiguous - just extend the range
+        let range = &mut self.cell_ranges[cell_idx];
+        if range.count == 0 {
+            // First entity in this cell
+            range.start = storage_idx;
+            range.count = 1;
+        } else {
+            // Cell already has entities - should be immediately before this in storage
+            // (because we're rebuilding in order)
+            range.count += 1;
+        }
+        
+        storage_idx
     }
     
-    /// Remove entity from cell using Vec index (O(1) swap_remove)
-    /// Returns Some(swapped_entity) if an entity was swapped to this index
-    pub fn remove_entity(&mut self, col: usize, row: usize, vec_idx: usize) -> Option<Entity> {
-        let idx = row * self.cols + col;
-        if idx >= self.cells.len() {
-            error!("remove_entity: idx {} out of bounds (cells.len={}), col={}, row={}, cols={}", 
-                   idx, self.cells.len(), col, row, self.cols);
+    /// Remove entity from cell by searching for it in the cell's range
+    /// This marks the entity as "removed" by replacing it with a tombstone (Entity::PLACEHOLDER)
+    /// Returns Some(true) if removal succeeded
+    pub fn remove_entity(&mut self, col: usize, row: usize, entity: Entity) -> Option<bool> {
+        let cell_idx = row * self.cols + col;
+        
+        if cell_idx >= self.cell_ranges.len() {
+            warn!(
+                "remove_entity: cell_idx {} out of bounds (cell_ranges.len={}), col={}, row={}, cols={}", 
+                cell_idx, self.cell_ranges.len(), col, row, self.cols
+            );
             return None;
         }
-        if vec_idx < self.cells[idx].len() {
-            self.cells[idx].swap_remove(vec_idx);
-            // If we swapped, return the entity now at vec_idx
-            if vec_idx < self.cells[idx].len() {
-                Some(self.cells[idx][vec_idx])
-            } else {
-                None
+        
+        let range = &self.cell_ranges[cell_idx];
+        if range.count == 0 {
+            return None;
+        }
+        
+        // Search for entity within the cell's range
+        let end = range.start + range.count;
+        if end > self.entity_storage.len() {
+            warn!(
+                "remove_entity: range.start {} + range.count {} exceeds storage len {}", 
+                range.start, range.count, self.entity_storage.len()
+            );
+            return None;
+        }
+        
+        for i in range.start..end {
+            if self.entity_storage[i] == entity {
+                // Mark as tombstone
+                self.entity_storage[i] = Entity::PLACEHOLDER;
+                self.entity_count -= 1;
+                
+                // NOTE: We DON'T decrement range.count here!
+                // The range still spans the full area including tombstones.
+                // Queries filter tombstones, and compaction will shrink the range properly.
+                
+                return Some(true);
             }
+        }
+        
+        // Entity not found in this cell
+        None
+    }
+    
+    /// Get all entities in a cell (returns slice of entity_storage)
+    /// NOTE: May contain Entity::PLACEHOLDER tombstones - caller must filter
+    pub fn get_cell_entities(&self, col: usize, row: usize) -> &[Entity] {
+        let cell_idx = row * self.cols + col;
+        
+        if cell_idx >= self.cell_ranges.len() {
+            return &[];
+        }
+        
+        let range = &self.cell_ranges[cell_idx];
+        if range.count == 0 {
+            return &[];
+        }
+        
+        // Return slice of entity_storage
+        let end = range.start + range.count;
+        if end <= self.entity_storage.len() {
+            &self.entity_storage[range.start..end]
         } else {
-            None
+            &[]
         }
     }
     
     /// Get all cells within radius of position
-    pub fn cells_in_radius(&self, pos: FixedVec2, radius: FixedNum) -> Vec<&Vec<Entity>> {
+    /// Returns iterator-friendly structure for querying
+    pub fn cells_in_radius(&self, pos: FixedVec2, radius: FixedNum) -> Vec<(usize, usize)> {
         let mut result = Vec::new();
         
         let half_w = self.map_width / FixedNum::from_num(2.0);
@@ -115,10 +242,7 @@ impl StaggeredGrid {
         
         for row in min_row..=max_row {
             for col in min_col..=max_col {
-                let idx = row * self.cols + col;
-                if idx < self.cells.len() {
-                    result.push(&self.cells[idx]);
-                }
+                result.push((col, row));
             }
         }
         
@@ -126,13 +250,85 @@ impl StaggeredGrid {
     }
     
     pub fn clear(&mut self) {
-        for cell in &mut self.cells {
-            cell.clear();
+        // Clear entity storage (doesn't deallocate - keeps capacity)
+        self.entity_storage.clear();
+        self.entity_count = 0;
+        
+        // Reset all cell ranges
+        for range in &mut self.cell_ranges {
+            range.start = 0;
+            range.count = 0;
         }
     }
     
     pub fn total_entries(&self) -> usize {
-        self.cells.iter().map(|cell| cell.len()).sum()
+        self.entity_count
+    }
+    
+    /// Calculate fragmentation ratio (tombstones / total storage)
+    pub fn fragmentation_ratio(&self) -> f32 {
+        if self.entity_storage.is_empty() {
+            return 0.0;
+        }
+        
+        let tombstones = self.entity_storage.iter()
+            .filter(|&&e| e == Entity::PLACEHOLDER)
+            .count();
+        
+        tombstones as f32 / self.entity_storage.len() as f32
+    }
+    
+    /// Get storage usage ratio (current size / capacity)
+    pub fn storage_usage_ratio(&self) -> f32 {
+        let capacity = self.entity_storage.capacity();
+        if capacity == 0 {
+            return 0.0;
+        }
+        self.entity_storage.len() as f32 / capacity as f32
+    }
+    
+    /// Compact the entity storage by removing tombstones
+    /// This is the "cold path" that runs asynchronously
+    pub fn compact(&mut self) {
+        if self.entity_storage.is_empty() {
+            return;
+        }
+        
+        // Build new compacted storage
+        let mut new_storage = Vec::with_capacity(self.entity_count);
+        let mut new_ranges = vec![CellRange::new(); self.cell_ranges.len()];
+        
+        // Rebuild storage and ranges without tombstones
+        for cell_idx in 0..self.cell_ranges.len() {
+            let range = &self.cell_ranges[cell_idx];
+            if range.count == 0 {
+                continue;
+            }
+            
+            let new_start = new_storage.len();
+            let mut new_count = 0;
+            
+            // Copy non-tombstone entities
+            let end = range.start + range.count;
+            if end <= self.entity_storage.len() {
+                for i in range.start..end {
+                    let entity = self.entity_storage[i];
+                    if entity != Entity::PLACEHOLDER {
+                        new_storage.push(entity);
+                        new_count += 1;
+                    }
+                }
+            }
+            
+            new_ranges[cell_idx] = CellRange {
+                start: new_start,
+                count: new_count,
+            };
+        }
+        
+        // Replace old storage with compacted version
+        self.entity_storage = new_storage;
+        self.cell_ranges = new_ranges;
     }
 }
 
@@ -147,12 +343,33 @@ pub struct SizeClass {
 
 impl SizeClass {
     pub fn new(map_width: FixedNum, map_height: FixedNum, cell_size: FixedNum) -> Self {
+        Self::with_capacity(map_width, map_height, cell_size, 10_000_000)
+    }
+    
+    pub fn with_capacity(
+        map_width: FixedNum, 
+        map_height: FixedNum, 
+        cell_size: FixedNum,
+        max_entities: usize,
+    ) -> Self {
         let half_cell = cell_size / FixedNum::from_num(2.0);
         
         Self {
             cell_size,
-            grid_a: StaggeredGrid::new(map_width, map_height, cell_size, FixedVec2::ZERO),
-            grid_b: StaggeredGrid::new(map_width, map_height, cell_size, FixedVec2::new(half_cell, half_cell)),
+            grid_a: StaggeredGrid::with_capacity(
+                map_width, 
+                map_height, 
+                cell_size, 
+                FixedVec2::ZERO,
+                max_entities,
+            ),
+            grid_b: StaggeredGrid::with_capacity(
+                map_width, 
+                map_height, 
+                cell_size, 
+                FixedVec2::new(half_cell, half_cell),
+                max_entities,
+            ),
             entity_count: 0,
         }
     }
@@ -166,5 +383,15 @@ impl SizeClass {
     pub fn total_entries(&self) -> usize {
         self.grid_a.total_entries() + self.grid_b.total_entries()
     }
+    
+    /// Compact both grids to remove tombstones
+    pub fn compact(&mut self) {
+        self.grid_a.compact();
+        self.grid_b.compact();
+    }
+    
+    /// Calculate average fragmentation across both grids
+    pub fn fragmentation_ratio(&self) -> f32 {
+        (self.grid_a.fragmentation_ratio() + self.grid_b.fragmentation_ratio()) / 2.0
+    }
 }
-

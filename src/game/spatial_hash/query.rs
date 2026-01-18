@@ -23,9 +23,11 @@ impl SpatialHash {
             
             // Query Grid A
             let cells_a = size_class.grid_a.cells_in_radius(pos, query_radius);
-            for cell in cells_a {
-                for &entity in cell {
-                    if Some(entity) != exclude_entity && seen.insert(entity) {
+            for (col, row) in cells_a {
+                let entities = size_class.grid_a.get_cell_entities(col, row);
+                for &entity in entities {
+                    // Filter out tombstones and excluded entity
+                    if entity != Entity::PLACEHOLDER && Some(entity) != exclude_entity && seen.insert(entity) {
                         out_entities.push(entity);
                     }
                 }
@@ -33,9 +35,11 @@ impl SpatialHash {
             
             // Query Grid B
             let cells_b = size_class.grid_b.cells_in_radius(pos, query_radius);
-            for cell in cells_b {
-                for &entity in cell {
-                    if Some(entity) != exclude_entity && seen.insert(entity) {
+            for (col, row) in cells_b {
+                let entities = size_class.grid_b.get_cell_entities(col, row);
+                for &entity in entities {
+                    // Filter out tombstones and excluded entity
+                    if entity != Entity::PLACEHOLDER && Some(entity) != exclude_entity && seen.insert(entity) {
                         out_entities.push(entity);
                     }
                 }

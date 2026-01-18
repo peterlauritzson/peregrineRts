@@ -11,12 +11,17 @@ use crate::game::spatial_hash::SpatialHash;
 
 use crate::game::simulation::resources::*;
 
+/// Marker resource indicating spatial hash was rebuilt (clear all OccupiedCell components)
+#[derive(Resource)]
+pub struct SpatialHashRebuilt;
+
 /// Initialize SimConfig from InitialConfig at startup
 pub fn init_sim_config_from_initial(
     mut fixed_time: ResMut<Time<Fixed>>,
     mut sim_config: ResMut<SimConfig>,
     mut spatial_hash: ResMut<SpatialHash>,
     initial_config: Option<Res<InitialConfig>>,
+    mut commands: Commands,
 ) {
     info!("Initializing SimConfig from InitialConfig (lightweight startup init)");
     
@@ -77,7 +82,13 @@ pub fn init_sim_config_from_initial(
         sim_config.map_height,
         &config.spatial_hash_entity_radii,
         config.spatial_hash_radius_to_cell_ratio,
+        config.spatial_hash_max_entity_count,
     );
+    
+    // CRITICAL: When spatial hash is resized, all OccupiedCell components become invalid
+    // Remove them so entities get re-inserted fresh on next update
+    commands.remove_resource::<SpatialHashRebuilt>();
+    commands.insert_resource(SpatialHashRebuilt);
     
     info!("SimConfig initialized with map size: {}x{}", 
           sim_config.map_width.to_num::<f32>(), sim_config.map_height.to_num::<f32>());

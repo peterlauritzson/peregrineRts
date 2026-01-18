@@ -13,62 +13,53 @@ use crate::game::structures::{FlowField, CELL_SIZE};
 
 use crate::game::simulation::components::*;
 use crate::game::simulation::resources::*;
+use super::systems_config::SpatialHashRebuilt;
 
 // ============================================================================
 // Spatial Hash
 // ============================================================================
 
 /// Update spatial hash with entity positions
+/// Uses full rebuild every frame for consistent performance and zero fragmentation
 pub fn update_spatial_hash(
     mut spatial_hash: ResMut<SpatialHash>,
-    mut query: Query<(Entity, &SimPosition, &Collider, &mut OccupiedCell), Without<StaticObstacle>>,
-    new_entities: Query<(Entity, &SimPosition, &Collider), Without<OccupiedCell>>,
+    query: Query<(Entity, &SimPosition, &Collider), Without<StaticObstacle>>,
     mut commands: Commands,
     _sim_config: Res<SimConfig>,  // Keep for signature compatibility
-    mut pending_index_updates: Local<Vec<(Entity, usize, usize, usize)>>,
+    rebuilt: Option<Res<SpatialHashRebuilt>>,
 ) {
-    pending_index_updates.clear();
-    
-    
-    // Handle entities that don't have OccupiedCell yet (first time in spatial hash)
-    for (entity, pos, collider) in new_entities.iter() {
-        // Insert entity into spatial hash (automatically classifies by size and picks optimal grid)
-        let occupied = spatial_hash.insert(entity, pos.0, collider.radius);
-        commands.entity(entity).insert(occupied);
+    // If spatial hash was rebuilt (e.g., map resize), just clear the marker
+    if rebuilt.is_some() {
+        commands.remove_resource::<SpatialHashRebuilt>();
+        info!("Spatial hash rebuilt - will repopulate this frame");
     }
     
-    // Collect index updates needed for swapped entities (avoid double-borrow)
+    // FULL REBUILD: Clear and repopulate spatial hash every frame
+    // This is the correct approach per design doc: "Rebuilt every physics tick"
+    //
+    // Benefits:
+    // - Zero fragmentation (no tombstones)
+    // - Consistent performance (no spikes from compaction)
+    // - Simple and correct (no complex incremental update logic)
+    // - Efficient with arena storage (just reset ranges, reuse storage)
+    //
+    // Cost: O(N) where N = entity count, but very fast (append-only with pre-allocated storage)
     
-    // Handle dynamic entities - check if they should update cells
-    for (entity, pos, _collider, mut occupied_cell) in query.iter_mut() {
-        // Check if entity moved closer to opposite grid
-        // Note: spatial_hash.update() internally handles remove + insert
-        if let Some((new_occupied, swapped_entity)) = spatial_hash.update_with_swap(entity, pos.0, &occupied_cell) {
-            // Entity changed cells - check if anything was swapped
-            if let Some(swapped) = swapped_entity {
-                // Queue index update for swapped entity
-                pending_index_updates.push((
-                    swapped,
-                    occupied_cell.col,
-                    occupied_cell.row,
-                    occupied_cell.vec_idx,
-                ));
-            }
-            
-            *occupied_cell = new_occupied;
-        }
-    }
+    spatial_hash.clear();
     
-    // Second pass: Apply pending index updates to swapped entities
-    for (swapped_entity, col, row, new_idx) in pending_index_updates.iter() {
-        if let Ok((_, _, _, mut swapped_occupied)) = query.get_mut(*swapped_entity) {
-            // Update the vec_idx if this is the right cell
-            if swapped_occupied.col == *col && swapped_occupied.row == *row {
-                swapped_occupied.vec_idx = *new_idx;
-            }
-        }
+    for (entity, pos, collider) in query.iter() {
+        // Insert fresh - no OccupiedCell component needed anymore
+        spatial_hash.insert(entity, pos.0, collider.radius);
     }
 }
+
+// ============================================================================
+// Spatial Hash Compaction
+// ============================================================================
+// ============================================================================
+// NOTE: Compaction is NO LONGER NEEDED with full rebuild every frame!
+// The spatial hash is completely rebuilt each tick, so there's zero fragmentation.
+// ============================================================================
 
 // ============================================================================
 // Flow Field Management

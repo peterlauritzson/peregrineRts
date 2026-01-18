@@ -6,7 +6,7 @@ mod query;
 #[cfg(test)]
 mod tests;
 
-pub use grid::{StaggeredGrid, SizeClass};
+pub use grid::{StaggeredGrid, SizeClass, CellRange};
 use crate::game::fixed_math::FixedVec2;
 use crate::game::simulation::components::OccupiedCell;
 
@@ -58,11 +58,13 @@ impl SpatialHash {
     /// * `map_height` - Height of the game map
     /// * `entity_radii` - Expected entity sizes in game (e.g., [0.5, 10.0, 25.0])
     /// * `radius_to_cell_ratio` - Desired ratio between cell size and entity radius (e.g., 4.0)
+    /// * `max_entity_count` - Maximum entities per grid (pre-allocated capacity)
     pub fn new(
         map_width: FixedNum,
         map_height: FixedNum,
         entity_radii: &[f32],
         radius_to_cell_ratio: f32,
+        max_entity_count: usize,
     ) -> Self {
         // Step 1: Determine unique cell sizes needed
         let mut cell_sizes = Vec::new();
@@ -85,7 +87,7 @@ impl SpatialHash {
         
         // Step 2: Create size classes with staggered grids
         let size_classes: Vec<SizeClass> = cell_sizes.iter()
-            .map(|&cell_size| SizeClass::new(map_width, map_height, cell_size))
+            .map(|&cell_size| SizeClass::with_capacity(map_width, map_height, cell_size, max_entity_count))
             .collect();
         
         // Step 3: Build radius-to-class mapping
@@ -103,8 +105,8 @@ impl SpatialHash {
         }
     }
     
-    pub fn resize(&mut self, map_width: FixedNum, map_height: FixedNum, entity_radii: &[f32], radius_to_cell_ratio: f32) {
-        *self = Self::new(map_width, map_height, entity_radii, radius_to_cell_ratio);
+    pub fn resize(&mut self, map_width: FixedNum, map_height: FixedNum, entity_radii: &[f32], radius_to_cell_ratio: f32, max_entity_count: usize) {
+        *self = Self::new(map_width, map_height, entity_radii, radius_to_cell_ratio, max_entity_count);
     }
 
     pub fn clear(&mut self) {
@@ -121,8 +123,8 @@ impl SpatialHash {
         // Count across all grids in all size classes
         self.size_classes.iter()
             .map(|sc| {
-                sc.grid_a.cells_in_radius(FixedVec2::ZERO, self.map_width).iter().filter(|c| !c.is_empty()).count() +
-                sc.grid_b.cells_in_radius(FixedVec2::ZERO, self.map_width).iter().filter(|c| !c.is_empty()).count()
+                sc.grid_a.cell_ranges.iter().filter(|r| !r.is_empty()).count() +
+                sc.grid_b.cell_ranges.iter().filter(|r| !r.is_empty()).count()
             })
             .sum()
     }
@@ -181,7 +183,7 @@ impl SpatialHash {
         let dist_b_sq = (pos - center_b).length_squared();
         
         // Insert into whichever grid is closer
-        let (grid_offset, col, row, vec_idx) = if dist_a_sq < dist_b_sq {
+        let (grid_offset, col, row, storage_idx) = if dist_a_sq < dist_b_sq {
             let idx = size_class.grid_a.insert_entity(col_a, row_a, entity);
             (0, col_a, row_a, idx)
         } else {
@@ -196,13 +198,13 @@ impl SpatialHash {
             grid_offset,
             col,
             row,
-            vec_idx,
+            vec_idx: storage_idx,  // Now stores index into entity_storage arena
         }
     }
     
     /// Remove entity from spatial hash
-    /// Returns Some(swapped_entity) if another entity was swapped to this index
-    pub fn remove(&mut self, occupied: &OccupiedCell) -> Option<Entity> {
+    /// Returns Some(true) if removal succeeded
+    pub fn remove(&mut self, entity: Entity, occupied: &OccupiedCell) -> Option<bool> {
         let size_class = &mut self.size_classes[occupied.size_class as usize];
         
         let grid = if occupied.grid_offset == 0 {
@@ -211,7 +213,7 @@ impl SpatialHash {
             &mut size_class.grid_b
         };
         
-        let removed = grid.remove_entity(occupied.col, occupied.row, occupied.vec_idx);
+        let removed = grid.remove_entity(occupied.col, occupied.row, entity);
         
         if removed.is_some() {
             size_class.entity_count -= 1;
@@ -263,8 +265,8 @@ impl SpatialHash {
         occupied: &OccupiedCell,
     ) -> Option<OccupiedCell> {
         if let Some((new_grid_offset, new_col, new_row)) = self.should_update(pos, occupied) {
-            // Remove from current cell
-            self.remove(occupied);
+            // Remove from current cell (mark as tombstone)
+            self.remove(entity, occupied);
             
             // Insert into new cell
             let size_class = &mut self.size_classes[occupied.size_class as usize];
@@ -274,7 +276,7 @@ impl SpatialHash {
                 &mut size_class.grid_b
             };
             
-            let vec_idx = grid.insert_entity(new_col, new_row, entity);
+            let storage_idx = grid.insert_entity(new_col, new_row, entity);
             size_class.entity_count += 1;
             
             Some(OccupiedCell {
@@ -282,24 +284,24 @@ impl SpatialHash {
                 grid_offset: new_grid_offset,
                 col: new_col,
                 row: new_row,
-                vec_idx,
+                vec_idx: storage_idx,  // Still track for now, but won't rely on it for removal
             })
         } else {
             None
         }
     }
     
-    /// Update entity position in spatial hash, returning both new cell and any swapped entity
-    /// Returns Some((new_occupied_cell, swapped_entity)) if entity changed cells
+    /// Update entity position in spatial hash, returning both new cell and success status
+    /// Returns Some((new_occupied_cell, true)) if entity changed cells
     pub fn update_with_swap(
         &mut self,
         entity: Entity,
         pos: FixedVec2,
         occupied: &OccupiedCell,
-    ) -> Option<(OccupiedCell, Option<Entity>)> {
+    ) -> Option<(OccupiedCell, Option<bool>)> {
         if let Some((new_grid_offset, new_col, new_row)) = self.should_update(pos, occupied) {
-            // Remove from current cell and capture any swapped entity
-            let swapped_entity = self.remove(occupied);
+            // Remove from current cell and capture success status
+            let removed = self.remove(entity, occupied);
             
             // Insert into new cell
             let size_class = &mut self.size_classes[occupied.size_class as usize];
@@ -309,7 +311,7 @@ impl SpatialHash {
                 &mut size_class.grid_b
             };
             
-            let vec_idx = grid.insert_entity(new_col, new_row, entity);
+            let storage_idx = grid.insert_entity(new_col, new_row, entity);
             size_class.entity_count += 1;
             
             Some((
@@ -318,9 +320,9 @@ impl SpatialHash {
                     grid_offset: new_grid_offset,
                     col: new_col,
                     row: new_row,
-                    vec_idx,
+                    vec_idx: storage_idx,
                 },
-                swapped_entity,
+                removed,
             ))
         } else {
             None
@@ -328,7 +330,7 @@ impl SpatialHash {
     }
     
     /// Insert entity into new cell (used by parallel updates)
-    /// Returns the vec_idx where the entity was inserted
+    /// Returns the storage_idx where the entity was inserted
     pub fn insert_into_cell(&mut self, entity: Entity, new_occupied: &OccupiedCell) -> usize {
         let size_class = &mut self.size_classes[new_occupied.size_class as usize];
         let grid = if new_occupied.grid_offset == 0 {
@@ -337,10 +339,57 @@ impl SpatialHash {
             &mut size_class.grid_b
         };
         
-        let vec_idx = grid.insert_entity(new_occupied.col, new_occupied.row, entity);
+        let storage_idx = grid.insert_entity(new_occupied.col, new_occupied.row, entity);
         size_class.entity_count += 1;
-        vec_idx
+        storage_idx
+    }
+    
+    /// Compact all grids in all size classes if fragmentation exceeds threshold
+    /// Returns true if any compaction was performed
+    pub fn compact_if_fragmented(&mut self, fragmentation_threshold: f32) -> bool {
+        let mut compacted = false;
+        
+        for size_class in &mut self.size_classes {
+            let frag_ratio = size_class.fragmentation_ratio();
+            
+            if frag_ratio > fragmentation_threshold {
+                debug!(
+                    "Compacting size class (cell_size={:.1}): fragmentation {:.1}%", 
+                    size_class.cell_size.to_num::<f32>(),
+                    frag_ratio * 100.0
+                );
+                size_class.compact();
+                compacted = true;
+            }
+        }
+        
+        compacted
+    }
+    
+    /// Get total fragmentation ratio across all grids
+    pub fn fragmentation_ratio(&self) -> f32 {
+        if self.size_classes.is_empty() {
+            return 0.0;
+        }
+        
+        let total: f32 = self.size_classes.iter()
+            .map(|sc| sc.fragmentation_ratio())
+            .sum();
+        
+        total / self.size_classes.len() as f32
+    }
+    
+    /// Get storage usage ratio (current storage size / capacity)
+    /// Returns the worst-case (highest) usage across all grids
+    pub fn storage_usage_ratio(&self) -> f32 {
+        let mut max_usage: f32 = 0.0;
+        
+        for size_class in &self.size_classes {
+            let usage_a = size_class.grid_a.storage_usage_ratio();
+            let usage_b = size_class.grid_b.storage_usage_ratio();
+            max_usage = max_usage.max(usage_a).max(usage_b);
+        }
+        
+        max_usage
     }
 }
-
-

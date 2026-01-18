@@ -22,6 +22,7 @@ mod tests {
             FixedNum::from_num(100.0),
             &[0.5, 10.0, 25.0],
             4.0,
+            10_000
         );
         app.insert_resource(spatial_hash);
         
@@ -86,6 +87,7 @@ mod tests {
             FixedNum::from_num(100.0),
             &[0.5, 10.0, 25.0],
             4.0,
+            10_000
         );
         app.insert_resource(spatial_hash);
         
@@ -131,6 +133,7 @@ mod tests {
             FixedNum::from_num(100.0),
             &[0.5, 10.0, 25.0],
             4.0,
+            10_000
         );
         app.insert_resource(spatial_hash);
         
@@ -198,6 +201,7 @@ mod tests {
             FixedNum::from_num(100.0),
             &[0.5, 10.0, 25.0],
             4.0,
+            10_000
         );
         app.insert_resource(spatial_hash);
         
@@ -266,6 +270,7 @@ mod tests {
             FixedNum::from_num(100.0),
             &[0.5, 10.0, 25.0],
             4.0,
+            10_000
         );
         app.insert_resource(spatial_hash);
         
@@ -345,6 +350,7 @@ mod tests {
             FixedNum::from_num(100.0),
             &[0.5, 10.0, 25.0],
             4.0,
+            10_000
         );
         app.insert_resource(spatial_hash);
         
@@ -406,3 +412,4 @@ mod tests {
             "Entity A should only be influenced by nearby units, got {:?}", vel_a);
     }
 }
+

@@ -727,6 +727,7 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
         FixedNum::from_num(map_size),
         &[0.5, 10.0, 25.0],  // Expected entity sizes
         15.0,  // radius to cell ratio
+        (config.unit_count * 2).max(10_000),  // 2x unit count for headroom
     ));
     
     // Add simulation config
