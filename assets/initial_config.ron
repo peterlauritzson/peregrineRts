@@ -64,6 +64,13 @@
     spatial_hash_radius_to_cell_ratio: 10.0,        // cell_size = radius × ratio
     spatial_hash_max_entity_count: 100000,          // Max entities per grid (100k = ~80MB per grid, 3 size classes × 2 grids = ~480MB)
     
+    // Spatial Hash Update Strategy (Performance Scaling)
+    // For <1M entities: Full rebuild every frame is fast and simple
+    // For >1M entities: Incremental updates using swap-based removal + arena over-provisioning
+    spatial_hash_arena_overcapacity_ratio: 1.5,     // 1.5 = 50% extra arena space for incremental updates (e.g., 100k entities = 150k capacity)
+                                                     // Higher = fewer rebuilds but more memory. Range: 1.2-2.0
+                                                     // Only used if update_strategy is Incremental
+    
     // Spatial Hash Parallel Updates (Performance)
     spatial_hash_parallel_updates: false,           // Enable parallel processing (5-10× speedup on multi-core)
     spatial_hash_regions_per_axis: 10,             // 10×10 = 100 regions for load balancing

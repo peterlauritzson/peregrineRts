@@ -66,6 +66,7 @@ struct SizeClass {
 
 struct StaggeredGrid {
     // ARENA: One big preallocated Vec for all entities in this grid
+    // CRITICAL: Vec::with_capacity() at startup, NEVER REALLOCATE during gameplay
     entity_storage: Vec<Entity>,      // 10M capacity = 80MB per grid
     
     // METADATA: Each cell tracks which range of entity_storage it owns
@@ -76,9 +77,120 @@ struct StaggeredGrid {
 
 #[derive(Copy, Clone)]
 struct CellRange {
-    start: usize,  // Index into entity_storage
-    count: usize,  // Number of entities in this cell
+    start_index: usize,    // Index into entity_storage where this cell begins
+    current_count: usize,  // Number of entities in this cell
 }
+
+// Note: For incremental updates (Section 2.8.2), we extend this with:
+// max_index: usize  // Maximum index (exclusive) for overflow detection
+// See the full version in Section 2.8.2 below.
+
+**CRITICAL: Zero-Allocation Query Design**
+
+**⚠️ ABSOLUTE REQUIREMENT: Queries MUST return slice views (`&[Entity]`), NEVER allocate!**
+
+The entire spatial hash architecture is designed around **preallocated memory**. This includes:
+- ✅ Arena storage: Preallocated at startup
+- ✅ Query results: Return **slice views** (`&[Entity]`), NOT owned `Vec<Entity>`
+- ✅ Scratch buffers: Preallocated, cleared and reused
+
+**Rust Memory Types for Arena Storage:**
+
+```rust
+// Option 1: Vec<Entity> - Growable (what we use)
+entity_storage: Vec<Entity>,  // Can push/pop, capacity can grow
+// Initialized: Vec::with_capacity(10_000_000)
+// We NEVER grow it during gameplay (strict capacity limits)
+
+// Option 2: Box<[Entity]> - Fixed-size heap array
+entity_storage: Box<[Entity]>,  // Fixed capacity, immutable size
+// Initialized: vec![Entity::PLACEHOLDER; 10_000_000].into_boxed_slice()
+// Guarantees no reallocation (size is immutable)
+// Downside: Harder to manage partial fills
+
+// Both allow zero-copy slicing: &entity_storage[start..end]
+```
+
+**We use `Vec<Entity>` but treat it like `Box<[Entity]>` with strict capacity enforcement.**
+
+**How Zero-Allocation Queries Work:**
+
+When a query requests entities in a cell, we return a **slice reference** `&[Entity]`:
+
+```rust
+impl StaggeredGrid {
+    /// ZERO-ALLOCATION QUERY: Returns immutable view of cell's entities
+    /// 
+    /// CRITICAL: This returns &[Entity], which is just a fat pointer (16 bytes):
+    ///   - 8 bytes: pointer to data in entity_storage
+    ///   - 8 bytes: length (number of entities)
+    /// 
+    /// NO HEAP ALLOCATION. NO COPYING. Just a view into existing memory.
+    pub fn query_cell(&self, col: usize, row: usize) -> &[Entity] {
+        let cell_idx = row * self.cols + col;
+        let range = &self.cell_ranges[cell_idx];
+        
+        // Slice operator creates a fat pointer view (zero-copy!)
+        &self.entity_storage[range.start_index .. range.start_index + range.current_count]
+        //                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        //                    This is a VIEW, not an allocation!
+        //                    Returns &[Entity] = (ptr: *const Entity, len: usize)
+    }
+}
+```
+
+**What happens at the assembly level:**
+
+```rust
+let entities: &[Entity] = grid.query_cell(10, 20);
+// Assembly (simplified):
+//   1. Calculate offset: cell_idx = row * cols + col
+//   2. Load cell metadata: range = cell_ranges[cell_idx]
+//   3. Calculate pointer: ptr = entity_storage.as_ptr() + range.start_index
+//   4. Return fat pointer: (ptr, range.current_count)
+// 
+// ZERO ALLOCATIONS. Just pointer arithmetic.
+```
+
+**Returning a "view" vs "owned data":**
+
+```rust
+// ❌ WRONG - ALLOCATES MEMORY (kills performance!)
+fn query_cell_WRONG(&self, col: usize, row: usize) -> Vec<Entity> {
+    let range = &self.cell_ranges[cell_idx];
+    
+    // This allocates a NEW Vec and COPIES all entities!
+    self.entity_storage[range.start_index .. range.start_index + range.current_count]
+        .to_vec()  // ❌ HEAP ALLOCATION + MEMCPY
+}
+
+// ✅ CORRECT - ZERO ALLOCATION
+fn query_cell(&self, col: usize, row: usize) -> &[Entity] {
+    let range = &self.cell_ranges[cell_idx];
+    
+    // Slice creates a view - just returns (pointer, length)
+    &self.entity_storage[range.start_index .. range.start_index + range.current_count]
+    // ✅ NO ALLOCATION, NO COPY - just a 16-byte fat pointer
+}
+```
+
+**Why `&[Entity]` is perfect for queries:**
+
+1. **Zero-copy:** Caller gets direct read access to arena memory
+2. **Safe:** Rust borrow checker ensures no one modifies arena while slice exists
+3. **Efficient:** Just two machine words (pointer + length), passed in registers
+4. **Iterator-ready:** `for entity in entities.iter()` works directly
+
+**Performance Impact:**
+
+| Approach | Allocation | Copy Cost | Typical Latency |
+|----------|------------|-----------|-----------------|
+| **Return `&[Entity]`** (correct) | 0 bytes | 0 bytes | **~5ns** (pointer math) |
+| Return `Vec<Entity>` (wrong) | 8-32 bytes (Vec header) | 8 × count bytes | ~500ns + 1ns/entity |
+
+For a cell with 100 entities:
+- `&[Entity]`: **~5ns**
+- `Vec<Entity>`: ~600ns (120× slower) + heap fragmentation
 ```
 
 **Architecture Benefits:**
@@ -99,10 +211,10 @@ entity_storage: [E1, E2, E3, E4, E5, E6, E7, E8, E9, E10, _, _, _, ...]
                  └──────┘  └────────┘  └────┘  └──┘
                  Cell 0    Cell 1      Cell 2  Cell 3
 
-cell_ranges[0]: CellRange { start: 0, count: 3 }
-cell_ranges[1]: CellRange { start: 3, count: 4 }
-cell_ranges[2]: CellRange { start: 7, count: 2 }
-cell_ranges[3]: CellRange { start: 9, count: 1 }
+cell_ranges[0]: CellRange { start_index: 0, current_count: 3 }
+cell_ranges[1]: CellRange { start_index: 3, current_count: 4 }
+cell_ranges[2]: CellRange { start_index: 7, current_count: 2 }
+cell_ranges[3]: CellRange { start_index: 9, current_count: 1 }
 ```
 
 **Benefits:**
@@ -119,17 +231,34 @@ To maintain zero-allocation hot paths, updates are split into three phases:
 **PHASE 1: Hot Path (Every Tick, <1ms target)** - Query Spatial Hash
 ```rust
 // Called by collision detection, boids, AI - MUST be fast
+// 
+// ⚠️⚠️⚠️ CRITICAL: Returns &[Entity] slice view - ZERO ALLOCATION! ⚠️⚠️⚠️
 fn query_radius(&self, pos: FixedVec2, radius: FixedNum) -> &[Entity] {
     let cell_idx = self.pos_to_cell(pos);
     let range = &self.cell_ranges[cell_idx];
     
     // ZERO allocation - just slice the storage array
-    &self.entity_storage[range.start .. range.start + range.count]
+    // This returns a fat pointer (ptr, len) - NO heap allocation!
+    &self.entity_storage[range.start_index .. range.start_index + range.current_count]
 }
 ```
-- No allocation
+- **ZERO ALLOCATION** - `&[Entity]` is just a view (pointer + length)
 - No iteration (direct array slice)
 - Target: <0.5ms for 500k entities
+- **Performance: ~5ns per query** (just pointer arithmetic)
+
+**Why This Is Fast:**
+
+```rust
+// What the CPU actually does:
+// 1. Load cell_idx from function parameter
+// 2. Load cell_ranges[cell_idx] from memory (2 usizes = 16 bytes)
+// 3. Calculate: ptr = entity_storage_base + (start_index * 8)
+// 4. Return: (ptr, current_count)
+// 
+// Total: ~5 CPU instructions, ~5ns on modern hardware
+// NO MALLOC, NO MEMCPY, NO HEAP TOUCHING
+```
 
 **PHASE 2: Warm Path (Every Tick, <5ms target)** - Detect Movement
 ```rust
@@ -191,12 +320,45 @@ fn apply_spatial_updates(
 
 #### 2.2.3 Zero-Allocation Guarantee
 
-**Critical Rules for 10M Entity Scale:**
+**⚠️⚠️⚠️ ABSOLUTE REQUIREMENTS FOR 10M ENTITY SCALE ⚠️⚠️⚠️**
+
+**NO RUNTIME ALLOCATION. PERIOD.**
+
+Every single allocation happens at startup. During gameplay (insert/remove/query), we ONLY:
+- ✅ Write to preallocated buffers
+- ✅ Return slice views (`&[Entity]`) 
+- ✅ Clear and reuse Vecs (`.clear()` keeps capacity)
+
+**NEVER during gameplay:**
+- ❌ Call `Vec::new()` or `Vec::with_capacity()`
+- ❌ Call `.to_vec()`, `.clone()`, or `.collect()` on iterators
+- ❌ Return `Vec<Entity>` from queries (return `&[Entity]` instead!)
+- ❌ Push to Vec without capacity check
+- ❌ Use `SmallVec`, `String`, `HashMap` (unless preallocated)
+
+**Why This Is Non-Negotiable:**
+
+```
+Runtime allocation at 10M entities:
+- Allocation: ~500ns (syscall + metadata)
+- Deallocation: ~200ns (free list update)
+- Memory fragmentation: Unbounded
+- Frame spike: 1000 allocations = 0.7ms (14% of 60 FPS budget!)
+
+With zero-allocation:
+- Write to arena: ~5ns (cache hit)
+- Return slice: ~5ns (pointer math)
+- Clear Vec: ~1ns (set len=0)
+- Frame spike: ZERO
+```
+
+**Critical Rules:**
 
 1. **All Vecs preallocated at startup** based on `max_entities` config
    ```rust
    entity_storage: Vec::with_capacity(max_entities),
    moved_entities: Vec::with_capacity(max_entities * 30 / 100),  // 30% worst case
+   query_results: Vec::with_capacity(max_query_results),
    ```
 
 2. **Use `.clear()` not new Vecs** - clear sets len=0, keeps capacity
@@ -208,7 +370,20 @@ fn apply_spatial_updates(
    scratch.moved_entities.clear();
    ```
 
-3. **Check capacity before `.push()`** to detect overflow
+3. **Queries return slice views `&[Entity]`, NEVER `Vec<Entity>`**
+   ```rust
+   // WRONG - allocates + copies! ❌
+   fn query(&self) -> Vec<Entity> {
+       self.entities[start..end].to_vec()  // ALLOCATION!
+   }
+   
+   // RIGHT - returns view, zero-copy ✅
+   fn query(&self) -> &[Entity] {
+       &self.entities[start..end]  // Just a fat pointer!
+   }
+   ```
+
+4. **Check capacity before `.push()`** to detect overflow
    ```rust
    if vec.len() < vec.capacity() {
        vec.push(item);
@@ -217,12 +392,12 @@ fn apply_spatial_updates(
    }
    ```
 
-4. **Use `Box<[T]>` for truly fixed arrays** that can never grow
+5. **Use `Box<[T]>` for truly fixed arrays** that can never grow
    ```rust
    cell_ranges: Box<[CellRange]>,  // Allocated once, immutable capacity
    ```
 
-5. **Iterator chains that `.collect()` must use preallocated buffers**
+6. **Iterator chains that `.collect()` must use preallocated buffers**
    ```rust
    // WRONG - allocates! ❌
    let results: Vec<Entity> = query.iter().filter(...).collect();
@@ -439,46 +614,163 @@ struct OccupiedCell {
 The arena-based design uses **deferred structural updates** to maintain zero-allocation hot paths:
 
 #### Phase 1: Query (Hot Path - Every Tick)
+
+**⚠️ ZERO-ALLOCATION REQUIREMENT: All queries use preallocated scratch buffers!**
+
+Single-cell queries can return `&[Entity]` slice views directly. Multi-cell queries (radius search) 
+must aggregate results, which requires a **preallocated scratch buffer** that is cleared and reused.
+
+**Single-Cell Query (Returns Slice View):**
 ```rust
-// CRITICAL: Queries are READ-ONLY, never allocate
-// Must query BOTH Grid A and Grid B in each relevant size class
+// ✅ PERFECT - Zero allocation, returns view
+fn query_single_cell(&self, col: usize, row: usize) -> &[Entity] {
+    let cell_idx = row * self.cols + col;
+    let range = &self.cell_ranges[cell_idx];
+    
+    // Just returns a fat pointer (16 bytes) - NO ALLOCATION
+    &self.entity_storage[range.start_index .. range.start_index + range.current_count]
+}
+```
+
+**Multi-Cell Query (Uses Preallocated Scratch Buffer):**
+```rust
+// ✅ CORRECT - Uses preallocated scratch buffer, no runtime allocation
+// 
+// CRITICAL: scratch buffer is preallocated at startup with capacity for worst-case
+// We NEVER allocate during query - just clear() and reuse
 fn query_entities_in_radius(
     spatial_hash: Res<SpatialHash>,
     pos: FixedVec2,
     radius: FixedNum,
     size_class_idx: u8,
-    scratch: &mut Vec<Entity>,
+    scratch: &mut Vec<Entity>,  // Preallocated buffer passed in
 ) -> &[Entity] {
+    // Clear sets len=0 but keeps capacity - NO DEALLOCATION
     scratch.clear();  // O(1), reuse buffer
     
     let size_class = &spatial_hash.size_classes[size_class_idx as usize];
     
-    // Query Grid A
+    // Query Grid A - each cell returns a &[Entity] view
     let cells_a = size_class.grid_a.get_cells_in_radius(pos, radius);
     for cell_idx in cells_a {
         let range = &size_class.grid_a.cell_ranges[cell_idx];
-        let entities = &size_class.grid_a.entity_storage[range.start .. range.start + range.count];
         
-        // Check capacity before extend
+        // Get slice view from arena (ZERO ALLOCATION)
+        let entities = &size_class.grid_a.entity_storage[range.start_index .. range.start_index + range.current_count];
+        
+        // Copy entity IDs into scratch buffer (ALREADY ALLOCATED)
+        // CRITICAL: Check capacity to detect overflow
         if scratch.len() + entities.len() <= scratch.capacity() {
-            scratch.extend_from_slice(entities);
+            scratch.extend_from_slice(entities);  // Memcpy, no allocation
+        } else {
+            #[cfg(debug_assertions)]
+            panic!("Scratch buffer overflow! Need {} but capacity is {}", 
+                   scratch.len() + entities.len(), scratch.capacity());
+            
+            #[cfg(not(debug_assertions))]
+            warn_once!("Query scratch overflow - results truncated");
+            break;  // Truncate results rather than allocate
         }
     }
     
-    // Query Grid B (entities not in Grid A)
+    // Query Grid B (same pattern)
     let cells_b = size_class.grid_b.get_cells_in_radius(pos, radius);
     for cell_idx in cells_b {
         let range = &size_class.grid_b.cell_ranges[cell_idx];
-        let entities = &size_class.grid_b.entity_storage[range.start .. range.start + range.count];
+        let entities = &size_class.grid_b.entity_storage[range.start_index .. range.start_index + range.current_count];
         
         if scratch.len() + entities.len() <= scratch.capacity() {
             scratch.extend_from_slice(entities);
+        } else {
+            warn_once!("Query scratch overflow - results truncated");
+            break;
         }
     }
     
-    &scratch[..]  // Return slice, no allocation
+    // Return slice view of scratch buffer (still no allocation!)
+    &scratch[..]  // Returns &[Entity] view into scratch buffer
 }
 ```
+
+**Scratch Buffer Management:**
+
+```rust
+// Preallocated at startup
+#[derive(Resource)]
+struct SpatialHashScratch {
+    query_results: Vec<Entity>,  // Capacity: worst-case query size
+    moved_entities: Vec<MovedEntity>,  // Capacity: max_entities × 30%
+}
+
+impl SpatialHashScratch {
+    fn new(max_entities: usize, max_query_radius: f32, cell_size: f32) -> Self {
+        // Worst-case query: circle overlaps 9 cells (3×3), each at max capacity
+        let cells_per_query = ((max_query_radius * 2.0 / cell_size).ceil() as usize + 1).pow(2);
+        let max_entities_per_cell = (max_entities / (MAP_SIZE / cell_size).pow(2) as usize) * 2;
+        let query_capacity = cells_per_query * max_entities_per_cell;
+        
+        Self {
+            query_results: Vec::with_capacity(query_capacity),
+            moved_entities: Vec::with_capacity(max_entities * 30 / 100),
+        }
+    }
+}
+
+// Usage in system
+fn collision_detection_system(
+    spatial_hash: Res<SpatialHash>,
+    mut scratch: ResMut<SpatialHashScratch>,
+    units: Query<(&SimPosition, &Collider)>,
+) {
+    for (pos, collider) in units.iter() {
+        // Pass scratch buffer to query - will be cleared and reused
+        let nearby = query_entities_in_radius(
+            spatial_hash.as_ref(),
+            pos.0,
+            collider.radius * 2.0,
+            0,  // size_class_idx
+            &mut scratch.query_results,
+        );
+        
+        // Process nearby entities
+        for &entity in nearby {
+            // ... collision logic ...
+        }
+    }
+    // scratch.query_results cleared at start of each query
+    // NO allocations happened during this entire system!
+}
+```
+
+**Why We Can't Return `&[Entity]` for Multi-Cell Queries:**
+
+```rust
+// ❌ IMPOSSIBLE - Can't return slice view across multiple non-contiguous cells
+fn query_radius_IMPOSSIBLE(&self, pos: FixedVec2, radius: FixedNum) -> &[Entity] {
+    // Cell A entities: &entity_storage[100..150]  (50 entities)
+    // Cell B entities: &entity_storage[500..580]  (80 entities)
+    // Cell C entities: &entity_storage[900..950]  (50 entities)
+    // 
+    // Can't return a SINGLE &[Entity] that spans all three!
+    // They're not contiguous in memory.
+    // 
+    // MUST aggregate into scratch buffer to return contiguous slice.
+}
+```
+
+**Performance Summary:**
+
+| Query Type | Allocation | Copy Cost | Typical Latency |
+|------------|------------|-----------|-----------------|
+| Single-cell `&[Entity]` | 0 bytes | 0 bytes | **~5ns** |
+| Multi-cell (3×3 cells) | 0 bytes | ~800 bytes memcpy | **~50ns** |
+| Multi-cell (WRONG, new Vec) | 8-32 bytes | ~800 bytes | ~500ns + fragmentation |
+
+**The scratch buffer approach:**
+- ✅ Zero heap allocations
+- ✅ Predictable memory usage
+- ✅ Cache-friendly (linear memcpy)
+- ✅ Overflow protection (capacity checks)
 
 #### Phase 2: Detect Movement (Warm Path - Every Tick)
 ```rust
@@ -670,7 +962,7 @@ impl SpatialHash {
         let cells = self.get_cells_in_radius(pos, radius);
         for cell_idx in cells {
             let range = &self.cell_ranges[cell_idx];
-            let entities = &self.entity_storage[range.start .. range.start + range.count];
+            let entities = &self.entity_storage[range.start_index .. range.start_index + range.current_count];
             
             // CRITICAL: Check capacity before extend
             let needed = scratch.query_results.len() + entities.len();
@@ -789,28 +1081,28 @@ impl StaggeredGrid {
         for cell_idx in 0..self.cell_ranges.len() {
             let range = &mut self.cell_ranges[cell_idx];
             
-            if range.count == 0 {
+            if range.current_count == 0 {
                 continue;
             }
             
             // Check if we've hit our frame budget
-            if entities_processed + range.count > max_entities_per_tick {
+            if entities_processed + range.current_count > max_entities_per_tick {
                 break;  // Continue next frame
             }
             
             // Copy this cell's entities to write_pos
-            if range.start != write_pos {
+            if range.start_index != write_pos {
                 // Only copy if not already at correct position
-                for i in 0..range.count {
+                for i in 0..range.current_count {
                     self.entity_storage[write_pos + i] = 
-                        self.entity_storage[range.start + i];
+                        self.entity_storage[range.start_index + i];
                 }
             }
             
             // Update range to new compacted position
-            range.start = write_pos;
-            write_pos += range.count;
-            entities_processed += range.count;
+            range.start_index = write_pos;
+            write_pos += range.current_count;
+            entities_processed += range.current_count;
         }
         
         // Update fragmentation ratio
@@ -821,7 +1113,7 @@ impl StaggeredGrid {
     /// Calculate current fragmentation ratio
     pub fn fragmentation_ratio(&self) -> f32 {
         let used: usize = self.cell_ranges.iter()
-            .map(|r| r.count)
+            .map(|r| r.current_count)
             .sum();
         let wasted = self.entity_storage.capacity() - used;
         wasted as f32 / self.entity_storage.capacity() as f32
@@ -863,16 +1155,16 @@ impl StaggeredGrid {
         // Build fully compacted version in next_storage
         let mut write_pos = 0;
         for (cell_idx, range) in self.cell_ranges.iter().enumerate() {
-            if range.count > 0 {
-                for i in 0..range.count {
+            if range.current_count > 0 {
+                for i in 0..range.current_count {
                     self.next_storage[write_pos + i] = 
-                        self.entity_storage[range.start + i];
+                        self.entity_storage[range.start_index + i];
                 }
                 self.next_ranges[cell_idx] = CellRange {
-                    start: write_pos,
-                    count: range.count,
+                    start_index: write_pos,
+                    current_count: range.current_count,
                 };
-                write_pos += range.count;
+                write_pos += range.current_count;
             }
         }
     }
@@ -893,6 +1185,427 @@ impl StaggeredGrid {
 | **Incremental** | Default | ~1ms per 10k | 1× storage |
 | **Double-Buffer** | >5M entities | Instant (atomic swap) | 2× storage |
 | **No Compaction** | <100k entities | N/A | Acceptable fragmentation |
+
+### 2.8 Update Strategies: Full Rebuild vs Incremental Updates
+
+**ARCHITECTURAL DECISION (January 2026):**
+
+The spatial hash supports **two distinct update strategies** optimized for different entity scales:
+
+1. **Full Rebuild Every Frame** - Simple, fast for <1M entities
+2. **Incremental Updates with Swap-Based Removal** - Complex, essential for 5-10M entities
+
+#### 2.8.1 Strategy A: Full Rebuild Every Frame (Current Implementation)
+
+**When to Use:**
+- Entity count: <1M entities
+- Update frequency: Every physics tick
+- Acceptable rebuild time: <5ms per frame
+
+**Architecture:**
+
+```rust
+fn rebuild_spatial_hash_system(
+    entities: Query<(Entity, &SimPosition, &Collider)>,
+    mut spatial_hash: ResMut<SpatialHash>,
+) {
+    // Step 1: Clear all cells (O(num_cells), very fast)
+    spatial_hash.clear();  // Resets current_count to 0 for all cells
+    
+    // Step 2: Rebuild from scratch (O(num_entities))
+    for (entity, pos, collider) in entities.iter() {
+        spatial_hash.insert(entity, pos.0, collider.radius);
+    }
+}
+```
+
+**Performance Characteristics:**
+
+| Entity Count | Rebuild Time | Frame Budget | Acceptable? |
+|--------------|--------------|--------------|-------------|
+| 100k | ~0.5ms | 16.67ms @ 60fps | ✅ Yes |
+| 500k | ~2.5ms | 16.67ms @ 60fps | ✅ Yes |
+| 1M | ~5ms | 16.67ms @ 60fps | ⚠️ Marginal |
+| 5M | ~25ms | 16.67ms @ 60fps | ❌ No |
+| 10M | ~50ms | 16.67ms @ 60fps | ❌ No |
+
+**Advantages:**
+- ✅ **Simple:** No fragmentation tracking, no compaction needed
+- ✅ **Predictable:** Same cost every frame (no spikes)
+- ✅ **Cache-friendly:** Sequential writes to arena
+- ✅ **Zero fragmentation:** Always perfectly packed after rebuild
+
+**Disadvantages:**
+- ❌ **O(N) every frame:** Processes ALL entities even if most didn't move
+- ❌ **Doesn't scale:** >1M entities exceeds frame budget
+- ❌ **Redundant work:** 90%+ of entities typically haven't changed cells
+
+**When Full Rebuild Breaks Down:**
+
+At 10M entities with 5% movement per tick:
+- **Entities that moved cells:** 500k (need updates)
+- **Entities that didn't move cells:** 9.5M (redundant processing)
+- **Wasted work ratio:** 95%
+
+#### 2.8.2 Strategy B: Incremental Updates with Arena Over-Provisioning
+
+**When to Use:**
+- Entity count: >1M entities
+- Movement rate: 5-15% entities change cells per tick
+- Target update time: <5ms even at 10M entities
+
+**Core Idea:**
+
+Instead of rebuilding, use **swap-based removal** to incrementally update cells:
+
+```rust
+// Per-cell storage structure with headroom
+struct CellRange {
+    start_index: usize,    // Where this cell's data begins in arena
+    current_count: usize,  // Current number of entities in this cell
+    max_index: usize,      // Maximum index (exclusive) before overflow
+}
+```
+
+**Arena Over-Provisioning:**
+
+Pre-allocate arena with extra capacity to avoid frequent rebuilds:
+
+```ron
+// In initial_config.ron
+spatial_hash_arena_overcapacity_ratio: 1.5,  // 1.5× = 50% extra space
+// Example: 10M entities × 1.5 = 15M arena capacity
+//          Extra 5M slots distributed across cells as headroom
+```
+
+**CRITICAL: Arena Cell Structure & Rebuild Strategy**
+
+The key invariant is that after every REBUILD, all cells have **equal headroom**:
+```
+headroom = max_index - current_count
+```
+
+This headroom should be **(arena_length - total_entity_count) / num_cells** for all cells (±1 due to rounding).
+
+**Arena Size Calculation:**
+
+```rust
+let arena_length = MAX_ENTITY_COUNT * OVERCAPACITY_RATIO;
+// Round up to be evenly divisible by num_cells for cleaner math
+let arena_length = ((arena_length + num_cells - 1) / num_cells) * num_cells;
+```
+
+**Initial Build (First Rebuild):**
+
+When the spatial hash is first created, all cells are empty:
+```rust
+fn initial_build(arena_length: usize, num_cells: usize) -> Vec<CellRange> {
+    let headroom_per_cell = arena_length / num_cells;
+    
+    (0..num_cells).map(|cell_idx| {
+        CellRange {
+            start_index: cell_idx * headroom_per_cell,
+            current_count: 0,  // No entities yet
+            max_index: (cell_idx + 1) * headroom_per_cell,
+        }
+    }).collect()
+}
+```
+
+Example with `arena_length = 1000`, `num_cells = 10`:
+```
+Cell 0: start_index = 0,   current_count = 0, max_index = 100   (headroom = 100)
+Cell 1: start_index = 100, current_count = 0, max_index = 200   (headroom = 100)
+Cell 2: start_index = 200, current_count = 0, max_index = 300   (headroom = 100)
+...
+Cell 9: start_index = 900, current_count = 0, max_index = 1000  (headroom = 100)
+```
+
+**Subsequent Rebuilds:**
+
+After entities have been inserted and some cells are occupied, we rebuild while maintaining equal headroom:
+
+```rust
+fn rebuild_with_equal_headroom(
+    arena_length: usize,
+    num_cells: usize,
+    cell_entity_counts: &[usize],  // current_count for each cell
+) -> Vec<CellRange> {
+    let total_entity_count: usize = cell_entity_counts.iter().sum();
+    let total_free_space = arena_length - total_entity_count;
+    let headroom_per_cell = total_free_space / num_cells;
+    let extra_slots = total_free_space % num_cells;  // Distribute remainder
+    
+    let mut ranges = Vec::with_capacity(num_cells);
+    let mut write_pos = 0;
+    
+    for (cell_idx, &entity_count) in cell_entity_counts.iter().enumerate() {
+        // Give first `extra_slots` cells one additional slot to handle remainder
+        let this_cell_headroom = headroom_per_cell + if cell_idx < extra_slots { 1 } else { 0 };
+        
+        ranges.push(CellRange {
+            start_index: write_pos,
+            current_count: entity_count,
+            max_index: write_pos + entity_count + this_cell_headroom,
+        });
+        
+        write_pos += entity_count + this_cell_headroom;
+    }
+    
+    ranges
+}
+```
+
+Example with `arena_length = 1000`, `num_cells = 10`, and cells have `[50, 30, 80, 20, 40, 60, 10, 90, 70, 50]` entities:
+```
+total_entity_count = 500
+total_free_space = 500
+headroom_per_cell = 50
+extra_slots = 0
+
+Cell 0: start_index = 0,   current_count = 50, max_index = 100  (headroom = 50)
+Cell 1: start_index = 100, current_count = 30, max_index = 180  (headroom = 50)
+Cell 2: start_index = 180, current_count = 80, max_index = 310  (headroom = 50)
+Cell 3: start_index = 310, current_count = 20, max_index = 380  (headroom = 50)
+Cell 4: start_index = 380, current_count = 40, max_index = 470  (headroom = 50)
+Cell 5: start_index = 470, current_count = 60, max_index = 580  (headroom = 50)
+Cell 6: start_index = 580, current_count = 10, max_index = 640  (headroom = 50)
+Cell 7: start_index = 640, current_count = 90, max_index = 780  (headroom = 50)
+Cell 8: start_index = 780, current_count = 70, max_index = 900  (headroom = 50)
+Cell 9: start_index = 900, current_count = 50, max_index = 1000 (headroom = 50)
+```
+
+**Key Properties:**
+
+1. **Equal Opportunity:** All cells have equal headroom, regardless of current occupancy
+2. **Compaction:** Entities are tightly packed at the start of each cell's range
+3. **First Build is Special Case:** Initial build is just `rebuild_with_equal_headroom` where all `current_count = 0`
+4. **No Fragmentation:** After rebuild, `start_index + current_count` points to first free slot
+
+**Incremental Update Algorithm:**
+
+```rust
+impl StaggeredGrid {
+    /// Remove entity from old cell using swap-with-last-element trick
+    /// O(1) operation, NO FRAGMENTATION
+    fn remove_from_cell(&mut self, cell_id: usize, entity: Entity) -> bool {
+        let range = &mut self.cell_ranges[cell_id];
+        
+        // Find entity in cell's range [start_index, start_index + current_count)
+        let cell_start = range.start_index;
+        let cell_end = range.start_index + range.current_count;
+        
+        for i in cell_start..cell_end {
+            if self.entity_storage[i] == entity {
+                // Swap with last element in this cell
+                let last_idx = cell_end - 1;
+                self.entity_storage[i] = self.entity_storage[last_idx];
+                
+                // Shrink count by 1
+                range.current_count -= 1;
+                return true;
+            }
+        }
+        false
+    }
+    
+    /// Add entity to new cell if capacity available
+    /// O(1) operation if headroom available
+    fn insert_to_cell(&mut self, cell_id: usize, entity: Entity) -> Result<(), OverflowError> {
+        let range = &mut self.cell_ranges[cell_id];
+        
+        // Check if we have headroom (next write position must be < max_index)
+        let next_write_pos = range.start_index + range.current_count;
+        if next_write_pos < range.max_index {
+            // Write to next available slot
+            self.entity_storage[next_write_pos] = entity;
+            range.current_count += 1;
+            Ok(())
+        } else {
+            // Cell overflow - trigger rebuild
+            Err(OverflowError::CellFull(cell_id))
+        }
+    }
+    
+    /// Update entity that moved from old_cell to new_cell
+    /// Total cost: O(1) amortized
+    pub fn update_entity_cell(
+        &mut self, 
+        entity: Entity, 
+        old_cell: CellId, 
+        new_cell: CellId
+    ) -> Result<(), OverflowError> {
+        // Remove from old (swap-based, no fragmentation!)
+        self.remove_from_cell(old_cell.to_index(), entity);
+        
+        // Insert to new (uses headroom)
+        self.insert_to_cell(new_cell.to_index(), entity)?;
+        
+        Ok(())
+    }
+}
+```
+
+**How Swap-Based Removal Avoids Fragmentation:**
+
+Traditional removal creates gaps:
+```
+Before: [E1, E2, E3, E4, E5]
+Remove E2 (naive): [E1, _, E3, E4, E5]  ❌ GAP!
+```
+
+Swap-based removal maintains contiguity:
+```
+Before: [E1, E2, E3, E4, E5]  (current_count = 5)
+Remove E2 (swap): [E1, E5, E3, E4, _]  (current_count = 4)  ✅ NO GAP!
+```
+
+**Arena Headroom Distribution Strategy (Deprecated - Use Equal Headroom Instead):**
+
+**IMPORTANT:** The strategy below distributes headroom proportionally, which creates unfairness.
+The **preferred approach** is equal headroom distribution (see above), where all cells get
+`(arena_length - total_entity_count) / num_cells` headroom after every rebuild.
+
+```rust
+// DEPRECATED: Proportional headroom (unfair, some cells starve)
+fn rebuild_with_proportional_headroom(&mut self) {
+    // Calculate total free space
+    let total_capacity = self.entity_storage.capacity();
+    let total_used = self.count_all_entities();
+    let free_space = total_capacity - total_used;
+    
+    // Option A: Uniform distribution (RECOMMENDED - use equal headroom instead)
+    let per_cell_buffer = free_space / self.cell_ranges.len();
+    
+    // Option B: Proportional to recent usage (NOT RECOMMENDED - creates unfairness)
+    let per_cell_buffer = self.calculate_proportional_buffers(free_space);
+    
+    // Rebuild with new max_index values
+    let mut write_pos = 0;
+    for cell_id in 0..self.cell_ranges.len() {
+        let count = self.cell_usage[cell_id];  // Entities currently in cell
+        let headroom = per_cell_buffer[cell_id];  // Additional buffer
+        
+        self.cell_ranges[cell_id] = CellRange {
+            start_index: write_pos,
+            current_count: count,
+            max_index: write_pos + count + headroom,
+        };
+        
+        write_pos += count + headroom;
+    }
+}
+
+fn calculate_proportional_buffers(&self, free_space: usize) -> Vec<usize> {
+    // Allocate buffer proportional to recent cell occupancy
+    // High-traffic cells get more headroom
+    let total_usage: usize = self.cell_usage.iter().sum();
+    
+    self.cell_usage.iter().map(|&usage| {
+        let min_buffer = 10;  // Every cell gets at least 10 slots
+        let proportional = (usage as f32 / total_usage as f32 * free_space as f32) as usize;
+        min_buffer.max(proportional)
+    }).collect()
+}
+```
+
+**Performance Comparison:**
+
+| Scenario | Full Rebuild | Incremental | Speedup |
+|----------|--------------|-------------|---------|
+| 1M entities, 5% moved | ~5ms (1M processed) | ~0.5ms (50k processed) | **10×** |
+| 5M entities, 5% moved | ~25ms (5M processed) | ~2.5ms (250k processed) | **10×** |
+| 10M entities, 10% moved | ~50ms (10M processed) | ~5ms (1M processed) | **10×** |
+| 10M entities, 50% moved | ~50ms (10M processed) | ~25ms (5M processed) | **2×** |
+
+**Rebuild Trigger Conditions:**
+
+Incremental updates eventually require full rebuild when:
+
+1. **Cell Overflow:** Any cell exceeds `max_index`
+2. **Global Fill:** Total arena usage > 85%
+3. **Fragmentation:** (Very rare with swap-based removal)
+
+```rust
+fn should_trigger_rebuild(&self) -> bool {
+    let global_usage = self.count_all_entities() as f32 / self.entity_storage.capacity() as f32;
+    
+    // Trigger if ANY cell overflowed (current_count reached headroom limit)
+    let any_cell_full = self.cell_ranges.iter()
+        .any(|r| r.start_index + r.current_count >= r.max_index);
+    
+    // Or if global capacity critically low
+    let critically_full = global_usage > 0.85;
+    
+    any_cell_full || critically_full
+}
+```
+
+**Double-Buffering for Zero-Latency Rebuilds:**
+
+For >5M entities, rebuild in background to avoid frame spikes:
+
+```rust
+struct SpatialHash {
+    active_grid: Arc<StaggeredGrid>,   // Used by queries (read-only)
+    rebuild_grid: Arc<StaggeredGrid>,  // Being rebuilt (write-only)
+    is_rebuilding: AtomicBool,
+}
+
+impl SpatialHash {
+    fn start_rebuild(&mut self) {
+        if !self.is_rebuilding.load(Ordering::Relaxed) {
+            self.is_rebuilding.store(true, Ordering::Relaxed);
+            
+            // Spawn async rebuild task
+            let entities = self.snapshot_entities();  // Copy entity list
+            let rebuild_grid = Arc::clone(&self.rebuild_grid);
+            
+            spawn_task(move || {
+                rebuild_grid.rebuild_from_snapshot(entities);
+            });
+        }
+    }
+    
+    fn complete_rebuild(&mut self) {
+        if self.rebuild_complete() {
+            // Atomic pointer swap - instant cutover
+            std::mem::swap(&mut self.active_grid, &mut self.rebuild_grid);
+            self.is_rebuilding.store(false, Ordering::Relaxed);
+        }
+    }
+}
+```
+
+**Configuration in initial_config.ron:**
+
+```ron
+// Spatial Hash Update Strategy
+spatial_hash_update_strategy: Incremental,  // or FullRebuild
+
+// Arena over-provisioning for incremental updates
+// 1.5 = 50% extra capacity, 2.0 = 100% extra
+// Higher ratios = fewer rebuilds but more memory
+spatial_hash_arena_overcapacity_ratio: 1.5,
+
+// Rebuild trigger thresholds
+spatial_hash_rebuild_on_cell_overflow: true,
+spatial_hash_rebuild_threshold: 0.85,  // Rebuild when 85% full
+
+// Double-buffering for large-scale (>5M entities)
+spatial_hash_use_double_buffering: false,  // Enable for >5M entities
+spatial_hash_async_rebuild_threshold: 5_000_000,
+```
+
+**Strategy Selection Guidelines:**
+
+| Entity Scale | Recommended Strategy | Config |
+|--------------|---------------------|--------|
+| <500k | Full Rebuild | `update_strategy: FullRebuild` |
+| 500k-2M | Full Rebuild (monitor) | Same, watch rebuild time |
+| 2M-5M | Incremental | `update_strategy: Incremental`<br>`overcapacity_ratio: 1.5` |
+| 5M-10M | Incremental + Double-Buffer | `update_strategy: Incremental`<br>`use_double_buffering: true`<br>`overcapacity_ratio: 1.5` |
+| >10M | Incremental + Double-Buffer + Parallel | Above + parallel region updates |
 
 ### 2.9 Spatial Hash Update Optimizations (Arena-Based)
 
@@ -1219,9 +1932,9 @@ pub fn query_radius(
             let cell_idx = query_row * grid.cols + query_col;
             let range = &grid.cell_ranges[cell_idx];
             
-            if range.count > 0 {
+            if range.current_count > 0 {
                 // CRITICAL: Check capacity before extend
-                let entities = &grid.entity_storage[range.start..range.start + range.count];
+                let entities = &grid.entity_storage[range.start_index..range.start_index + range.current_count];
                 
                 if scratch.len() + entities.len() <= scratch.capacity() {
                     scratch.extend_from_slice(entities);
@@ -1680,8 +2393,8 @@ struct StaggeredGrid {
 
 /// Tracks a cell's slice in the arena
 struct CellRange {
-    start: usize,   // Index into entity_storage
-    count: usize,   // Number of entities in this cell
+    start_index: usize,    // Index into entity_storage where this cell begins
+    current_count: usize,  // Number of entities in this cell
 }
 
 /// Component tracking entity's location
@@ -2010,8 +2723,8 @@ impl StaggeredGrid {
         let cell_idx = row * self.cols + col;
         let range = &self.cell_ranges[cell_idx];
         
-        if range.count > 0 {
-            &self.entity_storage[range.start..range.start + range.count]
+        if range.current_count > 0 {
+            &self.entity_storage[range.start_index..range.start_index + range.current_count]
         } else {
             &[]  // Empty slice
         }
@@ -2034,8 +2747,8 @@ impl StaggeredGrid {
                 let cell_idx = row * self.cols + col;
                 let range = &self.cell_ranges[cell_idx];
                 
-                if range.count > 0 {
-                    let entities = &self.entity_storage[range.start..range.start + range.count];
+                if range.current_count > 0 {
+                    let entities = &self.entity_storage[range.start_index..range.start_index + range.current_count];
                     
                     // CRITICAL: Check capacity before extend
                     if scratch.len() + entities.len() <= scratch.capacity() {

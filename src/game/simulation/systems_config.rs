@@ -83,6 +83,7 @@ pub fn init_sim_config_from_initial(
         &config.spatial_hash_entity_radii,
         config.spatial_hash_radius_to_cell_ratio,
         config.spatial_hash_max_entity_count,
+        config.spatial_hash_arena_overcapacity_ratio,
     );
     
     // CRITICAL: When spatial hash is resized, all OccupiedCell components become invalid

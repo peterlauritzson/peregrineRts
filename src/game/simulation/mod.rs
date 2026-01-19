@@ -57,7 +57,8 @@ impl Plugin for SimulationPlugin {
             FixedNum::from_num(100.0),
             &[0.5, 10.0],  // Default entity radii
             4.0,           // Default radius to cell ratio
-            10_000         // Default max entities (will be overwritten by InitialConfig)
+            10_000,        // Default max entities (will be overwritten by InitialConfig)
+            1.0            // No overcapacity for initial creation
         ));
         app.insert_resource(MapFlowField(Default::default()));
         app.init_resource::<MapStatus>();

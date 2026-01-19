@@ -86,7 +86,8 @@ pub fn handle_generation(
         FixedNum::from_num(map_height),
         &[0.5, 10.0, 25.0],  // Use default entity radii
         4.0,  // Default radius to cell ratio
-        100_000  // Use default max entity count
+        100_000,  // Use default max entity count
+        1.5  // Default overcapacity ratio
     );
     info!("Updated SpatialHash for new map size");
 

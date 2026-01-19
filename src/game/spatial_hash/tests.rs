@@ -13,7 +13,8 @@ fn test_query_radius_finds_entities_within_range() {
         FixedNum::from_num(100.0),
         &[0.5, 10.0, 25.0],
         4.0,
-        10_000
+        10_000,
+        1.0  // Full rebuild mode for tests
     );
 
     let entity_a = Entity::from_bits(1);
@@ -46,7 +47,8 @@ fn test_query_radius_excludes_entities_outside_range() {
         FixedNum::from_num(100.0),
         &[0.5, 10.0, 25.0],
         4.0,
-        10_000
+        10_000,
+        1.0  // Full rebuild mode for tests
     );
 
     let entity_a = Entity::from_bits(1);
@@ -80,7 +82,8 @@ fn test_spatial_hash_excludes_self() {
         FixedNum::from_num(100.0),
         &[0.5, 10.0, 25.0],
         4.0,
-        10_000
+        10_000,
+        1.0  // Full rebuild mode for tests
     );
 
     let entity = Entity::from_bits(1);
@@ -102,7 +105,8 @@ fn test_spatial_hash_query_finds_neighbors() {
         FixedNum::from_num(100.0),
         &[0.5, 10.0, 25.0],
         4.0,
-        10_000
+        10_000,
+        1.0  // Full rebuild mode for tests
     );
 
     let entity_a = Entity::from_bits(0x0000000100000001); // Non-placeholder entity
@@ -141,7 +145,8 @@ fn test_spatial_hash_empty_cell_returns_empty() {
         FixedNum::from_num(100.0),
         &[0.5, 10.0, 25.0],
         4.0,
-        10_000
+        10_000,
+        1.0  // Full rebuild mode for tests
     );
 
     let entity = Entity::from_bits(1);
@@ -160,7 +165,8 @@ fn test_spatial_hash_boundary_cases() {
         FixedNum::from_num(100.0),
         &[0.5, 10.0, 25.0],
         4.0,
-        10_000
+        10_000,
+        1.0  // Full rebuild mode for tests
     );
 
     // Test entities at boundaries of the map
@@ -195,7 +201,8 @@ fn test_query_radius_returns_same_results_as_brute_force() {
         FixedNum::from_num(100.0),
         &[0.5, 10.0, 25.0],
         4.0,
-        10_000
+        10_000,
+        1.0  // Full rebuild mode for tests
     );
 
     // Create multiple entities at various positions
@@ -260,7 +267,8 @@ fn test_get_potential_collisions_excludes_self() {
         FixedNum::from_num(100.0),
         &[0.5, 10.0, 25.0],
         4.0,
-        10_000
+        10_000,
+        1.0  // Full rebuild mode for tests
     );
 
     let entity = Entity::from_bits(1);
@@ -282,7 +290,8 @@ fn test_get_potential_collisions_includes_all_without_exclusion() {
         FixedNum::from_num(100.0),
         &[0.5, 10.0, 25.0],
         4.0,
-        10_000
+        10_000,
+        1.0  // Full rebuild mode for tests
     );
 
     let entity1 = test_entity(1);
@@ -306,7 +315,8 @@ fn test_get_potential_collisions_finds_neighbors_excludes_self() {
         FixedNum::from_num(100.0),
         &[0.5, 10.0, 25.0],
         4.0,
-        10_000
+        10_000,
+        1.0  // Full rebuild mode for tests
     );
 
     let entity1 = Entity::from_bits(1);
@@ -333,7 +343,8 @@ fn test_compaction_removes_tombstones() {
         FixedNum::from_num(100.0),
         &[0.5],
         4.0,
-        10_000
+        10_000,
+        1.0  // Full rebuild mode for tests
     );
 
     let entities: Vec<_> = (0..10).map(|i| test_entity(i)).collect();

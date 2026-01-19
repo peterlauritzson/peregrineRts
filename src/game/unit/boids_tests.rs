@@ -22,7 +22,8 @@ mod tests {
             FixedNum::from_num(100.0),
             &[0.5, 10.0, 25.0],
             4.0,
-            10_000
+            10_000,
+            1.0  // Full rebuild mode for tests
         );
         app.insert_resource(spatial_hash);
         
@@ -87,7 +88,8 @@ mod tests {
             FixedNum::from_num(100.0),
             &[0.5, 10.0, 25.0],
             4.0,
-            10_000
+            10_000,
+            1.0  // Full rebuild mode for tests
         );
         app.insert_resource(spatial_hash);
         
@@ -133,7 +135,8 @@ mod tests {
             FixedNum::from_num(100.0),
             &[0.5, 10.0, 25.0],
             4.0,
-            10_000
+            10_000,
+            1.0  // Full rebuild mode for tests
         );
         app.insert_resource(spatial_hash);
         
@@ -201,7 +204,8 @@ mod tests {
             FixedNum::from_num(100.0),
             &[0.5, 10.0, 25.0],
             4.0,
-            10_000
+            10_000,
+            1.0  // Full rebuild mode for tests
         );
         app.insert_resource(spatial_hash);
         
@@ -270,7 +274,8 @@ mod tests {
             FixedNum::from_num(100.0),
             &[0.5, 10.0, 25.0],
             4.0,
-            10_000
+            10_000,
+            1.0  // Full rebuild mode for tests
         );
         app.insert_resource(spatial_hash);
         
@@ -350,7 +355,8 @@ mod tests {
             FixedNum::from_num(100.0),
             &[0.5, 10.0, 25.0],
             4.0,
-            10_000
+            10_000,
+            1.0  // Full rebuild mode for tests
         );
         app.insert_resource(spatial_hash);
         

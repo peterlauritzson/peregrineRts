@@ -62,6 +62,7 @@ pub struct InitialConfig {
     pub spatial_hash_entity_radii: Vec<f32>,
     pub spatial_hash_radius_to_cell_ratio: f32,
     pub spatial_hash_max_entity_count: usize,  // Maximum entities per grid (pre-allocated capacity)
+    pub spatial_hash_arena_overcapacity_ratio: f32,  // Arena over-provisioning for incremental updates (1.5 = 50% extra)
     
     // Spatial Hash Parallel Updates
     pub spatial_hash_parallel_updates: bool,
@@ -193,6 +194,7 @@ impl Default for InitialConfig {
             spatial_hash_entity_radii: vec![0.5, 10.0, 25.0],
             spatial_hash_radius_to_cell_ratio: 4.0,
             spatial_hash_max_entity_count: 100_000,  // Default: 100k entities (80MB per grid)
+            spatial_hash_arena_overcapacity_ratio: 1.5,  // Default: 50% extra for incremental updates
             spatial_hash_parallel_updates: true,
             spatial_hash_regions_per_axis: 10,
         }

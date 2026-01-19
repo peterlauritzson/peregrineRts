@@ -25,6 +25,7 @@ fn main() {
         &[0.5, 10.0],  // Expected entity sizes
         4.0,  // radius to cell ratio
         10_000,  // 10k entity capacity for example
+        1.0  // Full rebuild mode (no overcapacity)
     ));
     
     app.insert_resource(SimConfig {

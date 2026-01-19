@@ -728,6 +728,7 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
         &[0.5, 10.0, 25.0],  // Expected entity sizes
         15.0,  // radius to cell ratio
         (config.unit_count * 2).max(10_000),  // 2x unit count for headroom
+        1.0,  // overcapacity_ratio (1.0 = no extra capacity, use full rebuild mode for tests)
     ));
     
     // Add simulation config

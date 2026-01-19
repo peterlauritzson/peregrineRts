@@ -59,12 +59,14 @@ impl SpatialHash {
     /// * `entity_radii` - Expected entity sizes in game (e.g., [0.5, 10.0, 25.0])
     /// * `radius_to_cell_ratio` - Desired ratio between cell size and entity radius (e.g., 4.0)
     /// * `max_entity_count` - Maximum entities per grid (pre-allocated capacity)
+    /// * `overcapacity_ratio` - Arena over-provisioning (1.5 = 50% extra for incremental updates)
     pub fn new(
         map_width: FixedNum,
         map_height: FixedNum,
         entity_radii: &[f32],
         radius_to_cell_ratio: f32,
         max_entity_count: usize,
+        overcapacity_ratio: f32,
     ) -> Self {
         // Step 1: Determine unique cell sizes needed
         let mut cell_sizes = Vec::new();
@@ -87,7 +89,13 @@ impl SpatialHash {
         
         // Step 2: Create size classes with staggered grids
         let size_classes: Vec<SizeClass> = cell_sizes.iter()
-            .map(|&cell_size| SizeClass::with_capacity(map_width, map_height, cell_size, max_entity_count))
+            .map(|&cell_size| SizeClass::with_capacity(
+                map_width, 
+                map_height, 
+                cell_size, 
+                max_entity_count,
+                overcapacity_ratio
+            ))
             .collect();
         
         // Step 3: Build radius-to-class mapping
@@ -105,8 +113,8 @@ impl SpatialHash {
         }
     }
     
-    pub fn resize(&mut self, map_width: FixedNum, map_height: FixedNum, entity_radii: &[f32], radius_to_cell_ratio: f32, max_entity_count: usize) {
-        *self = Self::new(map_width, map_height, entity_radii, radius_to_cell_ratio, max_entity_count);
+    pub fn resize(&mut self, map_width: FixedNum, map_height: FixedNum, entity_radii: &[f32], radius_to_cell_ratio: f32, max_entity_count: usize, overcapacity_ratio: f32) {
+        *self = Self::new(map_width, map_height, entity_radii, radius_to_cell_ratio, max_entity_count, overcapacity_ratio);
     }
 
     pub fn clear(&mut self) {
@@ -391,5 +399,112 @@ impl SpatialHash {
         }
         
         max_usage
+    }
+    
+    // ============================================================================
+    // Incremental Update Support (Arena Over-Provisioning Strategy)
+    // ============================================================================
+    
+    /// Check if incremental updates are enabled (auto-detected from overcapacity_ratio > 1.1)
+    pub fn uses_incremental_updates(&self) -> bool {
+        self.size_classes.iter().any(|sc| {
+            sc.grid_a.use_incremental_updates || sc.grid_b.use_incremental_updates
+        })
+    }
+    
+    /// Check if any grid needs a full rebuild due to capacity overflow
+    /// Returns true if any cell has exceeded its headroom capacity
+    pub fn should_rebuild(&self) -> bool {
+        self.size_classes.iter().any(|sc| {
+            sc.grid_a.should_rebuild() || sc.grid_b.should_rebuild()
+        })
+    }
+    
+    /// Perform incremental update: remove from old cell, insert into new cell
+    /// Uses swap-with-last-element trick for O(1) removal with zero fragmentation
+    /// 
+    /// Returns true if the operation succeeded (entity was found and moved)
+    pub fn update_incremental(
+        &mut self,
+        entity: Entity,
+        occupied: &OccupiedCell,
+        new_grid_offset: u8,
+        new_col: usize,
+        new_row: usize,
+    ) -> bool {
+        let size_class = &mut self.size_classes[occupied.size_class as usize];
+        
+        // Remove from old cell using swap-based removal
+        let old_grid = if occupied.grid_offset == 0 {
+            &mut size_class.grid_a
+        } else {
+            &mut size_class.grid_b
+        };
+        
+        if !old_grid.remove_entity_swap(occupied.col, occupied.row, entity) {
+            return false; // Entity not found in old cell
+        }
+        
+        // Insert into new cell
+        let new_grid = if new_grid_offset == 0 {
+            &mut size_class.grid_a
+        } else {
+            &mut size_class.grid_b
+        };
+        
+        new_grid.insert_entity(new_col, new_row, entity);
+        true
+    }
+    
+    /// Rebuild all grids with proportional headroom distribution
+    /// Call this when should_rebuild() returns true
+    /// 
+    /// entities_callback: Function that yields (Entity, pos, radius, occupied) for all entities
+    pub fn rebuild_all_with_headroom<F>(&mut self, mut entities_callback: F)
+    where
+        F: FnMut() -> Vec<(Entity, FixedVec2, FixedNum, OccupiedCell)>,
+    {
+        let entities = entities_callback();
+        
+        // Group entities by size class
+        let mut by_class: Vec<Vec<(Entity, FixedVec2, OccupiedCell)>> = 
+            vec![Vec::new(); self.size_classes.len()];
+        
+        for (entity, pos, _radius, occupied) in entities {
+            by_class[occupied.size_class as usize].push((entity, pos, occupied));
+        }
+        
+        // Rebuild each size class
+        for (class_idx, entities) in by_class.iter().enumerate() {
+            if entities.is_empty() {
+                continue;
+            }
+            
+            let size_class = &mut self.size_classes[class_idx];
+            
+            // Create temporary cell collections for Grid A and Grid B
+            let grid_a_cols = size_class.grid_a.cols;
+            let grid_a_rows = size_class.grid_a.rows;
+            let grid_b_cols = size_class.grid_b.cols;
+            let grid_b_rows = size_class.grid_b.rows;
+            
+            let mut grid_a_cells: Vec<Vec<Entity>> = vec![Vec::new(); grid_a_cols * grid_a_rows];
+            let mut grid_b_cells: Vec<Vec<Entity>> = vec![Vec::new(); grid_b_cols * grid_b_rows];
+            
+            // Distribute entities into cells
+            for &(entity, _pos, ref occupied) in entities {
+                if occupied.grid_offset == 0 {
+                    let cell_idx = occupied.row * grid_a_cols + occupied.col;
+                    grid_a_cells[cell_idx].push(entity);
+                } else {
+                    let cell_idx = occupied.row * grid_b_cols + occupied.col;
+                    grid_b_cells[cell_idx].push(entity);
+                }
+            }
+            
+            // Rebuild with headroom
+            size_class.grid_a.rebuild_with_headroom(&grid_a_cells);
+            size_class.grid_b.rebuild_with_headroom(&grid_b_cells);
+        }
     }
 }

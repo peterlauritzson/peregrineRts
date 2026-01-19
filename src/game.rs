@@ -126,8 +126,15 @@ fn setup_game(
     ));
 }
 
-fn cleanup_game(mut commands: Commands, query: Query<Entity, With<GameEntity>>) {
+fn cleanup_game(
+    mut commands: Commands, 
+    query: Query<Entity, With<GameEntity>>,
+    mut spatial_hash: ResMut<crate::game::spatial_hash::SpatialHash>,
+) {
     for entity in query.iter() {
         commands.entity(entity).despawn();
     }
+    
+    // Clear spatial hash to reset incremental mode state
+    spatial_hash.clear();
 }
