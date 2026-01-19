@@ -1382,36 +1382,83 @@ Cell 9: start_index = 900, current_count = 50, max_index = 1000 (headroom = 50)
 3. **First Build is Special Case:** Initial build is just `rebuild_with_equal_headroom` where all `current_count = 0`
 4. **No Fragmentation:** After rebuild, `start_index + current_count` points to first free slot
 
-**Incremental Update Algorithm:**
+**When Do We Rebuild vs Incremental Update?**
+
+**REBUILD is triggered ONLY when:**
+1. **Initial startup** - First time spatial hash is created
+2. **Cell overflow** - Any cell reaches `start_index + current_count >= max_index`
+3. **Global capacity** - Total usage > 85% of arena capacity
+
+**INCREMENTAL UPDATE is the normal case:**
+- Happens every frame as entities move between cells
+- NO rebuild needed as long as cells have headroom
+- O(1) per entity movement, no reallocation
+
+**Typical gameplay pattern:**
+- Rebuild: ~1 time at startup, then maybe once every 10,000 frames if population grows
+- Incremental updates: Every frame, handling 5-15% of entities moving
+
+**Incremental Update Algorithm (Normal Case - No Overflow):**
+
+When entity `E` moves from cell `C` to cell `D`, and both cells have available headroom:
+
+```rust
+// PSEUDOCODE - What actually happens:
+// 
+// 1. Remove E from cell C (swap-based removal):
+let e_index_in_c = E.range_idx;  // E knows its position in cell C's range
+let c_end_index = Cell[C].start_index + Cell[C].current_count - 1;
+
+Arena[Cell[C].start_index + e_index_in_c] = Arena[c_end_index];  // Swap with last
+Cell[C].current_count -= 1;  // Shrink cell C
+
+// 2. Add E to cell D (append to end):
+let d_end_index = Cell[D].start_index + Cell[D].current_count;
+
+Arena[d_end_index] = E;  // Write to first free slot
+Cell[D].current_count += 1;  // Grow cell D
+
+// 3. Update E's metadata:
+E.range_idx = Cell[D].current_count - 1;  // E's new position in cell D
+E.cell_id = D;
+
+// Total operations: 1 swap + 2 writes + 3 field updates = O(1)
+// ZERO allocations, ZERO fragmentation
+```
+
+**Detailed Implementation:**
 
 ```rust
 impl StaggeredGrid {
     /// Remove entity from old cell using swap-with-last-element trick
     /// O(1) operation, NO FRAGMENTATION
-    fn remove_from_cell(&mut self, cell_id: usize, entity: Entity) -> bool {
+    /// 
+    /// This is called during normal incremental updates (NOT during rebuild)
+    fn remove_from_cell(&mut self, cell_id: usize, entity: Entity, entity_idx: usize) -> bool {
         let range = &mut self.cell_ranges[cell_id];
         
-        // Find entity in cell's range [start_index, start_index + current_count)
-        let cell_start = range.start_index;
-        let cell_end = range.start_index + range.current_count;
+        // Entity at position entity_idx within this cell's range
+        let absolute_idx = range.start_index + entity_idx;
+        let last_idx = range.start_index + range.current_count - 1;
         
-        for i in cell_start..cell_end {
-            if self.entity_storage[i] == entity {
-                // Swap with last element in this cell
-                let last_idx = cell_end - 1;
-                self.entity_storage[i] = self.entity_storage[last_idx];
-                
-                // Shrink count by 1
-                range.current_count -= 1;
-                return true;
-            }
+        if absolute_idx != last_idx {
+            // Swap with last element in this cell (unless already last)
+            self.entity_storage[absolute_idx] = self.entity_storage[last_idx];
+            
+            // IMPORTANT: Update the swapped entity's range_idx component!
+            // (handled in calling code with access to ECS)
         }
-        false
+        
+        // Shrink cell's range by 1
+        range.current_count -= 1;
+        true
     }
     
     /// Add entity to new cell if capacity available
     /// O(1) operation if headroom available
-    fn insert_to_cell(&mut self, cell_id: usize, entity: Entity) -> Result<(), OverflowError> {
+    /// 
+    /// This is called during normal incremental updates (NOT during rebuild)
+    fn insert_to_cell(&mut self, cell_id: usize, entity: Entity) -> Result<usize, OverflowError> {
         let range = &mut self.cell_ranges[cell_id];
         
         // Check if we have headroom (next write position must be < max_index)
@@ -1419,31 +1466,70 @@ impl StaggeredGrid {
         if next_write_pos < range.max_index {
             // Write to next available slot
             self.entity_storage[next_write_pos] = entity;
+            let entity_idx = range.current_count;  // Position within this cell
             range.current_count += 1;
-            Ok(())
+            Ok(entity_idx)  // Return index for updating entity's component
         } else {
-            // Cell overflow - trigger rebuild
+            // Cell overflow - TRIGGER REBUILD!
             Err(OverflowError::CellFull(cell_id))
         }
     }
     
     /// Update entity that moved from old_cell to new_cell
     /// Total cost: O(1) amortized
+    /// 
+    /// This is the HOT PATH - called every frame for moving entities
     pub fn update_entity_cell(
         &mut self, 
-        entity: Entity, 
+        entity: Entity,
+        entity_idx: usize,  // Entity's current index within old_cell
         old_cell: CellId, 
         new_cell: CellId
-    ) -> Result<(), OverflowError> {
+    ) -> Result<usize, OverflowError> {
         // Remove from old (swap-based, no fragmentation!)
-        self.remove_from_cell(old_cell.to_index(), entity);
+        self.remove_from_cell(old_cell.to_index(), entity, entity_idx);
         
         // Insert to new (uses headroom)
-        self.insert_to_cell(new_cell.to_index(), entity)?;
+        let new_entity_idx = self.insert_to_cell(new_cell.to_index(), entity)?;
         
-        Ok(())
+        Ok(new_entity_idx)  // Caller must update entity's range_idx component
     }
 }
+```
+
+**Visual Example of Incremental Update:**
+
+Entity `E2` moves from Cell 5 to Cell 7:
+
+```
+BEFORE:
+Cell 5: [E1, E2, E3, E4]  start=200, count=4, max=250
+Cell 7: [E9, E10]         start=400, count=2, max=450
+
+Arena[200..250]: [E1, E2, E3, E4, _, _, _, ...]
+Arena[400..450]: [E9, E10, _, _, _, _, _, ...]
+
+STEP 1 - Remove E2 from Cell 5 (swap with last):
+Arena[201] = Arena[203]  // Swap E2 with E4
+Cell[5].current_count = 3
+
+Cell 5: [E1, E4, E3]  start=200, count=3, max=250
+Arena[200..250]: [E1, E4, E3, E4, _, _, _, ...]
+                              ^ garbage, but doesn't matter
+
+STEP 2 - Add E2 to Cell 7 (append):
+Arena[402] = E2  // Write at Cell[7].start + Cell[7].count
+Cell[7].current_count = 3
+
+Cell 7: [E9, E10, E2]  start=400, count=3, max=450
+Arena[400..450]: [E9, E10, E2, _, _, _, _, ...]
+
+AFTER:
+Cell 5: [E1, E4, E3]  count=3 (headroom: 47 slots)
+Cell 7: [E9, E10, E2] count=3 (headroom: 47 slots)
+
+Total operations: 1 swap + 1 write + 2 count updates = O(1)
+NO ALLOCATIONS. NO FRAGMENTATION. NO REBUILD NEEDED.
 ```
 
 **How Swap-Based Removal Avoids Fragmentation:**
