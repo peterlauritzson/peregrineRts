@@ -5,7 +5,8 @@ mod boids;
 
 use bevy::prelude::*;
 use crate::game::GameState;
-use crate::game::simulation::{SimSet, follow_path};
+use crate::game::simulation::SimSet;
+use crate::game::pathfinding::follow_path;
 
 // Re-export public types
 pub use components::{Unit, Health, Selected, SelectionCircle, HealthBar};

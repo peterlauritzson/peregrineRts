@@ -29,7 +29,7 @@ pub use resources::*;
 pub use events::*;
 
 // Re-export specific functions that are used externally
-pub use systems::{follow_path, apply_obstacle_to_flow_field};
+pub use systems::apply_obstacle_to_flow_field;
 
 // System sets for organizing execution order
 #[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone)]
@@ -119,9 +119,8 @@ impl Plugin for SimulationPlugin {
             systems::process_input.in_set(SimSet::Input),
             
             // Steering
-            physics::apply_friction.in_set(SimSet::Steering).before(systems::follow_path),
-            systems::follow_path.in_set(SimSet::Steering),
-            physics::apply_forces.in_set(SimSet::Steering).before(systems::follow_path),
+            physics::apply_friction.in_set(SimSet::Steering),
+            physics::apply_forces.in_set(SimSet::Steering),
             
             // Integration
             physics::apply_velocity.in_set(SimSet::Integration),
