@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use peregrine::game::fixed_math::{FixedVec2, FixedNum};
-use peregrine::game::simulation::{SimulationPlugin, MapFlowField, SimPosition, SimPositionPrev, SimVelocity, SimAcceleration, Collider, CollisionState, BoidsNeighborCache};
+use peregrine::game::simulation::{SimulationPlugin, MapFlowField, SimPosition, SimPositionPrev, SimVelocity, SimAcceleration, Collider, CollisionState};
 use peregrine::game::config::GameConfigPlugin;
 use peregrine::game::pathfinding::PathfindingPlugin;
 use peregrine::game::loading::LoadingProgress;
@@ -202,7 +202,6 @@ fn test_collision_crowding() {
             SimAcceleration::default(),
             Collider::default(),
             CollisionState::default(),
-            BoidsNeighborCache::default(),
             // OccupiedCell will be added by update_spatial_hash system
         )).id();
         units.push(id);

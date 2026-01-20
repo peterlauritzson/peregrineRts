@@ -129,10 +129,8 @@ impl Plugin for SimulationPlugin {
             // Physics - Spatial Hash (full rebuild every frame)
             systems::update_spatial_hash
                 .in_set(SimSet::Physics)
-                .before(collision::update_boids_neighbor_cache)
                 .before(collision::detect_collisions)
                 .before(collision::resolve_collisions),
-            collision::update_boids_neighbor_cache.in_set(SimSet::Physics),
             collision::detect_collisions
                 .in_set(SimSet::Physics)
                 .before(collision::resolve_collisions),

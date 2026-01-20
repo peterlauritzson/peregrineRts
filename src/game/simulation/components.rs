@@ -102,36 +102,6 @@ pub enum ForceType {
 // ============================================================================
 
 /// Cached neighbor list for collision detection.
-/// Cached neighbor list for boids steering calculations.
-/// 
-/// Unlike collision detection which queries spatial hash directly,
-/// boids needs:
-/// - Larger search radius (5.0 units vs 2.0 for collision)
-/// - Velocity data for alignment behavior
-/// - Fewer neighbors (limit to 8 closest)
-/// - Can tolerate stale data (visual-only behavior)
-#[derive(Component, Debug, Clone)]
-pub struct BoidsNeighborCache {
-    /// Closest N neighbors with position and velocity (stack-allocated up to 8)
-    pub neighbors: smallvec::SmallVec<[(Entity, FixedVec2, FixedVec2); 8]>,
-    /// Position where the last query was performed
-    pub last_query_pos: FixedVec2,
-    /// Frames elapsed since last cache update
-    pub frames_since_update: u32,
-}
-
-impl Default for BoidsNeighborCache {
-    fn default() -> Self {
-        Self {
-            // MEMORY_OK: SmallVec has inline storage, no heap allocation for small sizes
-            neighbors: smallvec::SmallVec::new(),
-            last_query_pos: FixedVec2::ZERO,
-            // Initialize to high value to force update on first tick
-            frames_since_update: 999,
-        }
-    }
-}
-
 // ============================================================================
 // Pathfinding Cache Components
 // ============================================================================

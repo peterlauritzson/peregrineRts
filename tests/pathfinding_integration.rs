@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 use peregrine::game::fixed_math::{FixedVec2, FixedNum};
-use peregrine::game::simulation::{SimulationPlugin, MapFlowField, SimPosition, SimPositionPrev, SimVelocity, SimAcceleration, Collider, CollisionState, StaticObstacle, BoidsNeighborCache, OccupiedCell, PathCache, layers};
+use peregrine::game::simulation::{SimulationPlugin, MapFlowField, SimPosition, SimPositionPrev, SimVelocity, SimAcceleration, Collider, CollisionState, StaticObstacle, OccupiedCell, PathCache, layers};
 use peregrine::game::config::GameConfigPlugin;
 use peregrine::game::pathfinding::{PathfindingPlugin, PathRequest, Path, HierarchicalGraph};
 use peregrine::game::loading::LoadingProgress;
@@ -89,7 +89,6 @@ fn test_pathfinding_around_wall() {
         SimAcceleration::default(),
         Collider::default(),
         CollisionState::default(),
-        BoidsNeighborCache::default(),
         OccupiedCell::default(),
         PathCache::default(),
     )).id();
@@ -223,7 +222,6 @@ fn test_pathfinding_close_target_line_of_sight() {
         SimAcceleration::default(),
         Collider::default(),
         CollisionState::default(),
-        BoidsNeighborCache::default(),
         OccupiedCell::default(),
         PathCache::default(),
     )).id();
@@ -334,7 +332,6 @@ fn test_pathfinding_close_target_obstacle() {
         SimAcceleration::default(),
         Collider::default(),
         CollisionState::default(),
-        BoidsNeighborCache::default(),
         OccupiedCell::default(),
         PathCache::default(),
     )).id();

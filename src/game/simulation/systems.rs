@@ -105,7 +105,6 @@ pub fn process_input(
             SimAcceleration(FixedVec2::ZERO),
             Collider::default(),
             CollisionState::default(),
-            BoidsNeighborCache::default(),
             PathCache::default(),
             // OccupiedCell added by update_spatial_hash on first frame
         ));
