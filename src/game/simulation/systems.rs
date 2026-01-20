@@ -103,6 +103,7 @@ pub fn process_input(
             SimVelocity(FixedVec2::ZERO),
             SimAcceleration(FixedVec2::ZERO),
             Collider::default(),
+            CollisionState::default(),
             CachedNeighbors::default(),
             BoidsNeighborCache::default(),
             PathCache::default(),

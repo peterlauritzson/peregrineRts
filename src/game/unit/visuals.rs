@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use crate::game::camera::RtsCamera;
 use crate::game::config::{GameConfig, GameConfigHandle};
-use crate::game::simulation::{SimPosition, SimPositionPrev, Colliding};
+use crate::game::simulation::{SimPosition, SimPositionPrev, CollisionState};
 
 use super::components::{Unit, Selected, SelectionCircle, HealthBar, Health};
 use super::resources::{UnitMesh, UnitMaterials, HealthBarSettings};
@@ -68,23 +68,15 @@ pub(super) fn sync_visuals(
 /// 
 /// Optimized: Only processes entities whose collision state CHANGED (not all units every frame)
 pub(super) fn update_selection_visuals(
-    mut query: Query<&mut MeshMaterial3d<StandardMaterial>, With<Unit>>,
+    mut query: Query<(&mut MeshMaterial3d<StandardMaterial>, &CollisionState), (With<Unit>, Changed<CollisionState>)>,
     unit_materials: Res<UnitMaterials>,
-    added: Query<Entity, Added<Colliding>>,
-    mut removed: RemovedComponents<Colliding>,
 ) {
-    // Handle newly colliding entities
-    for entity in added.iter() {
-        if let Ok(mut mat_handle) = query.get_mut(entity) {
-            // NOLINT: Handle::clone() is cheap (Arc-based ref count)
+    // Only processes entities where CollisionState changed (leverages Bevy's change detection)
+    for (mut mat_handle, collision_state) in query.iter_mut() {
+        // NOLINT: Handle::clone() is cheap (Arc-based ref count)
+        if collision_state.is_colliding {
             mat_handle.0 = unit_materials.colliding.clone();
-        }
-    }
-    
-    // Handle entities that stopped colliding
-    for entity in removed.read() {
-        if let Ok(mut mat_handle) = query.get_mut(entity) {
-            // NOLINT: Handle::clone() is cheap (Arc-based ref count)
+        } else {
             mat_handle.0 = unit_materials.normal.clone();
         }
     }

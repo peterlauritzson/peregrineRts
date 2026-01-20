@@ -59,9 +59,12 @@ impl Default for Collider {
     }
 }
 
-/// Marker component to indicate if a unit is currently colliding with another unit.
-#[derive(Component, Debug, Clone, Copy, Default)]
-pub struct Colliding;
+/// Component to track collision state of a unit.
+/// Always present to avoid insert/remove overhead and leverage ECS change detection.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CollisionState {
+    pub is_colliding: bool,
+}
 
 // ============================================================================
 // Obstacle Components

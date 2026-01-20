@@ -41,8 +41,7 @@ pub fn update_neighbor_cache(
     sim_config: Res<SimConfig>,
     _obstacles_query: Query<Entity, (With<StaticObstacle>, With<SimPosition>, With<Collider>)>,
     _all_entities: Query<(Entity, Option<&StaticObstacle>, Option<&SimPosition>, Option<&Collider>)>,
-) {
-    
+) {    
     // Thresholds for cache invalidation
     let fast_mover_speed_threshold = FixedNum::from_num(8.0); // units/sec
     let normal_update_threshold = FixedNum::from_num(0.5);    // units moved
@@ -208,8 +207,7 @@ pub fn update_boids_neighbor_cache(
 /// Detect collisions between entities using cached neighbor lists
 #[profile]
 pub fn detect_collisions(
-    mut commands: Commands,
-    query: Query<(Entity, &SimPosition, &Collider, &CachedNeighbors)>,
+    mut query: Query<(Entity, &SimPosition, &Collider, &CachedNeighbors, &mut CollisionState)>,
     position_lookup: Query<(&SimPosition, &Collider)>,
     sim_config: Res<SimConfig>,
     mut events: MessageWriter<CollisionEvent>,
@@ -220,7 +218,7 @@ pub fn detect_collisions(
     // Use cached neighbor lists instead of querying spatial hash
     // Cache is updated by update_neighbor_cache system which runs before this
     
-    for (entity, pos, collider, cache) in query.iter() {
+    for (entity, pos, collider, cache, _) in query.iter() {
         // Use cached neighbor list (no spatial hash query needed!)
         for &other_entity in &cache.neighbors {
             // Skip duplicates to avoid double-processing the same collision
@@ -269,12 +267,12 @@ pub fn detect_collisions(
         }
     }
 
-    // Sync component state
-    for (entity, _, _, _) in query.iter() {
-        if colliding_entities.contains(&entity) {
-            commands.entity(entity).insert(Colliding);
-        } else {
-            commands.entity(entity).remove::<Colliding>();
+    // Batch update collision states efficiently
+    // Only mutate when state actually changes to avoid triggering change detection unnecessarily
+    for (entity, _, _, _, mut collision_state) in query.iter_mut() {
+        let is_colliding = colliding_entities.contains(&entity);
+        if collision_state.is_colliding != is_colliding {
+            collision_state.is_colliding = is_colliding;
         }
     }
 }

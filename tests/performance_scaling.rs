@@ -104,7 +104,7 @@ use bevy::prelude::*;
 use bevy::ecs::system::RunSystemOnce;
 use peregrine::game::simulation::components::{
     SimPosition, SimPositionPrev, SimVelocity, SimAcceleration, Collider,
-    CachedNeighbors, OccupiedCell, StaticObstacle, layers,
+    CollisionState, CachedNeighbors, OccupiedCell, StaticObstacle, layers,
 };
 use peregrine::game::simulation::resources::{SimConfig, MapFlowField};
 use peregrine::game::simulation::systems::apply_obstacle_to_flow_field;
@@ -396,15 +396,15 @@ impl SystemMetrics {
             .max(self.pathfinding_ms);
         
         if (self.spatial_hash_ms - max_time).abs() < 0.001 {
-            println!("  ⚠ PRIMARY BOTTLENECK (avg): Spatial Hash (O(n) - entity insertion/updates)");
+            println!("  ⚠ PRIMARY BOTTLENECK (avg): Spatial Hash)");
         } else if (self.collision_detect_ms - max_time).abs() < 0.001 {
-            println!("  ⚠ PRIMARY BOTTLENECK (avg): Collision Detection (O(n*neighbors) - dominant at scale)");
+            println!("  ⚠ PRIMARY BOTTLENECK (avg): Collision Detection");
         } else if (self.collision_resolve_ms - max_time).abs() < 0.001 {
-            println!("  ⚠ PRIMARY BOTTLENECK (avg): Collision Resolution (O(collisions))");
+            println!("  ⚠ PRIMARY BOTTLENECK (avg): Collision Resolution");
         } else if (self.physics_ms - max_time).abs() < 0.001 {
-            println!("  ⚠ PRIMARY BOTTLENECK (avg): Physics (O(n) - velocity application)");
+            println!("  ⚠ PRIMARY BOTTLENECK (avg): Physics");
         } else if (self.pathfinding_ms - max_time).abs() < 0.001 {
-            println!("  ⚠ PRIMARY BOTTLENECK (avg): Pathfinding (hierarchical A* + cluster flow)");
+            println!("  ⚠ PRIMARY BOTTLENECK (avg): Pathfinding");
         }
         
         // Also highlight worst spike
@@ -804,6 +804,7 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
             )),
             SimAcceleration(FixedVec2::ZERO),
             Collider::default(), // Collision detection enabled
+            CollisionState::default(),
             CachedNeighbors::default(),
             OccupiedCell::default(),
         ));

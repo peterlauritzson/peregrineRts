@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use peregrine::game::fixed_math::{FixedVec2, FixedNum};
-use peregrine::game::simulation::{SimulationPlugin, MapFlowField, SimPosition, SimPositionPrev, SimVelocity, SimAcceleration, Collider, CachedNeighbors, BoidsNeighborCache};
+use peregrine::game::simulation::{SimulationPlugin, MapFlowField, SimPosition, SimPositionPrev, SimVelocity, SimAcceleration, Collider, CollisionState, CachedNeighbors, BoidsNeighborCache};
 use peregrine::game::config::GameConfigPlugin;
 use peregrine::game::pathfinding::PathfindingPlugin;
 use peregrine::game::loading::LoadingProgress;
@@ -45,6 +45,7 @@ fn test_collision_unit_unit() {
         SimVelocity(FixedVec2::new(FixedNum::from_num(1.0), FixedNum::from_num(0.0))),
         SimAcceleration::default(),
         Collider::default(),
+        CollisionState::default(),
         CachedNeighbors::default(),
         BoidsNeighborCache::default(),
         // OccupiedCell will be added by update_spatial_hash system
@@ -57,6 +58,7 @@ fn test_collision_unit_unit() {
         SimVelocity(FixedVec2::new(FixedNum::from_num(-1.0), FixedNum::from_num(0.0))),
         SimAcceleration::default(),
         Collider::default(),
+        CollisionState::default(),
         CachedNeighbors::default(),
         BoidsNeighborCache::default(),
         // OccupiedCell will be added by update_spatial_hash system
@@ -136,6 +138,7 @@ fn test_collision_unit_wall() {
         SimVelocity(FixedVec2::new(FixedNum::from_num(1.0), FixedNum::from_num(0.0))),
         SimAcceleration::default(),
         Collider::default(),
+        CollisionState::default(),
         CachedNeighbors::default(),
         BoidsNeighborCache::default(),
         // OccupiedCell will be added by update_spatial_hash system
@@ -201,6 +204,7 @@ fn test_collision_crowding() {
             SimVelocity(FixedVec2::ZERO),
             SimAcceleration::default(),
             Collider::default(),
+            CollisionState::default(),
             CachedNeighbors::default(),
             BoidsNeighborCache::default(),
             // OccupiedCell will be added by update_spatial_hash system
