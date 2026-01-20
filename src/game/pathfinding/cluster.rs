@@ -73,6 +73,7 @@ pub(super) fn create_portal_vertical(
     y_start: usize, y_end: usize,
     c1x: usize, c1y: usize,
     c2x: usize, c2y: usize,
+    flow_field: &crate::game::structures::FlowField,
 ) {
     let mid_y = (y_start + y_end) / 2;
     
@@ -83,7 +84,8 @@ pub(super) fn create_portal_vertical(
         node: Node { x: x1, y: mid_y }, 
         range_min: Node { x: x1, y: y_start },
         range_max: Node { x: x1, y: y_end },
-        cluster: (c1x, c1y) 
+        cluster: (c1x, c1y),
+        world_pos: flow_field.grid_to_world(x1, mid_y),
     });
 
     let id2 = graph.next_portal_id;
@@ -93,7 +95,8 @@ pub(super) fn create_portal_vertical(
         node: Node { x: x2, y: mid_y }, 
         range_min: Node { x: x2, y: y_start },
         range_max: Node { x: x2, y: y_end },
-        cluster: (c2x, c2y) 
+        cluster: (c2x, c2y),
+        world_pos: flow_field.grid_to_world(x2, mid_y),
     });
     
     let cost = FixedNum::from_num(1.0);
@@ -107,6 +110,7 @@ pub(super) fn create_portal_horizontal(
     y1: usize, y2: usize,
     c1x: usize, c1y: usize,
     c2x: usize, c2y: usize,
+    flow_field: &crate::game::structures::FlowField,
 ) {
     let mid_x = (x_start + x_end) / 2;
     
@@ -117,7 +121,8 @@ pub(super) fn create_portal_horizontal(
         node: Node { x: mid_x, y: y1 }, 
         range_min: Node { x: x_start, y: y1 },
         range_max: Node { x: x_end, y: y1 },
-        cluster: (c1x, c1y) 
+        cluster: (c1x, c1y),
+        world_pos: flow_field.grid_to_world(mid_x, y1),
     });
 
     let id2 = graph.next_portal_id;
@@ -127,7 +132,8 @@ pub(super) fn create_portal_horizontal(
         node: Node { x: mid_x, y: y2 }, 
         range_min: Node { x: x_start, y: y2 },
         range_max: Node { x: x_end, y: y2 },
-        cluster: (c2x, c2y) 
+        cluster: (c2x, c2y),
+        world_pos: flow_field.grid_to_world(mid_x, y2),
     });
     
     let cost = FixedNum::from_num(1.0);
@@ -142,6 +148,7 @@ pub(super) fn create_portal_diagonal(
     c1x: usize, c1y: usize,
     x2: usize, y2: usize,
     c2x: usize, c2y: usize,
+    flow_field: &crate::game::structures::FlowField,
 ) {
     let id1 = graph.next_portal_id;
     graph.next_portal_id += 1;
@@ -150,7 +157,8 @@ pub(super) fn create_portal_diagonal(
         node: Node { x: x1, y: y1 }, 
         range_min: Node { x: x1, y: y1 },
         range_max: Node { x: x1, y: y1 },
-        cluster: (c1x, c1y) 
+        cluster: (c1x, c1y),
+        world_pos: flow_field.grid_to_world(x1, y1),
     });
 
     let id2 = graph.next_portal_id;
@@ -160,7 +168,8 @@ pub(super) fn create_portal_diagonal(
         node: Node { x: x2, y: y2 }, 
         range_min: Node { x: x2, y: y2 },
         range_max: Node { x: x2, y: y2 },
-        cluster: (c2x, c2y) 
+        cluster: (c2x, c2y),
+        world_pos: flow_field.grid_to_world(x2, y2),
     });
     
     // Diagonal distance: sqrt(2) ≈ 1.414

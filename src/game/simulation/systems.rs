@@ -13,7 +13,7 @@ mod systems_config;
 
 use bevy::prelude::*;
 use crate::game::fixed_math::{FixedVec2, FixedNum};
-use crate::game::pathfinding::{Path, PathRequest, HierarchicalGraph, CLUSTER_SIZE, world_to_cluster_local};
+use crate::game::pathfinding::{Path, PathRequest, HierarchicalGraph, CLUSTER_SIZE, world_to_cluster_local, IslandId};
 use crate::game::spatial_hash::{SpatialHash, SpatialHashScratch};
 use peregrine_macros::profile;
 
@@ -21,6 +21,25 @@ use super::components::*;
 use super::resources::*;
 use super::events::*;
 use super::physics::seek;
+
+// ============================================================================
+// Navigation Target Types
+// ============================================================================
+
+/// Result of pathfinding query - tells entity where to move next
+#[derive(Debug, Clone, Copy)]
+enum NavigationTarget {
+    /// Move directly toward goal (same region, convex guarantee)
+    Direct(FixedVec2),
+    /// Move toward inter-cluster portal
+    InterClusterPortal(FixedVec2),
+    /// Move toward intra-cluster region portal
+    IntraClusterPortal(FixedVec2),
+    /// Reached destination
+    Arrived,
+    /// No path exists (unreachable)
+    Blocked,
+}
 
 // Re-export systems from submodules
 pub use systems_spatial::{update_spatial_hash, init_flow_field, apply_obstacle_to_flow_field, apply_new_obstacles, PendingVecIdxUpdates};
@@ -115,6 +134,190 @@ pub fn process_input(
 // Path Following
 // ============================================================================
 
+/// Compute where the entity should move next based on hierarchical pathfinding
+/// 
+/// This function separates pathfinding logic from steering, making the code
+/// much more maintainable and testable.
+fn compute_navigation_target(
+    pos: FixedVec2,
+    goal: FixedVec2,
+    goal_cluster: (usize, usize),
+    goal_island: IslandId,
+    threshold_sq: FixedNum,
+    graph: &HierarchicalGraph,
+    flow_field: &crate::game::structures::FlowField,
+    path_cache: &mut PathCache,
+) -> NavigationTarget {
+    // Check if we've arrived
+    let delta = goal - pos;
+    if delta.length_squared() < threshold_sq {
+        return NavigationTarget::Arrived;
+    }
+    
+    // Determine current location (with caching)
+    let current_grid = match flow_field.world_to_grid(pos) {
+        Some(grid) => grid,
+        None => return NavigationTarget::Direct(goal), // Off grid - move toward goal
+    };
+    
+    let (current_cluster, current_region_opt) = if path_cache.frames_since_validation >= 4 {
+        // Full validation every 4 frames
+        path_cache.frames_since_validation = 0;
+        
+        let new_cluster = (current_grid.0 / CLUSTER_SIZE, current_grid.1 / CLUSTER_SIZE);
+        let new_region = graph.clusters.get(&new_cluster)
+            .and_then(|cluster| {
+                world_to_cluster_local(pos, new_cluster, flow_field)
+                    .and_then(|local_pos| {
+                        crate::game::pathfinding::get_region_id(
+                            &cluster.regions,
+                            cluster.region_count,
+                            local_pos
+                        )
+                    })
+            });
+        
+        // Update cache
+        path_cache.cached_cluster = new_cluster;
+        if let Some(region) = new_region {
+            path_cache.cached_region = region;
+        }
+        
+        (new_cluster, new_region)
+    } else {
+        // Use cached values (fast path)
+        path_cache.frames_since_validation += 1;
+        (path_cache.cached_cluster, Some(path_cache.cached_region))
+    };
+    
+    // CASE 1: Same cluster as goal
+    if current_cluster == goal_cluster {
+        let cluster = match graph.clusters.get(&current_cluster) {
+            Some(c) => c,
+            None => return NavigationTarget::Direct(goal), // No cluster data
+        };
+        
+        // Get current region (use cache if available)
+        let current_region = current_region_opt.or_else(|| {
+            world_to_cluster_local(pos, current_cluster, flow_field)
+                .and_then(|local_pos| {
+                    crate::game::pathfinding::get_region_id(
+                        &cluster.regions,
+                        cluster.region_count,
+                        local_pos
+                    )
+                })
+        });
+        
+        // Get goal region
+        let goal_region = world_to_cluster_local(goal, current_cluster, flow_field)
+            .and_then(|local_goal| {
+                crate::game::pathfinding::get_region_id(
+                    &cluster.regions,
+                    cluster.region_count,
+                    local_goal
+                )
+            });
+        
+        match (current_region, goal_region) {
+            (Some(curr_reg), Some(goal_reg)) if curr_reg == goal_reg => {
+                // Same region - direct movement (convexity guarantee)
+                if let Some(region_data) = &cluster.regions[curr_reg.0 as usize] {
+                    if region_data.is_dangerous {
+                        warn_once!("[PATHFINDING] Moving through dangerous region - using direct path");
+                    }
+                }
+                NavigationTarget::Direct(goal)
+            }
+            (Some(curr_reg), Some(goal_reg)) => {
+                // Different regions in same cluster - use local routing
+                let next_region_id = cluster.local_routing[curr_reg.0 as usize][goal_reg.0 as usize];
+                
+                if next_region_id == crate::game::pathfinding::NO_PATH {
+                    return NavigationTarget::Direct(goal); // No path - try direct
+                }
+                
+                // Find portal to next region
+                if let Some(current_region_data) = &cluster.regions[curr_reg.0 as usize] {
+                    if let Some(portal) = current_region_data.portals.iter()
+                        .find(|p| p.next_region.0 == next_region_id) {
+                        return NavigationTarget::IntraClusterPortal(portal.center);
+                    }
+                }
+                
+                NavigationTarget::Direct(goal) // Portal not found
+            }
+            _ => NavigationTarget::Direct(goal), // Can't determine regions
+        }
+    } else {
+        // CASE 2: Different cluster - use island routing
+        let current_cluster_data = match graph.clusters.get(&current_cluster) {
+            Some(c) => c,
+            None => return NavigationTarget::Direct(goal),
+        };
+        
+        // Determine current island
+        let current_island = if let Some(curr_reg) = current_region_opt {
+            current_cluster_data.regions[curr_reg.0 as usize]
+                .as_ref()
+                .map(|r| r.island)
+        } else {
+            // Not in any region - find nearest region's island
+            world_to_cluster_local(pos, current_cluster, flow_field)
+                .and_then(|local_pos| {
+                    let mut nearest_island = None;
+                    let mut min_dist_sq = f32::MAX;
+                    
+                    for region_opt in &current_cluster_data.regions[0..current_cluster_data.region_count] {
+                        if let Some(region) = region_opt {
+                            let center = region.bounds.center();
+                            let dx = center.x - local_pos.x;
+                            let dy = center.y - local_pos.y;
+                            let dist_sq = dx * dx + dy * dy;
+                            
+                            if dist_sq < FixedNum::from_num(min_dist_sq) {
+                                min_dist_sq = dist_sq.to_num::<f32>();
+                                nearest_island = Some(region.island);
+                            }
+                        }
+                    }
+                    nearest_island
+                })
+        };
+        
+        let current_island = match current_island {
+            Some(island) => island,
+            None => return NavigationTarget::Direct(goal), // Can't determine island
+        };
+        
+        let current_island_id = crate::game::pathfinding::ClusterIslandId::new(
+            current_cluster,
+            current_island
+        );
+        let goal_island_id = crate::game::pathfinding::ClusterIslandId::new(
+            goal_cluster,
+            goal_island
+        );
+        
+        // Query island routing table
+        match graph.get_next_portal_for_island(current_island_id, goal_island_id) {
+            Some(next_portal_id) => {
+                if let Some(portal) = graph.portals.get(&next_portal_id) {
+                    NavigationTarget::InterClusterPortal(portal.world_pos)
+                } else {
+                    NavigationTarget::Direct(goal) // Portal not found
+                }
+            }
+            None => {
+                // No route - unreachable goal
+                warn_once!("[PATHFINDING] No route from {:?} to {:?}",
+                    current_island_id, goal_island_id);
+                NavigationTarget::Blocked
+            }
+        }
+    }
+}
+
 /// Follow assigned paths using flow fields and steering
 pub fn follow_path(
     mut commands: Commands,
@@ -200,239 +403,33 @@ pub fn follow_path(
                 seek(pos.0, target, vel.0, &mut acc.0, speed, max_force);
             },
             Path::Hierarchical { goal, goal_cluster, goal_region: _goal_region, goal_island } => {
-                // NEW: Region-based hierarchical pathfinding with caching
-                // Skip-frame validation: only revalidate region every 4 frames
+                // Query navigation system for next target
+                let nav_target = compute_navigation_target(
+                    pos.0,
+                    *goal,
+                    *goal_cluster,
+                    *goal_island,
+                    threshold_sq,
+                    &graph,
+                    flow_field,
+                    &mut path_cache,
+                );
                 
-                let current_grid = flow_field.world_to_grid(pos.0);
-                if let Some((gx, gy)) = current_grid {
-                    // PERFORMANCE OPTIMIZATION: Skip-frame validation
-                    // Only revalidate cluster/region every 4 frames (3.75x speedup)
-                    let (current_cluster, current_region_opt) = if path_cache.frames_since_validation >= 4 {
-                        path_cache.frames_since_validation = 0;
-                        
-                        // Full validation - check actual cluster and region
-                        let cx = gx / CLUSTER_SIZE;
-                        let cy = gy / CLUSTER_SIZE;
-                        let new_cluster = (cx, cy);
-                        
-                        let new_region = if let Some(cluster) = graph.clusters.get(&new_cluster) {
-                            world_to_cluster_local(pos.0, new_cluster, flow_field)
-                                .and_then(|local_pos| {
-                                    crate::game::pathfinding::get_region_id(
-                                        &cluster.regions,
-                                        cluster.region_count,
-                                        local_pos
-                                    )
-                                })
-                        } else {
-                            None
-                        };
-                        
-                        // Update cache
-                        path_cache.cached_cluster = new_cluster;
-                        if let Some(region) = new_region {
-                            path_cache.cached_region = region;
-                        }
-                        
-                        (new_cluster, new_region)
-                    } else {
-                        // Use cached values (fast path)
-                        path_cache.frames_since_validation += 1;
-                        (path_cache.cached_cluster, Some(path_cache.cached_region))
-                    };
-                    
-                    let current_cluster = current_cluster;
-                    let current_cluster = current_cluster;
-                    
-                    if current_cluster == *goal_cluster {
-                        // Same cluster - use local routing or direct movement
-                        if let Some(cluster) = graph.clusters.get(&current_cluster) {
-                            // Use cached region if available, otherwise recompute
-                            let current_region = current_region_opt.or_else(|| {
-                                world_to_cluster_local(pos.0, current_cluster, flow_field)
-                                    .and_then(|local_pos| {
-                                        crate::game::pathfinding::get_region_id(
-                                            &cluster.regions,
-                                            cluster.region_count,
-                                            local_pos
-                                        )
-                                    })
-                            });
-                            
-                            let goal_region = world_to_cluster_local(*goal, current_cluster, flow_field)
-                                .and_then(|local_goal| {
-                                    crate::game::pathfinding::get_region_id(
-                                        &cluster.regions,
-                                        cluster.region_count,
-                                        local_goal
-                                    )
-                                });
-                            
-                            match (current_region, goal_region) {
-                                (Some(curr_reg), Some(goal_reg)) if curr_reg == goal_reg => {
-                                    // Same region - check if region is dangerous
-                                    if let Some(region_data) = &cluster.regions[curr_reg.0 as usize] {
-                                        if region_data.is_dangerous {
-                                            // TODO: IMPROVE - Add local A* for dangerous regions
-                                            // For now, use direct movement and rely on collision avoidance
-                                            warn_once!("[PATHFINDING] Moving through dangerous region - using direct path. \
-                                                Consider implementing local A* for non-convex regions.");
-                                        }
-                                    }
-                                    
-                                    // Direct movement (convexity guarantee, or best effort for dangerous regions)
-                                    let delta = *goal - pos.0;
-                                    if delta.length_squared() < threshold_sq {
-                                        commands.entity(entity).remove::<Path>();
-                                        acc.0 = acc.0 - vel.0 * sim_config.braking_force;
-                                        continue;
-                                    }
-                                    seek(pos.0, *goal, vel.0, &mut acc.0, speed, max_force);
-                                }
-                                (Some(curr_reg), Some(goal_reg)) => {
-                                    // Different region in same cluster - use local routing
-                                    let next_region_id = cluster.local_routing[curr_reg.0 as usize][goal_reg.0 as usize];
-                                    
-                                    if next_region_id == crate::game::pathfinding::NO_PATH {
-                                        // No path - fallback to direct movement
-                                        seek(pos.0, *goal, vel.0, &mut acc.0, speed, max_force);
-                                    } else {
-                                        // Find portal to next region
-                                        if let Some(current_region_data) = &cluster.regions[curr_reg.0 as usize] {
-                                            // Find portal to next_region_id
-                                            let target = if let Some(portal) = current_region_data.portals.iter()
-                                                .find(|p| p.next_region.0 == next_region_id) {
-                                                // Move toward portal center
-                                                portal.center
-                                            } else {
-                                                // No portal found, move toward goal directly
-                                                *goal
-                                            };
-                                            
-                                            seek(pos.0, target, vel.0, &mut acc.0, speed, max_force);
-                                        } else {
-                                            seek(pos.0, *goal, vel.0, &mut acc.0, speed, max_force);
-                                        }
-                                    }
-                                }
-                                _ => {
-                                    // Can't determine region - fallback to direct movement
-                                    seek(pos.0, *goal, vel.0, &mut acc.0, speed, max_force);
-                                }
-                            }
-                        } else {
-                            // No cluster data - fallback
-                            seek(pos.0, *goal, vel.0, &mut acc.0, speed, max_force);
-                        }
-                    } else {
-                        // Different cluster - use island-aware routing
-                        if let Some(current_cluster_data) = graph.clusters.get(&current_cluster) {
-                            // Use cached region if available
-                            let current_region = current_region_opt.or_else(|| {
-                                world_to_cluster_local(pos.0, current_cluster, flow_field)
-                                    .and_then(|local_pos| {
-                                        crate::game::pathfinding::get_region_id(
-                                            &current_cluster_data.regions,
-                                            current_cluster_data.region_count,
-                                            local_pos
-                                        )
-                                    })
-                            });
-                            
-                            // Determine current island - if region lookup fails, find nearest region
-                            let current_island = if let Some(curr_reg) = current_region {
-                                // In a region - use its island
-                                current_cluster_data.regions[curr_reg.0 as usize]
-                                    .as_ref()
-                                    .map(|r| r.island)
-                            } else {
-                                // Not in any region - find nearest region's island
-                                world_to_cluster_local(pos.0, current_cluster, flow_field)
-                                    .and_then(|local_pos| {
-                                        let mut nearest_island = None;
-                                        let mut min_dist_sq = f32::MAX;
-                                        
-                                        for region_opt in &current_cluster_data.regions[0..current_cluster_data.region_count] {
-                                            if let Some(region) = region_opt {
-                                                let center = region.bounds.center();
-                                                let dx = center.x - local_pos.x;
-                                                let dy = center.y - local_pos.y;
-                                                let dist_sq = dx * dx + dy * dy;
-                                                
-                                                if dist_sq < FixedNum::from_num(min_dist_sq) {
-                                                    min_dist_sq = dist_sq.to_num::<f32>();
-                                                    nearest_island = Some(region.island);
-                                                }
-                                            }
-                                        }
-                                        nearest_island
-                                    })
-                            };
-                            
-                            if let Some(current_island) = current_island {
-                                let current_island_id = crate::game::pathfinding::ClusterIslandId::new(
-                                    current_cluster,
-                                    current_island
-                                );
-                                let goal_island_id = crate::game::pathfinding::ClusterIslandId::new(
-                                    *goal_cluster,
-                                    *goal_island
-                                );
-                                
-                                // Debug logging for first few frames
-                                static LOGGED_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-                                if LOGGED_COUNT.load(std::sync::atomic::Ordering::Relaxed) < 10 {
-                                    info!("[NAV] Unit at cluster {:?} island {} -> goal cluster {:?} island {}",
-                                        current_cluster, current_island.0, goal_cluster, goal_island.0);
-                                    LOGGED_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                }
-                                
-                                // Lookup next portal from island routing table
-                                if let Some(next_portal_id) = graph.get_next_portal_for_island(
-                                    current_island_id,
-                                    goal_island_id
-                                ) {
-
-                                    if let Some(portal) = graph.portals.get(&next_portal_id) {
-                                        let portal_pos = flow_field.grid_to_world(portal.node.x, portal.node.y);
-                                        
-                                        // Debug: Log which portal was chosen
-                                        if LOGGED_COUNT.load(std::sync::atomic::Ordering::Relaxed) < 10 {
-                                            info!("  -> Portal {} at ({}, {})", next_portal_id, portal.node.x, portal.node.y);
-                                        }
-                                        
-                                        seek(pos.0, portal_pos, vel.0, &mut acc.0, speed, max_force);
-                                    } else {
-                                        // Portal not found - move toward goal
-                                        seek(pos.0, *goal, vel.0, &mut acc.0, speed, max_force);
-                                    }
-                                } else {
-                                    // No route found - invalidate path
-                                    if LOGGED_COUNT.load(std::sync::atomic::Ordering::Relaxed) < 10 {
-                                        warn!("  -> NO ROUTE FOUND! Invalidating path.");
-                                    }
-                                    warn_once!("[PATHFINDING] No route from {:?} to {:?} - path invalidated. \
-                                        This usually means routing table is incomplete or islands are unreachable.",
-                                        current_island_id, goal_island_id);
-                                    
-                                    // TODO: IMPROVE - Emit PathFailed event for higher-level systems
-                                    commands.entity(entity).remove::<Path>();
-                                    acc.0 = acc.0 - vel.0 * sim_config.braking_force;
-                                    continue;
-                                }
-                            } else {
-                                // Can't determine current island - move toward goal
-                                warn_once!("[PATHFINDING] Can't determine current island for cluster {:?} - falling back to direct movement", current_cluster);
-                                seek(pos.0, *goal, vel.0, &mut acc.0, speed, max_force);
-                            }
-                        } else {
-                            // No cluster data - fallback to direct movement
-                            seek(pos.0, *goal, vel.0, &mut acc.0, speed, max_force);
-                        }
+                // Act on navigation decision
+                match nav_target {
+                    NavigationTarget::Direct(target) |
+                    NavigationTarget::InterClusterPortal(target) |
+                    NavigationTarget::IntraClusterPortal(target) => {
+                        seek(pos.0, target, vel.0, &mut acc.0, speed, max_force);
                     }
-                } else {
-                    // Off grid - move toward goal
-                    seek(pos.0, *goal, vel.0, &mut acc.0, speed, max_force);
+                    NavigationTarget::Arrived => {
+                        commands.entity(entity).remove::<Path>();
+                        acc.0 = acc.0 - vel.0 * sim_config.braking_force;
+                    }
+                    NavigationTarget::Blocked => {
+                        commands.entity(entity).remove::<Path>();
+                        acc.0 = acc.0 - vel.0 * sim_config.braking_force;
+                    }
                 }
             }
         }

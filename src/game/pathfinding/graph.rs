@@ -450,13 +450,13 @@ impl HierarchicalGraph {
                             }
                         } else {
                             if let Some(sy) = start_segment {
-                                super::cluster::create_portal_vertical(self, x1, x2, sy, y - 1, cx, cy, cx + 1, cy);
+                                super::cluster::create_portal_vertical(self, x1, x2, sy, y - 1, cx, cy, cx + 1, cy, flow_field);
                                 start_segment = None;
                             }
                         }
                     }
                     if let Some(sy) = start_segment {
-                        super::cluster::create_portal_vertical(self, x1, x2, sy, max_y - 1, cx, cy, cx + 1, cy);
+                        super::cluster::create_portal_vertical(self, x1, x2, sy, max_y - 1, cx, cy, cx + 1, cy, flow_field);
                     }
                 }
             }
@@ -483,13 +483,13 @@ impl HierarchicalGraph {
                             }
                         } else {
                             if let Some(sx) = start_segment {
-                                super::cluster::create_portal_horizontal(self, sx, x - 1, y1, y2, cx, cy, cx, cy + 1);
+                                super::cluster::create_portal_horizontal(self, sx, x - 1, y1, y2, cx, cy, cx, cy + 1, flow_field);
                                 start_segment = None;
                             }
                         }
                     }
                     if let Some(sx) = start_segment {
-                        super::cluster::create_portal_horizontal(self, sx, max_x - 1, y1, y2, cx, cy, cx, cy + 1);
+                        super::cluster::create_portal_horizontal(self, sx, max_x - 1, y1, y2, cx, cy, cx, cy + 1, flow_field);
                     }
                 }
             }
@@ -544,6 +544,7 @@ impl HierarchicalGraph {
                             super::cluster::create_portal_diagonal(
                                 self, ne_x, ne_y, cx, cy,
                                 sw_x, sw_y, cx + 1, cy + 1,
+                                flow_field,
                             );
                         }
                     }
@@ -563,6 +564,7 @@ impl HierarchicalGraph {
                             super::cluster::create_portal_diagonal(
                                 self, nw_x, nw_y, cx + 1, cy,
                                 se_x, se_y, cx, cy + 1,
+                                flow_field,
                             );
                         }
                     }

@@ -102,6 +102,8 @@ pub struct Portal {
     pub range_min: Node,
     pub range_max: Node,
     pub cluster: (usize, usize),
+    /// Cached world position (precomputed to avoid grid_to_world in hot path)
+    pub world_pos: FixedVec2,
 }
 
 // ============================================================================
