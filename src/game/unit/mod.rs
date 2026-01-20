@@ -10,12 +10,12 @@ use crate::game::simulation::{SimSet, follow_path};
 // Re-export public types
 pub use components::{Unit, Health, Selected, SelectionCircle, HealthBar};
 pub use resources::{HealthBarSettings, UnitMesh, UnitMaterials};
+pub use boids::apply_boids_steering;
 
 use resources::setup_unit_resources;
 use visuals::{spawn_unit_visuals, sync_visuals, update_selection_visuals, 
               update_selection_circle_visibility, update_unit_lod,
               toggle_health_bars, update_health_bars};
-use boids::apply_boids_steering;
 
 /// Plugin that manages unit entities, their visuals, and behaviors
 pub struct UnitPlugin;

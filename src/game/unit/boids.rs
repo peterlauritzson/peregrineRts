@@ -14,7 +14,7 @@ use super::components::Unit;
 /// - **Alignment**: Steer toward the average heading of neighbors
 /// - **Cohesion**: Steer toward the average position (center of mass) of neighbors
 #[profile(2)]
-pub(super) fn apply_boids_steering(
+pub fn apply_boids_steering(
     mut query: Query<(Entity, &SimPosition, &mut SimVelocity, &BoidsNeighborCache), With<Unit>>,
     sim_config: Res<SimConfig>,
     #[allow(unused_variables)] tick: Res<SimTick>,

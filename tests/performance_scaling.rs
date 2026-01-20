@@ -104,14 +104,16 @@ use bevy::prelude::*;
 use bevy::ecs::system::RunSystemOnce;
 use peregrine::game::simulation::components::{
     SimPosition, SimPositionPrev, SimVelocity, SimAcceleration, Collider,
-    CollisionState, OccupiedCell, StaticObstacle, layers,
+    CollisionState, OccupiedCell, StaticObstacle, BoidsNeighborCache, layers,
 };
+use peregrine::game::unit::Unit;
 use peregrine::game::simulation::resources::{SimConfig, MapFlowField};
 use peregrine::game::simulation::systems::apply_obstacle_to_flow_field;
 use peregrine::game::simulation::collision::CollisionEvent;
 use peregrine::game::simulation::physics;
 use peregrine::game::simulation::collision;
 use peregrine::game::simulation::systems;
+use peregrine::game::unit::apply_boids_steering;
 use peregrine::game::spatial_hash::SpatialHash;
 use peregrine::game::pathfinding::{
     PathRequest, HierarchicalGraph,
@@ -128,6 +130,8 @@ use std::sync::{Arc, Mutex};
 #[derive(Resource, Default, Clone)]
 struct SystemTimings {
     spatial_hash_ms: Arc<Mutex<f32>>,
+    boids_cache_ms: Arc<Mutex<f32>>,
+    boids_steering_ms: Arc<Mutex<f32>>,
     collision_detect_ms: Arc<Mutex<f32>>,
     collision_resolve_ms: Arc<Mutex<f32>>,
     physics_ms: Arc<Mutex<f32>>,
@@ -264,12 +268,16 @@ impl TestMode {
 #[derive(Debug, Clone, Default)]
 struct SystemMetrics {
     spatial_hash_ms: f32,
+    boids_cache_ms: f32,
+    boids_steering_ms: f32,
     collision_detect_ms: f32,
     collision_resolve_ms: f32,
     physics_ms: f32,
     pathfinding_ms: f32,
     // Max times for detecting spikes
     spatial_hash_max_ms: f32,
+    boids_cache_max_ms: f32,
+    boids_steering_max_ms: f32,
     collision_detect_max_ms: f32,
     collision_resolve_max_ms: f32,
     physics_max_ms: f32,
@@ -286,12 +294,15 @@ struct SystemMetrics {
 
 impl SystemMetrics {
     fn total_ms(&self) -> f32 {
-        self.spatial_hash_ms + self.collision_detect_ms + 
-        self.collision_resolve_ms + self.physics_ms + self.pathfinding_ms
+        self.spatial_hash_ms + self.boids_cache_ms + self.boids_steering_ms + 
+        self.collision_detect_ms + self.collision_resolve_ms + self.physics_ms + 
+        self.pathfinding_ms
     }
     
     fn add(&mut self, other: &SystemMetrics) {
         self.spatial_hash_ms += other.spatial_hash_ms;
+        self.boids_cache_ms += other.boids_cache_ms;
+        self.boids_steering_ms += other.boids_steering_ms;
         self.collision_detect_ms += other.collision_detect_ms;
         self.collision_resolve_ms += other.collision_resolve_ms;
         self.physics_ms += other.physics_ms;
@@ -307,6 +318,8 @@ impl SystemMetrics {
     
     fn update_max(&mut self, other: &SystemMetrics) {
         self.spatial_hash_max_ms = self.spatial_hash_max_ms.max(other.spatial_hash_ms);
+        self.boids_cache_max_ms = self.boids_cache_max_ms.max(other.boids_cache_ms);
+        self.boids_steering_max_ms = self.boids_steering_max_ms.max(other.boids_steering_ms);
         self.collision_detect_max_ms = self.collision_detect_max_ms.max(other.collision_detect_ms);
         self.collision_resolve_max_ms = self.collision_resolve_max_ms.max(other.collision_resolve_ms);
         self.physics_max_ms = self.physics_max_ms.max(other.physics_ms);
@@ -325,6 +338,10 @@ impl SystemMetrics {
         println!("    ----------------    --------   --------   ------");
         println!("    Spatial Hash        {:8.3}   {:8.3}   {:5.1}%", 
             self.spatial_hash_ms, self.spatial_hash_max_ms, (self.spatial_hash_ms / total) * 100.0);
+        println!("    Boids Cache         {:8.3}   {:8.3}   {:5.1}%", 
+            self.boids_cache_ms, self.boids_cache_max_ms, (self.boids_cache_ms / total) * 100.0);
+        println!("    Boids Steering      {:8.3}   {:8.3}   {:5.1}%", 
+            self.boids_steering_ms, self.boids_steering_max_ms, (self.boids_steering_ms / total) * 100.0);
         println!("    Collision Detect    {:8.3}   {:8.3}   {:5.1}%", 
             self.collision_detect_ms, self.collision_detect_max_ms, (self.collision_detect_ms / total) * 100.0);
         println!("    Collision Resolve   {:8.3}   {:8.3}   {:5.1}%", 
@@ -390,6 +407,8 @@ impl SystemMetrics {
         
         // Highlight the slowest system by average
         let max_time = self.spatial_hash_ms
+            .max(self.boids_cache_ms)
+            .max(self.boids_steering_ms)
             .max(self.collision_detect_ms)
             .max(self.collision_resolve_ms)
             .max(self.physics_ms)
@@ -397,6 +416,10 @@ impl SystemMetrics {
         
         if (self.spatial_hash_ms - max_time).abs() < 0.001 {
             println!("  ⚠ PRIMARY BOTTLENECK (avg): Spatial Hash)");
+        } else if (self.boids_cache_ms - max_time).abs() < 0.001 {
+            println!("  ⚠ PRIMARY BOTTLENECK (avg): Boids Cache)");
+        } else if (self.boids_steering_ms - max_time).abs() < 0.001 {
+            println!("  ⚠ PRIMARY BOTTLENECK (avg): Boids Steering)");
         } else if (self.collision_detect_ms - max_time).abs() < 0.001 {
             println!("  ⚠ PRIMARY BOTTLENECK (avg): Collision Detection");
         } else if (self.collision_resolve_ms - max_time).abs() < 0.001 {
@@ -409,6 +432,8 @@ impl SystemMetrics {
         
         // Also highlight worst spike
         let max_spike = self.spatial_hash_max_ms
+            .max(self.boids_cache_max_ms)
+            .max(self.boids_steering_max_ms)
             .max(self.collision_detect_max_ms)
             .max(self.collision_resolve_max_ms)
             .max(self.physics_max_ms)
@@ -417,6 +442,10 @@ impl SystemMetrics {
         if max_spike > 0.0 {
             if (self.spatial_hash_max_ms - max_spike).abs() < 0.001 {
                 println!("  ⚠ WORST SPIKE (max): Spatial Hash ({:.2}ms)", max_spike);
+            } else if (self.boids_cache_max_ms - max_spike).abs() < 0.001 {
+                println!("  ⚠ WORST SPIKE (max): Boids Cache ({:.2}ms)", max_spike);
+            } else if (self.boids_steering_max_ms - max_spike).abs() < 0.001 {
+                println!("  ⚠ WORST SPIKE (max): Boids Steering ({:.2}ms)", max_spike);
             } else if (self.collision_detect_max_ms - max_spike).abs() < 0.001 {
                 println!("  ⚠ WORST SPIKE (max): Collision Detection ({:.2}ms)", max_spike);
             } else if (self.collision_resolve_max_ms - max_spike).abs() < 0.001 {
@@ -566,6 +595,24 @@ fn timed_spatial_hash(world: &mut World) {
     let elapsed = t.elapsed().as_secs_f32() * 1000.0;
     if let Some(timings) = world.get_resource::<SystemTimings>() {
         *timings.spatial_hash_ms.lock().unwrap() = elapsed;
+    }
+}
+
+fn timed_boids_cache(world: &mut World) {
+    let t = Instant::now();
+    world.run_system_once(collision::update_boids_neighbor_cache).ok();
+    let elapsed = t.elapsed().as_secs_f32() * 1000.0;
+    if let Some(timings) = world.get_resource::<SystemTimings>() {
+        *timings.boids_cache_ms.lock().unwrap() = elapsed;
+    }
+}
+
+fn timed_boids_steering(world: &mut World) {
+    let t = Instant::now();
+    world.run_system_once(apply_boids_steering).ok();
+    let elapsed = t.elapsed().as_secs_f32() * 1000.0;
+    if let Some(timings) = world.get_resource::<SystemTimings>() {
+        *timings.boids_steering_ms.lock().unwrap() = elapsed;
     }
 }
 
@@ -796,6 +843,7 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
         let pos = FixedVec2::new(FixedNum::from_num(x), FixedNum::from_num(y));
         
         app.world_mut().spawn((
+            Unit, // Required for boids steering to run
             SimPosition(pos),
             SimPositionPrev(pos),
             SimVelocity(FixedVec2::new(
@@ -806,6 +854,7 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
             Collider::default(), // Collision detection enabled
             CollisionState::default(),
             OccupiedCell::default(),
+            BoidsNeighborCache::default(), // Boids steering enabled
         ));
     }
     
@@ -877,7 +926,9 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
     // Add simulation systems with timing wrappers
     // These will record their execution time into the SystemTimings resource
     app.add_systems(Update, timed_spatial_hash);
-    app.add_systems(Update, timed_collision_detect.after(timed_spatial_hash));
+    app.add_systems(Update, timed_boids_cache.after(timed_spatial_hash));
+    app.add_systems(Update, timed_boids_steering.after(timed_boids_cache));
+    app.add_systems(Update, timed_collision_detect.after(timed_boids_steering));
     app.add_systems(Update, timed_collision_resolve.after(timed_collision_detect));
     app.add_systems(Update, timed_physics.after(timed_collision_resolve));
     
@@ -971,12 +1022,16 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
     let avg_metrics = if sample_count > 0 {
         SystemMetrics {
             spatial_hash_ms: total_metrics.spatial_hash_ms / sample_count as f32,
+            boids_cache_ms: total_metrics.boids_cache_ms / sample_count as f32,
+            boids_steering_ms: total_metrics.boids_steering_ms / sample_count as f32,
             collision_detect_ms: total_metrics.collision_detect_ms / sample_count as f32,
             collision_resolve_ms: total_metrics.collision_resolve_ms / sample_count as f32,
             physics_ms: total_metrics.physics_ms / sample_count as f32,
             pathfinding_ms: total_metrics.pathfinding_ms / sample_count as f32,
             // Max values are already tracked
             spatial_hash_max_ms: total_metrics.spatial_hash_max_ms,
+            boids_cache_max_ms: total_metrics.boids_cache_max_ms,
+            boids_steering_max_ms: total_metrics.boids_steering_max_ms,
             collision_detect_max_ms: total_metrics.collision_detect_max_ms,
             collision_resolve_max_ms: total_metrics.collision_resolve_max_ms,
             physics_max_ms: total_metrics.physics_max_ms,
@@ -1126,6 +1181,8 @@ fn profile_tick(app: &mut App) -> SystemMetrics {
     // Retrieve recorded timings from the resource
     if let Some(timings) = app.world().get_resource::<SystemTimings>() {
         metrics.spatial_hash_ms = *timings.spatial_hash_ms.lock().unwrap();
+        metrics.boids_cache_ms = *timings.boids_cache_ms.lock().unwrap();
+        metrics.boids_steering_ms = *timings.boids_steering_ms.lock().unwrap();
         metrics.collision_detect_ms = *timings.collision_detect_ms.lock().unwrap();
         metrics.collision_resolve_ms = *timings.collision_resolve_ms.lock().unwrap();
         metrics.physics_ms = *timings.physics_ms.lock().unwrap();
@@ -1281,12 +1338,19 @@ fn test_performance_scaling_suite() {
                 continue;
             }
             
-            let max_pct = (metrics.spatial_hash_ms / total).max(metrics.collision_detect_ms / total)
+            let max_pct = (metrics.spatial_hash_ms / total)
+                .max(metrics.boids_cache_ms / total)
+                .max(metrics.boids_steering_ms / total)
+                .max(metrics.collision_detect_ms / total)
                 .max(metrics.collision_resolve_ms / total)
                 .max(metrics.physics_ms / total) * 100.0;
             
             let bottleneck = if (metrics.spatial_hash_ms / total * 100.0 - max_pct).abs() < 0.1 {
                 "Spatial Hash"
+            } else if (metrics.boids_cache_ms / total * 100.0 - max_pct).abs() < 0.1 {
+                "Boids Cache"
+            } else if (metrics.boids_steering_ms / total * 100.0 - max_pct).abs() < 0.1 {
+                "Boids Steering"
             } else if (metrics.collision_detect_ms / total * 100.0 - max_pct).abs() < 0.1 {
                 "Collision Detect"
             } else if (metrics.collision_resolve_ms / total * 100.0 - max_pct).abs() < 0.1 {
