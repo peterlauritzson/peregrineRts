@@ -102,29 +102,10 @@ pub enum ForceType {
 // ============================================================================
 
 /// Cached neighbor list for collision detection.
-/// 
-/// Stores neighbor entities with their positions and collider radii.
-/// Updated every tick to ensure positions are always current.
-/// This eliminates redundant ECS queries in the collision detection hot path.
-#[derive(Component, Debug, Clone)]
-pub struct CachedNeighbors {
-    /// List of nearby entities with cached position and collider radius
-    /// (Entity, Position, ColliderRadius)
-    pub neighbors: Vec<(Entity, FixedVec2, FixedNum)>,
-}
-
-impl Default for CachedNeighbors {
-    fn default() -> Self {
-        Self {
-            // Preallocate with typical capacity (~8-20 neighbors expected)
-            neighbors: Vec::with_capacity(16),
-        }
-    }
-}
-
 /// Cached neighbor list for boids steering calculations.
 /// 
-/// Separate from CachedNeighbors because boids needs:
+/// Unlike collision detection which queries spatial hash directly,
+/// boids needs:
 /// - Larger search radius (5.0 units vs 2.0 for collision)
 /// - Velocity data for alignment behavior
 /// - Fewer neighbors (limit to 8 closest)

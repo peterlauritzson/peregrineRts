@@ -64,7 +64,6 @@ fn main() {
             )),
             SimAcceleration(FixedVec2::ZERO),
             Collider::default(),
-            CachedNeighbors::default(),
             OccupiedCell::default(),
         ));
     }

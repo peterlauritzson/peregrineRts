@@ -14,6 +14,7 @@ mod systems_config;
 use bevy::prelude::*;
 use crate::game::fixed_math::{FixedVec2, FixedNum};
 use crate::game::pathfinding::{Path, PathRequest, HierarchicalGraph, CLUSTER_SIZE, world_to_cluster_local};
+use crate::game::spatial_hash::{SpatialHash, SpatialHashScratch};
 use peregrine_macros::profile;
 
 use super::components::*;
@@ -104,7 +105,6 @@ pub fn process_input(
             SimAcceleration(FixedVec2::ZERO),
             Collider::default(),
             CollisionState::default(),
-            CachedNeighbors::default(),
             BoidsNeighborCache::default(),
             PathCache::default(),
             // OccupiedCell added by update_spatial_hash on first frame
@@ -119,11 +119,13 @@ pub fn process_input(
 /// Follow assigned paths using flow fields and steering
 pub fn follow_path(
     mut commands: Commands,
-    mut query: Query<(Entity, &SimPosition, &SimVelocity, &mut SimAcceleration, &mut Path, &CachedNeighbors, &mut PathCache)>,
+    mut query: Query<(Entity, &SimPosition, &SimVelocity, &mut SimAcceleration, &mut Path, &mut PathCache)>,
     no_path_query: Query<Entity, (Without<Path>, With<SimPosition>)>,
     sim_config: Res<SimConfig>,
     graph: Res<HierarchicalGraph>,
     map_flow_field: Res<MapFlowField>,
+    spatial_hash: Res<SpatialHash>,
+    mut scratch: ResMut<SpatialHashScratch>,
 ) {
     
     let speed = sim_config.unit_speed;
@@ -142,7 +144,7 @@ pub fn follow_path(
     #[cfg(feature = "perf_stats")]
     let mut early_arrivals = 0;
 
-    for (entity, pos, vel, mut acc, mut path, cache, mut path_cache) in query.iter_mut() {
+    for (entity, pos, vel, mut acc, mut path, mut path_cache) in query.iter_mut() {
         match &mut *path {
             Path::Direct(target) => {
                 let delta = *target - pos.0;
@@ -156,9 +158,12 @@ pub fn follow_path(
                 
                 // Check for crowding at destination (pile-up prevention)
                 if dist_sq < arrival_radius_sq {
+                    // Query spatial hash for nearby stopped units
+                    spatial_hash.query_radius(pos.0, arrival_radius, Some(entity), &mut scratch);
+                    
                     // Count nearby stopped units (units without Path component)
-                    let stopped_count = cache.neighbors.iter()
-                        .filter(|(neighbor_entity, _, _)| no_path_query.contains(*neighbor_entity))
+                    let stopped_count = scratch.query_results.iter()
+                        .filter(|&&neighbor_entity| no_path_query.contains(neighbor_entity))
                         .count();
                     
                     if stopped_count > CROWDING_THRESHOLD {

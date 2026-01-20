@@ -104,7 +104,7 @@ use bevy::prelude::*;
 use bevy::ecs::system::RunSystemOnce;
 use peregrine::game::simulation::components::{
     SimPosition, SimPositionPrev, SimVelocity, SimAcceleration, Collider,
-    CollisionState, CachedNeighbors, OccupiedCell, StaticObstacle, layers,
+    CollisionState, OccupiedCell, StaticObstacle, layers,
 };
 use peregrine::game::simulation::resources::{SimConfig, MapFlowField};
 use peregrine::game::simulation::systems::apply_obstacle_to_flow_field;
@@ -805,7 +805,6 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
             SimAcceleration(FixedVec2::ZERO),
             Collider::default(), // Collision detection enabled
             CollisionState::default(),
-            CachedNeighbors::default(),
             OccupiedCell::default(),
         ));
     }
@@ -959,14 +958,11 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
         
         // Validation check on tick 10 (disabled in normal runs)
         // Uncomment for debugging collision detection issues
+        // (Note: CachedNeighbors component removed - collision uses direct spatial queries)
         /*
         if tick_count == 10 {
             let world = app.world_mut();
-            let total_neighbors: usize = world.query::<&CachedNeighbors>()
-                .iter(world)
-                .map(|c| c.neighbors.len())
-                .sum();
-            eprintln!("DEBUG: Tick 10 - Total cached neighbors: {}", total_neighbors);
+            eprintln!("DEBUG: Tick 10 - Collision detection now uses direct spatial queries");
         }
         */
     }

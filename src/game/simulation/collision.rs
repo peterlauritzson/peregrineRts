@@ -29,41 +29,6 @@ pub struct CollisionEvent {
 // Neighbor Cache Update Systems
 // ============================================================================
 
-/// Update cached neighbor lists for entities with position and collider data.
-/// 
-/// Runs every tick to keep positions current. Queries spatial hash for neighbor IDs,
-/// then fetches and caches position/collider data for each neighbor.
-/// This moves all ECS queries out of the collision detection hot path.
-#[profile]
-pub fn update_neighbor_cache(
-    mut query: Query<(Entity, &SimPosition, &mut CachedNeighbors, &Collider)>,
-    spatial_hash: Res<SpatialHash>,
-    mut scratch: ResMut<SpatialHashScratch>,
-    sim_config: Res<SimConfig>,
-    position_collider_query: Query<(&SimPosition, &Collider)>,
-) {
-    for (entity, pos, mut cache, collider) in query.iter_mut() {
-        // Always update every tick since positions change every frame
-        let search_radius = collider.radius * sim_config.collision_search_radius_multiplier;
-        
-        // Query spatial hash for neighbor entity IDs (zero allocation via scratch buffer)
-        spatial_hash.query_radius(
-            pos.0,
-            search_radius,
-            Some(entity),
-            &mut scratch
-        );
-        
-        // Fetch position and collider for each neighbor and cache it
-        cache.neighbors.clear();
-        for &neighbor_entity in &scratch.query_results {
-            if let Ok((neighbor_pos, neighbor_collider)) = position_collider_query.get(neighbor_entity) {
-                cache.neighbors.push((neighbor_entity, neighbor_pos.0, neighbor_collider.radius));
-            }
-        }
-    }
-}
-
 /// Update cached neighbor lists for boids steering.
 /// Runs less frequently than collision cache (every 3-5 frames) since boids is visual-only.
 ///
@@ -178,37 +143,55 @@ pub fn update_boids_neighbor_cache(
 // Collision Detection
 // ============================================================================
 
-/// Detect collisions between entities using cached neighbor data.
+/// Detect collisions between entities by querying spatial hash directly.
 /// 
-/// All position and collider data is pre-fetched in update_neighbor_cache,
-/// so this is pure vector iteration with no ECS queries.
+/// Uses preallocated scratch buffer for zero-allocation spatial queries.
+/// No caching - queries fresh position data every frame for accuracy.
 #[profile]
 pub fn detect_collisions(
-    mut query: Query<(Entity, &SimPosition, &Collider, &CachedNeighbors, &mut CollisionState)>,
+    mut query: Query<(Entity, &SimPosition, &Collider, &mut CollisionState)>,
+    position_collider_query: Query<(&SimPosition, &Collider)>,
+    spatial_hash: Res<SpatialHash>,
+    mut scratch: ResMut<SpatialHashScratch>,
     sim_config: Res<SimConfig>,
     mut events: MessageWriter<CollisionEvent>,
     mut colliding_entities: Local<std::collections::HashSet<Entity>>,
 ) {
     colliding_entities.clear();
 
-    // Use cached neighbor data (position and collider already fetched)
-    // No ECS queries needed - pure vector iteration!
-    
-    for (entity, pos, collider, cache, _) in query.iter() {
-        // Iterate cached neighbors with pre-fetched position and collider data
-        for &(other_entity, other_pos, other_radius) in &cache.neighbors {
+    // Query spatial hash directly for each entity (uses preallocated scratch buffer)
+    for (entity, pos, collider, _) in query.iter() {
+        let search_radius = collider.radius * sim_config.collision_search_radius_multiplier;
+        
+        // Zero-allocation spatial query via scratch buffer
+        spatial_hash.query_radius(
+            pos.0,
+            search_radius,
+            Some(entity),
+            &mut scratch
+        );
+        
+        // Check each nearby entity for collision
+        for &other_entity in &scratch.query_results {
             // Skip duplicates to avoid double-processing the same collision
             if entity > other_entity {
                 continue;
             }
             
-            // Note: Layer checking removed - would need to cache layer data too
-            // For now, assume all cached neighbors are valid collision candidates
+            // Fetch current position and collider data
+            let Ok((other_pos, other_collider)) = position_collider_query.get(other_entity) else {
+                continue;
+            };
             
-            let min_dist = collider.radius + other_radius;
+            // Check collision layers
+            if (collider.mask & other_collider.layer) == 0 && (other_collider.mask & collider.layer) == 0 {
+                continue;
+            }
+            
+            let min_dist = collider.radius + other_collider.radius;
             let min_dist_sq = min_dist * min_dist;
 
-            let delta = pos.0 - other_pos;
+            let delta = pos.0 - other_pos.0;
             let dist_sq = delta.length_squared();
             
             if dist_sq < min_dist_sq {
@@ -240,7 +223,7 @@ pub fn detect_collisions(
 
     // Batch update collision states efficiently
     // Only mutate when state actually changes to avoid triggering change detection unnecessarily
-    for (entity, _, _, _, mut collision_state) in query.iter_mut() {
+    for (entity, _, _, mut collision_state) in query.iter_mut() {
         let is_colliding = colliding_entities.contains(&entity);
         if collision_state.is_colliding != is_colliding {
             collision_state.is_colliding = is_colliding;
@@ -286,8 +269,10 @@ pub fn resolve_collisions(
 /// Resolve collisions between units and static obstacles
 #[profile]
 pub fn resolve_obstacle_collisions(
-    mut units: Query<(Entity, &SimPosition, &mut SimAcceleration, &Collider, &CachedNeighbors), Without<StaticObstacle>>,
+    mut units: Query<(Entity, &SimPosition, &mut SimAcceleration, &Collider), Without<StaticObstacle>>,
     obstacle_query: Query<(&SimPosition, &Collider), With<StaticObstacle>>,
+    spatial_hash: Res<SpatialHash>,
+    mut scratch: ResMut<SpatialHashScratch>,
     map_flow_field: Res<MapFlowField>,
     sim_config: Res<SimConfig>,
 ) {
@@ -296,7 +281,7 @@ pub fn resolve_obstacle_collisions(
     let flow_field = &map_flow_field.0;
     let obstacle_radius = flow_field.cell_size / FixedNum::from_num(2.0);
     
-    for (_entity, u_pos, mut u_acc, u_collider, cache) in units.iter_mut() {
+    for (entity, u_pos, mut u_acc, u_collider) in units.iter_mut() {
         let unit_radius = u_collider.radius;
         let min_dist = unit_radius + obstacle_radius;
         let min_dist_sq = min_dist * min_dist;
@@ -332,18 +317,20 @@ pub fn resolve_obstacle_collisions(
             }
         }
 
-        // Check free obstacles using cached neighbors (from spatial hash)
-        // Position and radius are pre-cached, but we need to verify it's actually an obstacle
-        for &(neighbor_entity, neighbor_pos, neighbor_radius) in &cache.neighbors {
+        // Check free obstacles using spatial hash query
+        let search_radius = unit_radius * sim_config.collision_search_radius_multiplier;
+        spatial_hash.query_radius(u_pos.0, search_radius, Some(entity), &mut scratch);
+        
+        for &neighbor_entity in &scratch.query_results {
             // Check if this neighbor is a static obstacle
-            if obstacle_query.get(neighbor_entity).is_err() {
+            let Ok((obs_pos, obs_collider)) = obstacle_query.get(neighbor_entity) else {
                 continue;
-            }
+            };
             
-            let min_dist_free = unit_radius + neighbor_radius;
+            let min_dist_free = unit_radius + obs_collider.radius;
             let min_dist_sq_free = min_dist_free * min_dist_free;
 
-            let delta = u_pos.0 - neighbor_pos;
+            let delta = u_pos.0 - obs_pos.0;
             let dist_sq = delta.length_squared();
             
             if dist_sq >= min_dist_sq_free || dist_sq <= sim_config.epsilon {

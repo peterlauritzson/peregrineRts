@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use peregrine::game::fixed_math::{FixedVec2, FixedNum};
-use peregrine::game::simulation::{SimulationPlugin, MapFlowField, SimPosition, SimPositionPrev, SimVelocity, SimAcceleration, Collider, CollisionState, CachedNeighbors, BoidsNeighborCache};
+use peregrine::game::simulation::{SimulationPlugin, MapFlowField, SimPosition, SimPositionPrev, SimVelocity, SimAcceleration, Collider, CollisionState, BoidsNeighborCache};
 use peregrine::game::config::GameConfigPlugin;
 use peregrine::game::pathfinding::PathfindingPlugin;
 use peregrine::game::loading::LoadingProgress;
@@ -46,7 +46,6 @@ fn test_collision_unit_unit() {
         SimAcceleration::default(),
         Collider::default(),
         CollisionState::default(),
-        CachedNeighbors::default(),
         BoidsNeighborCache::default(),
         // OccupiedCell will be added by update_spatial_hash system
     )).id();
@@ -59,7 +58,6 @@ fn test_collision_unit_unit() {
         SimAcceleration::default(),
         Collider::default(),
         CollisionState::default(),
-        CachedNeighbors::default(),
         BoidsNeighborCache::default(),
         // OccupiedCell will be added by update_spatial_hash system
     )).id();
@@ -139,7 +137,6 @@ fn test_collision_unit_wall() {
         SimAcceleration::default(),
         Collider::default(),
         CollisionState::default(),
-        CachedNeighbors::default(),
         BoidsNeighborCache::default(),
         // OccupiedCell will be added by update_spatial_hash system
     )).id();
@@ -205,7 +202,6 @@ fn test_collision_crowding() {
             SimAcceleration::default(),
             Collider::default(),
             CollisionState::default(),
-            CachedNeighbors::default(),
             BoidsNeighborCache::default(),
             // OccupiedCell will be added by update_spatial_hash system
         )).id();
