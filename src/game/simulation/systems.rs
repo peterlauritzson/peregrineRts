@@ -158,7 +158,7 @@ pub fn follow_path(
                 if dist_sq < arrival_radius_sq {
                     // Count nearby stopped units (units without Path component)
                     let stopped_count = cache.neighbors.iter()
-                        .filter(|&neighbor_entity| no_path_query.contains(*neighbor_entity))
+                        .filter(|(neighbor_entity, _, _)| no_path_query.contains(*neighbor_entity))
                         .count();
                     
                     if stopped_count > CROWDING_THRESHOLD {

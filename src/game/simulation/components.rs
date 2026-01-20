@@ -103,30 +103,21 @@ pub enum ForceType {
 
 /// Cached neighbor list for collision detection.
 /// 
-/// Stores the result of spatial hash queries to avoid redundant lookups.
-/// Cache is invalidated when the entity moves significantly or after a timeout.
-/// Note: Only stores Entity IDs - positions must be queried from SimPosition component.
+/// Stores neighbor entities with their positions and collider radii.
+/// Updated every tick to ensure positions are always current.
+/// This eliminates redundant ECS queries in the collision detection hot path.
 #[derive(Component, Debug, Clone)]
 pub struct CachedNeighbors {
-    /// List of nearby entity IDs from last spatial query
-    pub neighbors: Vec<Entity>,
-    /// Position where the last query was performed
-    pub last_query_pos: FixedVec2,
-    /// Frames elapsed since last cache update
-    pub frames_since_update: u32,
-    /// Whether this entity is classified as a fast mover
-    pub is_fast_mover: bool,
+    /// List of nearby entities with cached position and collider radius
+    /// (Entity, Position, ColliderRadius)
+    pub neighbors: Vec<(Entity, FixedVec2, FixedNum)>,
 }
 
 impl Default for CachedNeighbors {
     fn default() -> Self {
         Self {
-            // Preallocate with typical capacity (boids_max_neighbors default is 8)
-            neighbors: Vec::with_capacity(8),
-            last_query_pos: FixedVec2::ZERO,
-            // Initialize to high value to force update on first tick
-            frames_since_update: 999,
-            is_fast_mover: false,
+            // Preallocate with typical capacity (~8-20 neighbors expected)
+            neighbors: Vec::with_capacity(16),
         }
     }
 }
