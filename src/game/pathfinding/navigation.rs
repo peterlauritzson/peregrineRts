@@ -116,7 +116,26 @@ fn compute_navigation_target(
                 let next_region_id = cluster.local_routing[curr_reg.0 as usize][goal_reg.0 as usize];
                 
                 if next_region_id == crate::game::pathfinding::NO_PATH {
-                    return NavigationTarget::Direct(goal); // No path - try direct
+                    // No intra-cluster path - check if different islands
+                    // (if so, we can use inter-island routing which may go through other clusters)
+                    let curr_island = cluster.regions[curr_reg.0 as usize].as_ref().map(|r| r.island);
+                    let goal_island_region = cluster.regions[goal_reg.0 as usize].as_ref().map(|r| r.island);
+                    
+                    if let (Some(ci), Some(gi)) = (curr_island, goal_island_region) {
+                        if ci != gi {
+                            // Different islands in same cluster - use island routing
+                            let current_island_id = crate::game::pathfinding::ClusterIslandId::new(current_cluster, ci);
+                            let goal_island_id_same_cluster = crate::game::pathfinding::ClusterIslandId::new(current_cluster, gi);
+                            
+                            if let Some(next_portal_id) = graph.get_next_portal_for_island(current_island_id, goal_island_id_same_cluster) {
+                                if let Some(portal) = graph.portals.get(&next_portal_id) {
+                                    return NavigationTarget::InterClusterPortal(portal.world_pos);
+                                }
+                            }
+                        }
+                    }
+                    
+                    return NavigationTarget::Direct(goal); // Still no path - try direct
                 }
                 
                 // Find portal to next region
