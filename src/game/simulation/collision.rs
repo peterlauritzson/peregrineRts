@@ -134,12 +134,6 @@ pub fn update_boids_neighbor_cache(
             // ZERO-ALLOCATION: Uses preallocated scratch buffers
             spatial_hash.query_radius(pos.0, sim_config.neighbor_radius, Some(entity), &mut scratch);
             
-            // DEBUG: Log how many candidates the spatial hash returned
-            if scratch.query_results.len() > 50 {
-                trace!("Boids spatial query returned {} candidates for radius {}", 
-                    scratch.query_results.len(), sim_config.neighbor_radius);
-            }
-            
             // Get closest N neighbors efficiently using partial sort
             // Query SimPosition and SimVelocity components for each nearby entity
             let mut neighbors_with_dist: Vec<_> = scratch.query_results.iter()
