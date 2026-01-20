@@ -225,7 +225,7 @@ impl Default for PathCache {
 /// - Only updates when entity crosses midpoint between grid centers
 ///
 /// See SPATIAL_PARTITIONING.md Section 2.2 for detailed explanation.
-#[derive(Component, Debug, Clone)]
+#[derive(Component, Debug, Clone, Copy)]
 pub struct OccupiedCell {
     /// Which cell size class (index into SpatialHash.size_classes)
     pub size_class: u8,
@@ -235,7 +235,7 @@ pub struct OccupiedCell {
     pub col: usize,
     /// Cell row
     pub row: usize,
-    /// Index in arena entity_storage where this entity is stored
+    /// Index WITHIN the cell's range (0..cell.count) for O(1) swap-based removal
     pub vec_idx: usize,
 }
 

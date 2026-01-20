@@ -60,15 +60,15 @@
     pathfinding_build_batch_size: 5,
     
     // Spatial Hash (Staggered Multi-Resolution)
-    spatial_hash_entity_radii: [0.5, 10.0, 25.0],  // Expected entity sizes: units, medium obstacles, large obstacles
+    spatial_hash_entity_radii: [0.5, 10.0, 25.0],  // Expected entity sizes: units (increased from 0.5 to reduce cell count), medium obstacles, large obstacles
     spatial_hash_radius_to_cell_ratio: 10.0,        // cell_size = radius × ratio
     spatial_hash_max_entity_count: 100000,          // Max entities per grid (100k = ~80MB per grid, 3 size classes × 2 grids = ~480MB)
     
     // Spatial Hash Update Strategy (Performance Scaling)
     // For <1M entities: Full rebuild every frame is fast and simple
     // For >1M entities: Incremental updates using swap-based removal + arena over-provisioning
-    spatial_hash_arena_overcapacity_ratio: 1.5,     // 1.5 = 50% extra arena space for incremental updates (e.g., 100k entities = 150k capacity)
-                                                     // Higher = fewer rebuilds but more memory. Range: 1.2-2.0
+    spatial_hash_arena_overcapacity_ratio: 2.5,     // 2.5 = 150% extra arena space (increased for better headroom with sparse distributions)
+                                                     // Higher = fewer rebuilds but more memory. Range: 1.2-3.0
                                                      // Only used if update_strategy is Incremental
     
     // Spatial Hash Parallel Updates (Performance)

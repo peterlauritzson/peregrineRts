@@ -15,6 +15,13 @@ use crate::game::simulation::components::*;
 use crate::game::simulation::resources::*;
 use super::systems_config::SpatialHashRebuilt;
 
+/// Batched vec_idx updates to apply after spatial hash arena updates complete
+/// This separates arena manipulation from ECS component updates for efficiency
+#[derive(Resource, Default)]
+pub struct PendingVecIdxUpdates {
+    pub updates: Vec<(Entity, OccupiedCell)>,
+}
+
 // ============================================================================
 // Spatial Hash
 // ============================================================================
@@ -34,6 +41,7 @@ pub fn update_spatial_hash(
     mut commands: Commands,
     _sim_config: Res<SimConfig>,
     rebuilt: Option<Res<SpatialHashRebuilt>>,
+    mut pending_vec_idx_updates: ResMut<PendingVecIdxUpdates>,
 ) {
     // If spatial hash was rebuilt (e.g., map resize), just clear the marker
     if rebuilt.is_some() {
@@ -50,23 +58,46 @@ pub fn update_spatial_hash(
         let mut moved_count = 0;
         let mut rebuild_needed = false;
         
-        // 1. Check for moved entities (have OccupiedCell component)
+        pending_vec_idx_updates.updates.clear();
+        
+        // Update arena and collect component updates to defer via Commands
         for (entity, pos, _collider, occupied) in query.iter() {
-            if let Some((new_grid_offset, new_col, new_row)) = spatial_hash.should_update(pos.0, occupied) {
-                // Entity changed cells - perform incremental update
-                if spatial_hash.update_incremental(entity, occupied, new_grid_offset, new_col, new_row) {
-                    moved_count += 1;
-                    
-                    // Update OccupiedCell component
-                    commands.entity(entity).insert(OccupiedCell {
-                        size_class: occupied.size_class,
-                        grid_offset: new_grid_offset,
-                        col: new_col,
-                        row: new_row,
-                        vec_idx: 0, // Will be set by insert
-                    });
+            if let Some((new_grid_offset, new_col, new_row)) = spatial_hash.should_update(pos.0, &occupied) {
+                // Entity changed cells - perform arena update (swap, update counts)
+                match spatial_hash.update_incremental(entity, &occupied, new_grid_offset, new_col, new_row) {
+                    Ok((new_vec_idx, swapped_entity_opt)) => {
+                        moved_count += 1;
+                        
+                        // Queue component update for moved entity (will apply after system completes)
+                        pending_vec_idx_updates.updates.push((entity, OccupiedCell {
+                            size_class: occupied.size_class,
+                            grid_offset: new_grid_offset,
+                            col: new_col,
+                            row: new_row,
+                            vec_idx: new_vec_idx,
+                        }));
+                        
+                        // If arena swapped an entity, queue its component update too
+                        if let Some(swapped_entity) = swapped_entity_opt {
+                            pending_vec_idx_updates.updates.push((swapped_entity, OccupiedCell {
+                                size_class: occupied.size_class,
+                                grid_offset: occupied.grid_offset,
+                                col: occupied.col,
+                                row: occupied.row,
+                                vec_idx: occupied.vec_idx,
+                            }));
+                        }
+                    }
+                    Err(_) => {
+                        rebuild_needed = true;
+                    }
                 }
             }
+        }
+        
+        // Apply all component updates via Commands (deferred until system completes)
+        for (entity, new_occupied) in &pending_vec_idx_updates.updates {
+            commands.entity(*entity).insert(*new_occupied);
         }
         
         // 2. Insert new entities (don't have OccupiedCell yet)
@@ -114,14 +145,15 @@ pub fn update_spatial_hash(
         //
         // Cost: O(N) where N = entity count, but very fast (append-only with pre-allocated storage)
         
-        spatial_hash.clear();
+        // Collect all entities by cell for rebuild_with_headroom
+        // This ensures proper arena structure with contiguous ranges per cell
+        let all_entities: Vec<(Entity, FixedVec2, FixedNum)> = query.iter()
+            .map(|(entity, pos, collider, _occupied)| (entity, pos.0, collider.radius))
+            .chain(query_new.iter().map(|(entity, pos, collider)| (entity, pos.0, collider.radius)))
+            .collect();
         
-        for (entity, pos, collider) in query.iter().map(|(e, p, c, _)| (e, p, c))
-            .chain(query_new.iter())
-        {
-            // Insert fresh - OccupiedCell component is managed but not used in full rebuild mode
-            spatial_hash.insert(entity, pos.0, collider.radius);
-        }
+        // Use the proper rebuild path that maintains arena invariants
+        spatial_hash.rebuild_from_entity_list(&all_entities);
     }
 }
 

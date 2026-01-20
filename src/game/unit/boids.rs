@@ -60,8 +60,15 @@ pub(super) fn apply_boids_steering(
             // Work with squared distances to avoid sqrt
             let diff = pos.0 - other_pos;
             let dist_sq = diff.length_squared();
+            
+            // CRITICAL: Only consider neighbors within the neighbor_radius
+            // The cache may include up to N closest neighbors, but some might be far away
+            let neighbor_radius_sq = sim_config.neighbor_radius * sim_config.neighbor_radius;
+            if dist_sq > neighbor_radius_sq {
+                continue; // Skip neighbors outside the radius
+            }
 
-            // All neighbors within cache affect alignment & cohesion
+            // All neighbors within radius affect alignment & cohesion
             alignment_accum = alignment_accum + other_vel;
             cohesion_accum = cohesion_accum + other_pos;
             neighbor_count += 1;

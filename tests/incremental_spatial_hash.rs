@@ -38,14 +38,17 @@ fn simple_update_spatial_hash(
         // Update moved entities
         for (entity, pos, _collider, occupied) in query.iter() {
             if let Some((new_grid_offset, new_col, new_row)) = spatial_hash.should_update(pos.0, occupied) {
-                if spatial_hash.update_incremental(entity, occupied, new_grid_offset, new_col, new_row) {
-                    commands.entity(entity).insert(OccupiedCell {
-                        size_class: occupied.size_class,
-                        grid_offset: new_grid_offset,
-                        col: new_col,
-                        row: new_row,
-                        vec_idx: 0,
-                    });
+                match spatial_hash.update_incremental(entity, occupied, new_grid_offset, new_col, new_row) {
+                    Ok((new_vec_idx, _swapped_entity_opt)) => {
+                        commands.entity(entity).insert(OccupiedCell {
+                            size_class: occupied.size_class,
+                            grid_offset: new_grid_offset,
+                            col: new_col,
+                            row: new_row,
+                            vec_idx: new_vec_idx,
+                        });
+                    }
+                    Err(_) => {}
                 }
             }
         }

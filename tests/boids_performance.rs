@@ -4,7 +4,7 @@ use peregrine::game::fixed_math::{FixedVec2, FixedNum};
 use peregrine::game::simulation::{SimulationPlugin, SimConfig, SimPosition, SimVelocity};
 use peregrine::game::unit::Unit;
 use peregrine::game::config::GameConfigPlugin;
-use peregrine::game::spatial_hash::SpatialHash;
+use peregrine::game::spatial_hash::{SpatialHash, SpatialHashScratch};
 use peregrine::game::GameState;
 use std::time::Instant;
 
@@ -137,13 +137,14 @@ fn test_spatial_query_correctness() {
     
     // Query with radius 10 from center
     let hash = app.world().resource::<SpatialHash>();
-    let mut results = Vec::new();
+    let mut scratch = app.world_mut().resource_mut::<SpatialHashScratch>();
     hash.query_radius(
-        entity_center,
         FixedVec2::ZERO,
         FixedNum::from_num(10.0),
-        &mut results
+        Some(entity_center),
+        &mut scratch
     );
+    let results = scratch.query_results.clone();
     
     // Should find entity_near but not entity_far
     // Note: spatial hash returns entities in nearby grid cells, not exact radius

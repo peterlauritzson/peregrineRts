@@ -52,6 +52,7 @@ impl Plugin for SimulationPlugin {
         app.init_resource::<SimConfig>();
         app.init_resource::<SimPerformance>();
         app.init_resource::<SimTick>();
+        app.init_resource::<systems::PendingVecIdxUpdates>();
         app.insert_resource(SpatialHash::new(
             FixedNum::from_num(100.0),
             FixedNum::from_num(100.0),
@@ -60,6 +61,8 @@ impl Plugin for SimulationPlugin {
             10_000,        // Default max entities (will be overwritten by InitialConfig)
             1.0            // No overcapacity for initial creation
         ));
+        // Initialize scratch buffer for zero-allocation spatial queries
+        app.insert_resource(crate::game::spatial_hash::SpatialHashScratch::default_capacity());
         app.insert_resource(MapFlowField(Default::default()));
         app.init_resource::<MapStatus>();
         app.init_resource::<DebugConfig>();

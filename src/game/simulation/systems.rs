@@ -22,7 +22,7 @@ use super::events::*;
 use super::physics::seek;
 
 // Re-export systems from submodules
-pub use systems_spatial::{update_spatial_hash, init_flow_field, apply_obstacle_to_flow_field, apply_new_obstacles};
+pub use systems_spatial::{update_spatial_hash, init_flow_field, apply_obstacle_to_flow_field, apply_new_obstacles, PendingVecIdxUpdates};
 pub use systems_config::{init_sim_config_from_initial, update_sim_from_runtime_config, SpatialHashRebuilt};
 
 // ============================================================================
@@ -105,8 +105,8 @@ pub fn process_input(
             Collider::default(),
             CachedNeighbors::default(),
             BoidsNeighborCache::default(),
-            PathCache::default(), // NEW: Add pathfinding cache
-            OccupiedCell::default(), // Will be populated on first spatial hash update
+            PathCache::default(),
+            // OccupiedCell added by update_spatial_hash on first frame
         ));
     }
 }

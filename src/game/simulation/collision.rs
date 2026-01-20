@@ -7,7 +7,7 @@
 
 use bevy::prelude::*;
 use crate::game::fixed_math::{FixedVec2, FixedNum};
-use crate::game::spatial_hash::SpatialHash;
+use crate::game::spatial_hash::{SpatialHash, SpatialHashScratch};
 use crate::game::profiling::profile;
 use super::components::*;
 use super::resources::*;
@@ -37,6 +37,7 @@ pub struct CollisionEvent {
 pub fn update_neighbor_cache(
     mut query: Query<(Entity, &SimPosition, &SimVelocity, &mut CachedNeighbors, &Collider)>,
     spatial_hash: Res<SpatialHash>,
+    mut scratch: ResMut<SpatialHashScratch>,
     sim_config: Res<SimConfig>,
     _obstacles_query: Query<Entity, (With<StaticObstacle>, With<SimPosition>, With<Collider>)>,
     _all_entities: Query<(Entity, Option<&StaticObstacle>, Option<&SimPosition>, Option<&Collider>)>,
@@ -71,13 +72,17 @@ pub fn update_neighbor_cache(
             // Cache MISS - perform full spatial query
             let search_radius = collider.radius * sim_config.collision_search_radius_multiplier;
             
-            // Reuse existing Vec capacity - spatial_hash clears and populates directly
-            spatial_hash.get_potential_collisions(
+            // Query using scratch buffers (zero allocation)
+            spatial_hash.query_radius(
                 pos.0, 
                 search_radius, 
                 Some(entity),
-                &mut cache.neighbors
+                &mut scratch
             );
+            
+            // Copy results from scratch to cache
+            cache.neighbors.clear();
+            cache.neighbors.extend_from_slice(&scratch.query_results);
             
             cache.last_query_pos = pos.0;
             cache.frames_since_update = 0;
@@ -106,6 +111,7 @@ pub fn update_neighbor_cache(
 pub fn update_boids_neighbor_cache(
     mut query: Query<(Entity, &SimPosition, &SimVelocity, &mut BoidsNeighborCache)>,
     spatial_hash: Res<SpatialHash>,
+    mut scratch: ResMut<SpatialHashScratch>,
     sim_config: Res<SimConfig>,
     all_units: Query<(&SimPosition, &SimVelocity)>,
 ) {
@@ -113,10 +119,7 @@ pub fn update_boids_neighbor_cache(
     // Boids can tolerate stale data - update every 3-5 frames depending on movement
     const MOVEMENT_THRESHOLD: f32 = 1.0;  // More lenient than collision (0.5)
     const MAX_FRAMES: u32 = 5;            // Slower than collision (2-10)
-    
-    // Reusable temporary Vec for spatial queries (avoids per-entity allocation)
-    let mut nearby_entities = Vec::with_capacity(32);
-    
+
     for (entity, pos, _vel, mut cache) in query.iter_mut() {
         cache.frames_since_update += 1;
         
@@ -128,11 +131,18 @@ pub fn update_boids_neighbor_cache(
             // Cache MISS - rebuild neighbor list
             
             // Query spatial hash with boids neighbor radius (5.0 units)
-            spatial_hash.query_radius(entity, pos.0, sim_config.neighbor_radius, &mut nearby_entities);
+            // ZERO-ALLOCATION: Uses preallocated scratch buffers
+            spatial_hash.query_radius(pos.0, sim_config.neighbor_radius, Some(entity), &mut scratch);
+            
+            // DEBUG: Log how many candidates the spatial hash returned
+            if scratch.query_results.len() > 50 {
+                trace!("Boids spatial query returned {} candidates for radius {}", 
+                    scratch.query_results.len(), sim_config.neighbor_radius);
+            }
             
             // Get closest N neighbors efficiently using partial sort
             // Query SimPosition and SimVelocity components for each nearby entity
-            let mut neighbors_with_dist: Vec<_> = nearby_entities.iter()
+            let mut neighbors_with_dist: Vec<_> = scratch.query_results.iter()
                 .filter_map(|&neighbor_entity| {
                     if let Ok((neighbor_pos, neighbor_vel)) = all_units.get(neighbor_entity) {
                         let dist_sq = (pos.0 - neighbor_pos.0).length_squared();

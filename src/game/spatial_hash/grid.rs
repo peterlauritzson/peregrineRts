@@ -4,45 +4,46 @@ use crate::game::fixed_math::{FixedNum, FixedVec2};
 /// Tracks which entities belong to a cell in the arena storage
 #[derive(Debug, Clone, Copy)]
 pub struct CellRange {
-    pub start: usize,     // Index into entity_storage where this cell begins
-    pub end_index: usize, // Current number of entities in this cell (count)
-    pub max_index: usize, // Maximum capacity before overflow (start + headroom)
+    pub start_index: usize,   // Index into entity_storage where this cell begins
+    pub current_count: usize, // Current number of entities in this cell
+    pub max_index: usize,     // Maximum index (exclusive) before overflow
 }
 
 impl CellRange {
     pub fn new() -> Self {
         Self { 
-            start: 0, 
-            end_index: 0,
+            start_index: 0, 
+            current_count: 0,
             max_index: 0,
         }
     }
     
-    pub fn with_capacity(start: usize, max_capacity: usize) -> Self {
+    pub fn with_capacity(start_index: usize, max_index: usize) -> Self {
         Self {
-            start,
-            end_index: 0,
-            max_index: max_capacity,
+            start_index,
+            current_count: 0,
+            max_index,
         }
     }
     
     pub fn is_empty(&self) -> bool {
-        self.end_index == 0
+        self.current_count == 0
     }
     
     /// Get current count of entities in this cell
     pub fn count(&self) -> usize {
-        self.end_index
+        self.current_count
     }
     
     /// Get remaining headroom before overflow
     pub fn headroom(&self) -> usize {
-        self.max_index.saturating_sub(self.end_index)
+        self.max_index.saturating_sub(self.start_index + self.current_count)
     }
 }
 
 /// One grid in a staggered pair using arena-based storage
 #[derive(Debug, Clone)]
+#[allow(dead_code)]  // map_width/height stored for API consistency, may be used in future features
 pub struct StaggeredGrid {
     /// ARENA: One big pre-allocated Vec for all entities in this grid
     entity_storage: Vec<Entity>,
@@ -142,7 +143,7 @@ impl StaggeredGrid {
     /// 
     /// Behavior depends on update strategy:
     /// - Full rebuild: ranges are contiguous, just extend count
-    /// - Incremental: check headroom, use swap-based removal
+    /// - Incremental: check headroom, use direct assignment to preallocated slots
     pub fn insert_entity(&mut self, col: usize, row: usize, entity: Entity) -> usize {
         let cell_idx = row * self.cols + col;
         
@@ -160,27 +161,67 @@ impl StaggeredGrid {
         if self.use_incremental_updates && range.max_index > 0 {
             // INCREMENTAL MODE (only if headroom has been allocated)
             // Check per-cell headroom
-            if range.end_index >= range.max_index {
+            let next_write_pos = range.start_index + range.current_count;
+            if next_write_pos >= range.max_index {
                 #[cfg(debug_assertions)]
                 panic!(
-                    "Cell overflow in incremental mode! Cell ({},{}) end_index {} >= max_index {}", 
-                    col, row, range.end_index, range.max_index
+                    "Cell overflow in incremental mode! Cell ({},{}) next_write_pos {} >= max_index {}", 
+                    col, row, next_write_pos, range.max_index
                 );
                 
                 #[cfg(not(debug_assertions))]
                 {
-                    warn!("Cell overflow - needs rebuild. Cell ({},{})", col, row);
+                    // Clone cell info BEFORE logging to avoid borrow conflicts
+                    let this_cell_start = range.start_index;
+                    let this_cell_count = range.current_count;
+                    let this_cell_max = range.max_index;
+                    
+                    // DETAILED DIAGNOSTICS - compute everything inline for easy cleanup
+                    let total_entities_in_arena = self.entity_count;
+                    let arena_storage_capacity = self.entity_storage.len();
+                    let total_cells = self.cell_ranges.len();
+                    let grid_cols = self.cols;
+                    let grid_rows = self.rows;
+                    
+                    // Find top 10 cells by count
+                    let mut cell_counts: Vec<(usize, usize, usize, usize, usize)> = Vec::new();
+                    for (idx, cell_range) in self.cell_ranges.iter().enumerate() {
+                        if cell_range.current_count > 0 {
+                            let cell_col = idx % grid_cols;
+                            let cell_row = idx / grid_cols;
+                            cell_counts.push((cell_col, cell_row, cell_range.current_count, cell_range.start_index, cell_range.max_index));
+                        }
+                    }
+                    cell_counts.sort_by(|a, b| b.2.cmp(&a.2));
+                    
+                    warn!("==================== CELL OVERFLOW DIAGNOSTICS ====================");
+                    warn!("Cell overflow at ({},{})", col, row);
+                    warn!("  This cell: start_index={}, current_count={}, max_index={}, next_write_pos={}", 
+                        this_cell_start, this_cell_count, this_cell_max, next_write_pos);
+                    warn!("Arena stats:");
+                    warn!("  Total entities tracked: {}", total_entities_in_arena);
+                    warn!("  Arena storage capacity: {}", arena_storage_capacity);
+                    warn!("  Total cells: {}", total_cells);
+                    warn!("  Grid dimensions: {}x{}", grid_cols, grid_rows);
+                    warn!("Top 10 cells by entity count:");
+                    for (i, (c, r, count, start, max)) in cell_counts.iter().take(10).enumerate() {
+                        let headroom = max.saturating_sub(start + count);
+                        warn!("  {}. Cell ({},{}) has {} entities (start={}, max={}, headroom={})", 
+                            i+1, c, r, count, start, max, headroom);
+                    }
+                    warn!("===================================================================");
+                    
                     return usize::MAX;
                 }
             }
             
-            // Write to next available slot in this cell's range
-            let storage_idx = range.start + range.end_index;
-            self.entity_storage[storage_idx] = entity;
-            range.end_index += 1;
+            // Direct assignment to preallocated slot
+            self.entity_storage[next_write_pos] = entity;
+            let entity_idx = range.current_count;  // Index within this cell's range
+            range.current_count += 1;
             self.entity_count += 1;
             
-            storage_idx
+            entity_idx  // Return index within cell (not absolute storage index)
         } else {
             // FULL REBUILD MODE: Append to global storage, ranges are contiguous
             // Also used for first rebuild in incremental mode before headroom is allocated
@@ -206,19 +247,19 @@ impl StaggeredGrid {
             self.entity_count += 1;
             
             // Update cell range
-            if range.end_index == 0 {
+            if range.current_count == 0 {
                 // First entity in this cell
-                range.start = storage_idx;
-                range.end_index = 1;
+                range.start_index = storage_idx;
+                range.current_count = 1;
                 // DON'T set max_index - keep it 0 to force full rebuild mode
                 // max_index is only set by rebuild_with_headroom() which allocates proper headroom
             } else {
                 // Cell already has entities - should be immediately before this in storage
-                range.end_index += 1;
+                range.current_count += 1;
                 // DON'T set max_index - keep it 0 to force full rebuild mode
             }
             
-            storage_idx
+            range.current_count - 1  // Return index within cell
         }
     }
     
@@ -237,27 +278,27 @@ impl StaggeredGrid {
         }
         
         let range = &self.cell_ranges[cell_idx];
-        if range.end_index == 0 {
+        if range.current_count == 0 {
             return None;
         }
         
         // Search for entity within the cell's range
-        let end = range.start + range.end_index;
+        let end = range.start_index + range.current_count;
         if end > self.entity_storage.len() {
             warn!(
-                "remove_entity: range.start {} + range.end_index {} exceeds storage len {}", 
-                range.start, range.end_index, self.entity_storage.len()
+                "remove_entity: range.start_index {} + range.current_count {} exceeds storage len {}", 
+                range.start_index, range.current_count, self.entity_storage.len()
             );
             return None;
         }
         
-        for i in range.start..end {
+        for i in range.start_index..end {
             if self.entity_storage[i] == entity {
                 // Mark as tombstone
                 self.entity_storage[i] = Entity::PLACEHOLDER;
                 self.entity_count -= 1;
                 
-                // NOTE: We DON'T decrement range.end_index here!
+                // NOTE: We DON'T decrement range.current_count here!
                 // The range still spans the full area including tombstones.
                 // Queries filter tombstones, and compaction will shrink the range properly.
                 
@@ -271,64 +312,72 @@ impl StaggeredGrid {
     
     /// Remove entity from cell using swap-with-last-element trick (O(1), no fragmentation)
     /// This is the INCREMENTAL UPDATE approach - avoids tombstones entirely
-    /// Returns true if entity was found and removed
-    pub fn remove_entity_swap(&mut self, col: usize, row: usize, entity: Entity) -> bool {
+    /// 
+    /// Returns (success, swapped_entity_option):
+    /// - (true, None): entity was last in cell, no swap needed
+    /// - (true, Some(swapped)): entity removed, swapped entity now at vec_idx position
+    /// - (false, None): entity not found or invalid cell
+    pub fn remove_entity_swap(&mut self, col: usize, row: usize, vec_idx: usize) -> (bool, Option<Entity>) {
         let cell_idx = row * self.cols + col;
         
         if cell_idx >= self.cell_ranges.len() {
-            return false;
+            return (false, None);
         }
         
         let range = &mut self.cell_ranges[cell_idx];
-        if range.end_index == 0 {
-            return false;
+        if range.current_count == 0 || vec_idx >= range.current_count {
+            return (false, None);
         }
         
-        // Search for entity within the cell's range
-        let cell_start = range.start;
-        let cell_end = range.start + range.end_index;
+        // O(1) direct access using vec_idx!
+        let absolute_idx = range.start_index + vec_idx;
+        let last_idx = range.start_index + range.current_count - 1;
         
-        for i in cell_start..cell_end {
-            if self.entity_storage[i] == entity {
-                // Swap with last element in this cell
-                let last_idx = cell_end - 1;
-                if i != last_idx {
-                    self.entity_storage[i] = self.entity_storage[last_idx];
-                }
-                
-                // Shrink range by 1 (no gap, no fragmentation!)
-                range.end_index -= 1;
-                self.entity_count -= 1;
-                
-                return true;
-            }
-        }
+        let swapped_entity = if absolute_idx != last_idx {
+            // Swap with last element in this cell
+            let last_entity = self.entity_storage[last_idx];
+            self.entity_storage[absolute_idx] = last_entity;
+            Some(last_entity)
+        } else {
+            // Entity was already last, no swap needed
+            None
+        };
         
-        false
+        // Shrink range by 1 (no gap, no fragmentation!)
+        range.current_count -= 1;
+        self.entity_count -= 1;
+        
+        (true, swapped_entity)
     }
     
     /// Update entity that moved from old_cell to new_cell using incremental approach
     /// Total cost: O(1) amortized with swap-based removal
+    /// 
+    /// Returns Ok((new_vec_idx, swapped_entity_option)) where:
+    /// - new_vec_idx: index of entity in new cell
+    /// - swapped_entity_option: entity that was swapped in old cell (needs vec_idx update)
     pub fn update_entity_incremental(
         &mut self,
         entity: Entity,
         old_col: usize,
         old_row: usize,
+        old_vec_idx: usize,
         new_col: usize,
         new_row: usize,
-    ) -> Result<usize, &'static str> {
+    ) -> Result<(usize, Option<Entity>), &'static str> {
         // Remove from old cell (swap-based, no fragmentation!)
-        if !self.remove_entity_swap(old_col, old_row, entity) {
+        let (success, swapped_entity) = self.remove_entity_swap(old_col, old_row, old_vec_idx);
+        if !success {
             return Err("Entity not found in old cell");
         }
         
         // Insert into new cell (uses headroom)
-        let storage_idx = self.insert_entity(new_col, new_row, entity);
-        if storage_idx == usize::MAX {
+        let new_vec_idx = self.insert_entity(new_col, new_row, entity);
+        if new_vec_idx == usize::MAX {
             return Err("Cell overflow - rebuild needed");
         }
         
-        Ok(storage_idx)
+        Ok((new_vec_idx, swapped_entity))
     }
     
     /// Check if rebuild is needed (any cell overflowed or global capacity critical)
@@ -341,7 +390,8 @@ impl StaggeredGrid {
         
         // Check if any cell is at max capacity
         for range in &self.cell_ranges {
-            if range.end_index >= range.max_index {
+            let next_write_pos = range.start_index + range.current_count;
+            if next_write_pos >= range.max_index && range.max_index > 0 {
                 return true;
             }
         }
@@ -351,12 +401,17 @@ impl StaggeredGrid {
     
     /// Rebuild with headroom re-distribution
     /// 
-    /// CRITICAL: ALL cells get capacity allocated (even empty ones) to support incremental updates.
+    /// CRITICAL: ALL cells get equal headroom allocated (even empty ones) to support incremental updates.
     /// This prevents panics when entities are later inserted into previously-empty cells.
+    /// 
+    /// Per the design document (Section 2.8.2):
+    /// - headroom_per_cell = (arena_capacity - total_entity_count) / num_cells
+    /// - ALL cells get equal headroom for fairness and predictability
+    /// - Entities are tightly packed at start of each cell's range
     /// 
     /// Behavior depends on overcapacity_ratio:
     /// - ratio ~= 1.0: Full rebuild mode (minimal headroom, rebuild every frame)
-    /// - ratio > 1.1: Incremental mode (distribute extra capacity across cells)
+    /// - ratio > 1.1: Incremental mode (distribute extra capacity equally across cells)
     pub fn rebuild_with_headroom(&mut self, entities_by_cell: &[Vec<Entity>]) {
         let total_used: usize = entities_by_cell.iter().map(|v| v.len()).sum();
         let capacity = self.entity_storage.capacity();
@@ -366,15 +421,20 @@ impl StaggeredGrid {
         
         // FREE_ARENA_CAPACITY = capacity - total_used
         // For incremental mode, this includes the extra space from overcapacity_ratio
-        let free_space = capacity.saturating_sub(total_used);
+        let total_free_space = capacity.saturating_sub(total_used);
         
-        // Each cell gets equal share of free space for future insertions
-        // (only meaningful in incremental mode)
+        // Each cell gets EQUAL share of free space for future insertions
+        // This is the key invariant: ALL cells have equal headroom after rebuild
         let num_cells = self.cell_ranges.len();
-        let base_headroom_per_cell = if use_incremental && num_cells > 0 {
-            free_space / num_cells
+        let headroom_per_cell = if use_incremental && num_cells > 0 {
+            total_free_space / num_cells
         } else {
             0  // Full rebuild mode: no headroom
+        };
+        let extra_slots = if use_incremental && num_cells > 0 {
+            total_free_space % num_cells  // Distribute remainder to first N cells
+        } else {
+            0
         };
         
         // CRITICAL: Different storage strategy based on mode
@@ -385,7 +445,7 @@ impl StaggeredGrid {
             // Direct indexing (entity_storage[idx] = entity) requires Vec to have actual elements!
             self.entity_storage.resize(capacity, Entity::PLACEHOLDER);
         }
-        // FULL REBUILD MODE: Leave storage empty, will use push() during insert
+        // FULL REBUILD MODE: Leave storage empty, will use push() during rebuild
         
         let mut write_pos = 0;
         
@@ -402,9 +462,8 @@ impl StaggeredGrid {
             
             let count = entities.len();
             
-            // Each cell gets: count + (free_space / num_cells)
-            // This gives empty cells headroom for future insertions (in incremental mode)
-            let headroom = base_headroom_per_cell;
+            // Give first `extra_slots` cells one additional slot to handle remainder
+            let this_cell_headroom = headroom_per_cell + if cell_idx < extra_slots { 1 } else { 0 };
             
             // Write entities based on mode
             if use_incremental {
@@ -412,6 +471,7 @@ impl StaggeredGrid {
                 for (i, &entity) in entities.iter().enumerate() {
                     self.entity_storage[write_pos + i] = entity;
                 }
+                // Leave remaining slots as PLACEHOLDER (headroom for future insertions)
             } else {
                 // FULL REBUILD: Push to storage (contiguous, no gaps)
                 for &entity in entities {
@@ -420,15 +480,16 @@ impl StaggeredGrid {
             }
             
             // Set range for this cell
+            // CRITICAL: max_index is exclusive (first position that would overflow)
             self.cell_ranges[cell_idx] = CellRange {
-                start: write_pos,
-                end_index: count,
-                max_index: if use_incremental { count + headroom } else { 0 },
+                start_index: write_pos,
+                current_count: count,
+                max_index: if use_incremental { write_pos + count + this_cell_headroom } else { 0 },
             };
             
-            // Only advance write_pos by headroom in incremental mode
+            // Advance write_pos
             if use_incremental {
-                write_pos += count + headroom;
+                write_pos += count + this_cell_headroom;
             } else {
                 write_pos += count;
             }
@@ -439,6 +500,9 @@ impl StaggeredGrid {
     
     /// Get all entities in a cell (returns slice of entity_storage)
     /// NOTE: May contain Entity::PLACEHOLDER tombstones - caller must filter
+    /// 
+    /// ZERO-ALLOCATION QUERY: Returns immutable view of cell's entities
+    /// This is just a fat pointer (16 bytes) - NO HEAP ALLOCATION
     pub fn get_cell_entities(&self, col: usize, row: usize) -> &[Entity] {
         let cell_idx = row * self.cols + col;
         
@@ -447,44 +511,54 @@ impl StaggeredGrid {
         }
         
         let range = &self.cell_ranges[cell_idx];
-        if range.end_index == 0 {
+        if range.current_count == 0 {
             return &[];
         }
         
-        // Return slice of entity_storage
-        let end = range.start + range.end_index;
+        // Return slice of entity_storage (ZERO-COPY, just a view!)
+        let end = range.start_index + range.current_count;
         if end <= self.entity_storage.len() {
-            &self.entity_storage[range.start..end]
+            &self.entity_storage[range.start_index..end]
         } else {
             &[]
         }
     }
     
     /// Get all cells within radius of position
-    /// Returns iterator-friendly structure for querying
-    pub fn cells_in_radius(&self, pos: FixedVec2, radius: FixedNum) -> Vec<(usize, usize)> {
-        let mut result = Vec::new();
+    /// ZERO-ALLOCATION: Uses preallocated out_cells buffer
+    /// Clears out_cells before populating
+    pub fn cells_in_radius(&self, pos: FixedVec2, radius: FixedNum, out_cells: &mut Vec<(usize, usize)>) {
+        out_cells.clear();  // O(1), keeps capacity
         
-        let half_w = self.map_width / FixedNum::from_num(2.0);
-        let half_h = self.map_height / FixedNum::from_num(2.0);
+        // Use pre-computed half_map constants instead of recalculating
+        let min_x = pos.x - radius + self.half_map_width - self.offset.x;
+        let max_x = pos.x + radius + self.half_map_width - self.offset.x;
+        let min_y = pos.y - radius + self.half_map_height - self.offset.y;
+        let max_y = pos.y + radius + self.half_map_height - self.offset.y;
         
-        let min_x = pos.x - radius + half_w - self.offset.x;
-        let max_x = pos.x + radius + half_w - self.offset.x;
-        let min_y = pos.y - radius + half_h - self.offset.y;
-        let max_y = pos.y + radius + half_h - self.offset.y;
-        
-        let min_col = (min_x / self.cell_size).floor().to_num::<isize>().max(0) as usize;
+        let min_col = (min_x / self.cell_size).floor().to_num::<isize>().max(0).min((self.cols - 1) as isize) as usize;
         let max_col = (max_x / self.cell_size).floor().to_num::<isize>().min((self.cols - 1) as isize) as usize;
         let min_row = (min_y / self.cell_size).floor().to_num::<isize>().max(0) as usize;
         let max_row = (max_y / self.cell_size).floor().to_num::<isize>().min((self.rows - 1) as isize) as usize;
         
+        let capacity = out_cells.capacity();
         for row in min_row..=max_row {
             for col in min_col..=max_col {
-                result.push((col, row));
+                // CRITICAL: Check capacity before push to prevent reallocation
+                if out_cells.len() < capacity {
+                    out_cells.push((col, row));
+                } else {
+                    #[cfg(debug_assertions)]
+                    panic!("Cell coords buffer overflow! Need more than {} capacity", capacity);
+                    
+                    #[cfg(not(debug_assertions))]
+                    {
+                        warn!("Cell coords buffer overflow - results truncated");
+                        return;
+                    }
+                }
             }
         }
-        
-        result
     }
     
     pub fn clear(&mut self) {
@@ -494,8 +568,8 @@ impl StaggeredGrid {
         
         // Reset all cell ranges (including max_index to force full rebuild mode)
         for range in &mut self.cell_ranges {
-            range.start = 0;
-            range.end_index = 0;
+            range.start_index = 0;
+            range.current_count = 0;
             range.max_index = 0; // Reset headroom - next insert will use full rebuild
         }
     }
@@ -540,7 +614,7 @@ impl StaggeredGrid {
         // Rebuild storage and ranges without tombstones
         for cell_idx in 0..self.cell_ranges.len() {
             let range = &self.cell_ranges[cell_idx];
-            if range.end_index == 0 {
+            if range.current_count == 0 {
                 continue;
             }
             
@@ -548,9 +622,9 @@ impl StaggeredGrid {
             let mut new_count = 0;
             
             // Copy non-tombstone entities
-            let end = range.start + range.end_index;
+            let end = range.start_index + range.current_count;
             if end <= self.entity_storage.len() {
-                for i in range.start..end {
+                for i in range.start_index..end {
                     let entity = self.entity_storage[i];
                     if entity != Entity::PLACEHOLDER {
                         new_storage.push(entity);
@@ -560,8 +634,8 @@ impl StaggeredGrid {
             }
             
             new_ranges[cell_idx] = CellRange {
-                start: new_start,
-                end_index: new_count,
+                start_index: new_start,
+                current_count: new_count,
                 max_index: new_count,  // Reset max_index to actual count after compaction
             };
         }

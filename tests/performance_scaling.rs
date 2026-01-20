@@ -18,6 +18,14 @@
 /// - `random`: 0.5% of units to random points every tick (uniform load)
 /// - `none`: No pathfinding requests (baseline for comparison)
 ///
+/// ## Spatial Hash Update Mode
+///
+/// By default, tests use **incremental updates** (overcapacity_ratio = 1.5) where entities are
+/// only updated when they move between cells. This is the realistic production mode.
+///
+/// Override with `REBUILD_HASH` environment variable to use **full rebuild mode** (overcapacity_ratio = 1.0)
+/// where the entire spatial hash is rebuilt from scratch every tick.
+///
 /// ## CRITICAL BUG FIX (Jan 2026)
 ///
 /// **Problem:** Initial performance tests showed unrealistically fast execution:
@@ -76,12 +84,18 @@
 ///    ```
 ///    $env:PERF_TEST_MODE="reset"; cargo test --release --test performance_scaling test_performance_scaling_suite -- --ignored --nocapture
 ///    ```
-/// 7. **Start from specific test** (e.g., 500k units @ 100 TPS) and continue:
+///
+/// 7. **Test with full spatial hash rebuild** (instead of default incremental updates):
+///    ```
+///    $env:REBUILD_HASH="1"; cargo test --release --test performance_scaling test_performance_scaling_suite -- --ignored --nocapture
+///    ```
+///
+/// 8. **Start from specific test** (e.g., 500k units @ 100 TPS) and continue:
 ///    ```
 ///    $env:START_INDEX="8"; cargo test --release --test performance_scaling test_performance_scaling_suite -- --ignored --nocapture
 ///    ```
 ///
-/// 8. **Run only one specific test** (e.g., only test index 8):
+/// 9. **Run only one specific test** (e.g., only test index 8):
 ///    ```
 ///    $env:RUN_INDEX="8"; cargo test --release --test performance_scaling test_performance_scaling_suite -- --ignored --nocapture
 ///    ```
@@ -722,13 +736,23 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
     
     // Initialize simulation resources
     let map_size = calculate_map_size(config.unit_count);
+    
+    // Determine spatial hash mode from environment
+    // Default: Incremental updates (1.5 = 50% extra capacity)
+    // REBUILD_HASH env var: Full rebuild every tick (1.0 = no extra capacity)
+    let overcapacity_ratio = if std::env::var("REBUILD_HASH").is_ok() {
+        1.0  // Full rebuild mode
+    } else {
+        2.5  // Incremental mode (default)
+    };
+    
     app.insert_resource(SpatialHash::new(
         FixedNum::from_num(map_size),
         FixedNum::from_num(map_size),
         &[0.5, 10.0, 25.0],  // Expected entity sizes
         15.0,  // radius to cell ratio
         (config.unit_count * 2).max(10_000),  // 2x unit count for headroom
-        1.0,  // overcapacity_ratio (1.0 = no extra capacity, use full rebuild mode for tests)
+        overcapacity_ratio,
     ));
     
     // Add simulation config
@@ -1138,9 +1162,12 @@ fn test_performance_scaling_suite() {
     let mode = TestMode::from_env();
     let pathfinding_pattern = PathfindingPattern::from_env();
     
+    let rebuild_mode = std::env::var("REBUILD_HASH").is_ok();
+    
     println!("\n=== PERFORMANCE SCALING TEST SUITE ===");
     println!("Mode: {:?}", mode);
     println!("Pathfinding: {:?}", pathfinding_pattern);
+    println!("Spatial Hash: {}", if rebuild_mode { "Full Rebuild" } else { "Incremental Updates (default)" });
     println!("Progressive validation of simulation tick rate at increasing scales");
     
     // Load checkpoint

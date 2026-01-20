@@ -136,6 +136,7 @@ fn check_loading_complete(
 fn handle_pending_map_generation(
     mut commands: Commands,
     pending: Option<Res<PendingMapGeneration>>,
+    initial_config: Res<crate::game::config::InitialConfig>,
     mut sim_config: ResMut<crate::game::simulation::SimConfig>,
     mut spatial_hash: ResMut<crate::game::spatial_hash::SpatialHash>,
     mut map_flow_field: ResMut<crate::game::simulation::MapFlowField>,
@@ -168,14 +169,14 @@ fn handle_pending_map_generation(
     sim_config.map_height = FixedNum::from_num(map_height);
     info!("Updated SimConfig: map size = {}x{}", map_width, map_height);
     
-    // Update SpatialHash with new map dimensions
+    // Update SpatialHash with new map dimensions using InitialConfig values
     spatial_hash.resize(
         FixedNum::from_num(map_width),
         FixedNum::from_num(map_height),
-        &[0.5, 10.0, 25.0],  // Use default entity radii
-        4.0,  // Default radius to cell ratio
-        100_000,  // Use default max entity count
-        1.5  // Default overcapacity ratio
+        &initial_config.spatial_hash_entity_radii,
+        initial_config.spatial_hash_radius_to_cell_ratio,
+        initial_config.spatial_hash_max_entity_count,
+        initial_config.spatial_hash_arena_overcapacity_ratio
     );
     info!("Updated SpatialHash for new map size");
 

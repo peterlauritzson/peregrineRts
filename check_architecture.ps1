@@ -8,12 +8,20 @@
     - Hardcoded magic numbers
     - File size limits
     - Non-preallocated dynamic structures (Vec::new, HashMap::new, etc.)
+    - Non-fixed capacity data structures (Vec, HashMap, String, etc.)
+    - Constant computations that should be extracted
     
     Memory Safety Guidelines:
     - All collections must be created with capacity OR
     - Must be proven to never grow after initialization OR  
     - Should use frozen/immutable alternatives where possible
     - Use // MEMORY_OK: <reason> to suppress false positives
+    
+    Performance Guidelines:
+    - Prefer fixed-capacity types (Box<[T]>, ArrayVec) over dynamic (Vec<T>)
+    - Extract constant computations to const declarations
+    - Use // NO_PERFORMANCE_IMPACT to allow dynamic types when justified
+    - Use // NO_CONSTANT_OK to allow inline computations when appropriate
 .PARAMETER Verbose
     Show detailed information about checks
 #>
@@ -440,6 +448,271 @@ if ($dynamicStructViolations -eq 0) {
 Write-Host ""
 Write-Host "TIP: Mark safe dynamic allocations with // MEMORY_OK: <reason> comment" -ForegroundColor Gray
 Write-Host "     Examples: 'preallocated with capacity', 'frozen after init', 'setup only'" -ForegroundColor Gray
+
+# ============================================================================
+# CHECK 8: Non-Fixed Capacity Data Structures
+# ============================================================================
+Write-Section "Checking for Non-Fixed Capacity Data Structures"
+
+$nonFixedCapacityViolations = 0
+
+# Patterns for types that should be replaced with fixed-capacity alternatives
+$nonFixedCapacityPatterns = @(
+    @{ Pattern = ':\s*Vec<([^>]+)>'; Type = 'Vec'; Suggestion = 'Use Box<[T]> for fixed-size data, ArrayVec, or scratch buffers' }
+    @{ Pattern = ':\s*HashMap<([^>]+),\s*([^>]+)>'; Type = 'HashMap'; Suggestion = 'Use FrozenMap, BTreeMap with pre-allocation, or scratch buffers' }
+    @{ Pattern = ':\s*HashSet<([^>]+)>'; Type = 'HashSet'; Suggestion = 'Use FrozenSet, BTreeSet with pre-allocation, or scratch buffers' }
+    @{ Pattern = ':\s*VecDeque<([^>]+)>'; Type = 'VecDeque'; Suggestion = 'Use fixed-capacity ring buffer or ArrayDeque' }
+    @{ Pattern = ':\s*String\b'; Type = 'String'; Suggestion = 'Use &str, Box<str>, or SmallString for fixed-length strings' }
+    @{ Pattern = ':\s*BTreeMap<([^>]+),\s*([^>]+)>'; Type = 'BTreeMap'; Suggestion = 'Consider if this can be FrozenMap or pre-sized at construction' }
+    @{ Pattern = ':\s*BTreeSet<([^>]+)>'; Type = 'BTreeSet'; Suggestion = 'Consider if this can be FrozenSet or pre-sized at construction' }
+)
+
+# Check all game logic files
+$gameFiles = Get-ChildItem -Path "src/game" -Filter "*.rs" -Recurse
+
+foreach ($file in $gameFiles) {
+    $content = Get-Content $file.FullName -Raw
+    $lines = Get-Content $file.FullName
+    
+    # Skip test modules
+    if ($content -match '#\[cfg\(test\)\]' -or $file.Name -match 'test') {
+        continue
+    }
+    
+    foreach ($check in $nonFixedCapacityPatterns) {
+        $matches = Select-String -Path $file.FullName -Pattern $check.Pattern -AllMatches
+        foreach ($match in $matches) {
+            $lineNum = $match.LineNumber
+            $lineContent = $lines[$lineNum - 1].Trim()
+            
+            # Skip comments
+            if ($lineContent -match '^\s*//') {
+                continue
+            }
+            
+            # Check for NO_PERFORMANCE_IMPACT escape hatch
+            $hasEscapeHatch = $false
+            
+            # Check current line
+            if ($lineContent -match '//\s*NO_PERFORMANCE_IMPACT') {
+                $hasEscapeHatch = $true
+            }
+            
+            # Check previous line
+            if ($lineNum -gt 1) {
+                $prevLine = $lines[$lineNum - 2].Trim()
+                if ($prevLine -match '//\s*NO_PERFORMANCE_IMPACT') {
+                    $hasEscapeHatch = $true
+                }
+            }
+            
+            # Check next line (in case comment is below)
+            if ($lineNum -lt $lines.Count) {
+                $nextLine = $lines[$lineNum].Trim()
+                if ($nextLine -match '//\s*NO_PERFORMANCE_IMPACT') {
+                    $hasEscapeHatch = $true
+                }
+            }
+            
+            if (-not $hasEscapeHatch) {
+                # Only flag if it's in a Component, Resource, or critical struct
+                $contextStart = [Math]::Max(0, $lineNum - 5)
+                $contextEnd = [Math]::Min($lines.Count - 1, $lineNum + 2)
+                $context = $lines[$contextStart..$contextEnd] -join "`n"
+                
+                $isCritical = $context -match '#\[derive\(.*Component' -or 
+                              $context -match '#\[derive\(.*Resource' -or 
+                              $context -match 'pub struct' -or
+                              $file.Name -match '(components|resources)\.rs'
+                
+                if ($isCritical) {
+                    $relativePath = $file.FullName.Replace("$PWD\\", "")
+                    Write-Violation -File $relativePath -Line $lineNum `
+                        -Message "Non-fixed capacity type '$($check.Type)' - $($check.Suggestion). Add // NO_PERFORMANCE_IMPACT to suppress." `
+                        -Code $lineContent
+                    $nonFixedCapacityViolations++
+                }
+            }
+        }
+    }
+}
+
+if ($nonFixedCapacityViolations -eq 0) {
+    Write-Pass "No non-fixed capacity data structures found (or all marked with NO_PERFORMANCE_IMPACT)"
+}
+
+# ============================================================================
+# CHECK 9: Constant Value Computations & Loop-Invariant Code
+# ============================================================================
+Write-Section "Checking for Repeated Constant Computations & Loop-Invariant Code"
+
+$constantComputationViolations = 0
+
+# Patterns that suggest a value should be a constant
+# Look for mathematical expressions with only literals (no variables from function params)
+$constantPatterns = @(
+    # Mathematical operations with only numbers
+    @{ Pattern = '=\s*\d+\.?\d*\s*[+\-*/]\s*\d+\.?\d*'; Example = '= 100.0 * 0.5' }
+    @{ Pattern = '=\s*\d+\.?\d*\s*\.\s*sqrt\(\)'; Example = '= 2.0.sqrt()' }
+    @{ Pattern = '=\s*\d+\.?\d*\s*\.\s*powi?\('; Example = '= 2.0.powi(2)' }
+    @{ Pattern = '=\s*f32::consts::\w+\s*[+\-*/]'; Example = '= PI * 2.0' }
+    @{ Pattern = '=\s*\d+\.?\d*\s*[+\-*/]\s*f32::consts::'; Example = '= 2.0 * PI' }
+)
+
+foreach ($file in $gameFiles) {
+    $content = Get-Content $file.FullName -Raw
+    $lines = Get-Content $file.FullName
+    
+    # Skip test files (files that are ONLY tests, not files that contain test submodules)
+    # Only skip if filename contains 'test' or if the file STARTS with #[cfg(test)] at the top
+    if ($file.Name -match 'test' -or $content -match '^\s*#\[cfg\(test\)\]') {
+        continue
+    }
+    
+    # Track function scope and loop scope
+    $inFunction = $false
+    $functionStartLine = 0
+    $braceDepth = 0
+    $inLoop = $false
+    $loopStartLine = 0
+    $loopBraceDepth = 0
+    
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        $trimmed = $line.Trim()
+        
+        # Track function entry
+        if ($trimmed -match '^\s*(?:pub(?:\([a-z]+\))?\s+)?(?:async\s+)?(?:const\s+)?fn\s+\w+') {
+            $inFunction = $true
+            $functionStartLine = $i + 1
+            $braceDepth = 0
+        }
+        
+        # Track loop entry (for, while)
+        if ($inFunction -and $trimmed -match '^\s*for\s+') {
+            $inLoop = $true
+            $loopStartLine = $i + 1
+            $loopBraceDepth = $braceDepth
+        }
+        
+        # Track brace depth
+        $braceDepth += ($line.ToCharArray() | Where-Object { $_ -eq '{' }).Count
+        $braceDepth -= ($line.ToCharArray() | Where-Object { $_ -eq '}' }).Count
+        
+        # Exit loop when braces close
+        if ($inLoop -and $braceDepth -le $loopBraceDepth -and $line -match '}') {
+            $inLoop = $false
+        }
+        
+        # Exit function when braces close
+        if ($inFunction -and $braceDepth -eq 0 -and $line -match '}') {
+            $inFunction = $false
+        }
+        
+        # Skip if not in function or if line is a comment
+        if (-not $inFunction -or $trimmed -match '^\s*//' -or $trimmed -eq '') {
+            continue
+        }
+        
+        # Skip const declarations (they're already constants!)
+        if ($trimmed -match '^\s*const\s+') {
+            continue
+        }
+        
+        # Check for NO_CONSTANT_OK escape hatch
+        $hasEscapeHatch = $false
+        
+        if ($trimmed -match '//\s*NO_CONSTANT_OK') {
+            $hasEscapeHatch = $true
+        }
+        
+        if ($i -gt 0) {
+            $prevLine = $lines[$i - 1].Trim()
+            if ($prevLine -match '//\s*NO_CONSTANT_OK') {
+                $hasEscapeHatch = $true
+            }
+        }
+        
+        if ($hasEscapeHatch) {
+            continue
+        }
+        
+        # CHECK 9A: Detect loop-invariant computations (computations inside loops using outer-scope vars)
+        if ($inLoop -and $trimmed -match '^\s*let\s+(\w+)\s*=\s*(.+);') {
+            $varName = $matches[1]
+            $expression = $matches[2].Trim()
+            
+            # Look for patterns like: x * x, x.field * x.field, x.method(), etc.
+            # Common patterns: squared values, method calls on config/resources, etc.
+            $isLoopInvariant = $false
+            
+            # Pattern 1: Simple squaring (x * x)
+            if ($expression -match '^(\w+)\s*\*\s*\1$') {
+                $isLoopInvariant = $true
+            }
+            # Pattern 2: Field squaring (config.x * config.x or sim_config.field * sim_config.field)
+            elseif ($expression -match '^([\w_]+)\.([\w_]+)\s*\*\s*\1\.\2$') {
+                $isLoopInvariant = $true
+            }
+            # Pattern 3: Method call squaring (x.method() * x.method() - rare but possible)
+            elseif ($expression -match '^([\w_]+)\.([\w_]+)\(\)\s*\*\s*\1\.\2\(\)$') {
+                $isLoopInvariant = $true
+            }
+            # Pattern 4: .powi(2) calls (x.powi(2))
+            elseif ($expression -match '\.powi\(2\)') {
+                $isLoopInvariant = $true
+            }
+            # Pattern 5: Simple multiplication not involving loop vars (a * b where neither is from loop)
+            elseif ($expression -match '^\w+\s*\*\s*\w+$' -and 
+                    $expression -notmatch '\b(entity|other_entity|other_pos|other_vel|other_|neighbor|item|elem|i|j|k|idx|index|diff|dist_)\b') {
+                $isLoopInvariant = $true
+            }
+            # Pattern 6: Field access multiplication (config.a * config.b)
+            elseif ($expression -match '^([\w_]+)\.([\w_]+)\s*\*\s*' -and 
+                    $expression -notmatch '\b(entity|other_entity|other_pos|other_vel|other_|neighbor|item|elem|i|j|k|idx|index|diff|dist_)\b') {
+                $isLoopInvariant = $true
+            }
+            
+            if ($isLoopInvariant) {
+                # Double-check: Skip if it uses obvious loop iteration variables
+                if ($expression -notmatch '\b(entity|other_entity|other_pos|other_vel|other_|neighbor|item|elem|i|j|k|idx|index|diff|dist_)\b') {
+                    $relativePath = $file.FullName.Replace("$PWD\", "")
+                    Write-Violation -File $relativePath -Line ($i + 1) `
+                        -Message "Loop-invariant computation '$varName = $expression' - hoist outside loop for performance. Add // NO_CONSTANT_OK to suppress." `
+                        -Code $trimmed
+                    $constantComputationViolations++
+                }
+            }
+        }
+        
+        # CHECK 9B: Original check for literal constant computations
+        foreach ($check in $constantPatterns) {
+            if ($trimmed -match $check.Pattern) {
+                # Heuristic: skip if line contains function parameters or self
+                # This avoids false positives for computations that depend on inputs
+                if ($trimmed -notmatch '\bself\b' -and 
+                    $trimmed -notmatch '\w+\s*\.\s*\w+' -and  # Skip method calls on variables
+                    $trimmed -notmatch '\w+\[' -and           # Skip array indexing
+                    $trimmed -match '(?:let|const)\s+\w+') {  # Must be a variable declaration
+                    
+                    # Extract the computation
+                    $computation = ($trimmed | Select-String -Pattern $check.Pattern).Matches[0].Value
+                    
+                    $relativePath = $file.FullName.Replace("$PWD\\", "")
+                    Write-Violation -File $relativePath -Line ($i + 1) `
+                        -Message "Constant computation '$computation' should be extracted to a const. Add // NO_CONSTANT_OK to suppress." `
+                        -Code $trimmed
+                    $constantComputationViolations++
+                    break  # Only report once per line
+                }
+            }
+        }
+    }
+}
+
+if ($constantComputationViolations -eq 0) {
+    Write-Pass "No repeated constant computations or loop-invariant code found (or all marked with NO_CONSTANT_OK)"
+}
 
 # ============================================================================
 # SUMMARY

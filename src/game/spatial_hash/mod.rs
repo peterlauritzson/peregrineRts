@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use std::collections::HashSet;
 use crate::game::fixed_math::FixedNum;
 
 mod grid;
@@ -48,6 +49,71 @@ pub struct SpatialHash {
     
     map_width: FixedNum,
     map_height: FixedNum,
+}
+
+/// Preallocated scratch buffers for zero-allocation queries
+/// 
+/// Per the design document (Section 2.3), all queries must use preallocated buffers
+/// to maintain zero-allocation guarantee. This resource holds these buffers.
+/// 
+/// Usage:
+/// ```rust
+/// fn my_system(
+///     spatial_hash: Res<SpatialHash>,
+///     mut scratch: ResMut<SpatialHashScratch>,
+/// ) {
+///     // Query will use scratch buffers (zero allocation)
+///     spatial_hash.query_radius(pos, radius, Some(entity), &mut scratch);
+///     
+///     // Process results from scratch.query_results
+///     for &entity in &scratch.query_results {
+///         // ... use entity ...
+///     }
+/// }
+/// ```
+#[derive(Resource)]
+pub struct SpatialHashScratch {
+    /// Preallocated buffer for query results
+    /// Capacity based on worst-case query size (e.g., 10,000 entities)
+    pub query_results: Vec<Entity>,
+    
+    /// Preallocated buffer for secondary queries (e.g., nested queries)
+    pub query_results_secondary: Vec<Entity>,
+    
+    /// Preallocated HashSet for deduplicating entities across Grid A and Grid B
+    /// Avoids allocating new HashSet on every query
+    pub seen_entities: HashSet<Entity>,
+    
+    /// Preallocated buffer for cell coordinates in radius queries
+    /// Capacity needed: ((2 * max_radius / min_cell_size) + 1)^2
+    /// Example: radius=60, cell_size=10 → (60*2/10+1)^2 = 13^2 = 169 cells
+    /// Conservatively allocated to 256 to handle edge cases
+    pub cell_coords: Vec<(usize, usize)>,
+}
+
+impl SpatialHashScratch {
+    /// Create scratch buffers with specified capacities
+    /// 
+    /// # Arguments
+    /// * `query_capacity` - Max entities that can be returned by a single query
+    /// 
+    /// For estimating capacity:
+    /// - cells_per_query = ((query_radius * 2.0 / cell_size).ceil() + 1)^2
+    /// - max_entities_per_cell = (max_entities / num_cells) * safety_factor
+    /// - query_capacity = cells_per_query * max_entities_per_cell
+    pub fn new(query_capacity: usize) -> Self {
+        Self {
+            query_results: Vec::with_capacity(query_capacity),
+            query_results_secondary: Vec::with_capacity(query_capacity),
+            seen_entities: HashSet::with_capacity(query_capacity),
+            cell_coords: Vec::with_capacity(4096),  // Worst case: large radius on fine grid (e.g., r=60, cell=2 → 61²=3721)
+        }
+    }
+    
+    /// Create with default capacity (10,000 entities per query)
+    pub fn default_capacity() -> Self {
+        Self::new(10_000)
+    }
 }
 
 impl SpatialHash {
@@ -423,7 +489,9 @@ impl SpatialHash {
     /// Perform incremental update: remove from old cell, insert into new cell
     /// Uses swap-with-last-element trick for O(1) removal with zero fragmentation
     /// 
-    /// Returns true if the operation succeeded (entity was found and moved)
+    /// Returns Ok((new_vec_idx, swapped_entity_option)) or Err if operation failed
+    /// - new_vec_idx: new position of moved entity
+    /// - swapped_entity: entity that needs vec_idx update (was swapped during removal)
     pub fn update_incremental(
         &mut self,
         entity: Entity,
@@ -431,18 +499,24 @@ impl SpatialHash {
         new_grid_offset: u8,
         new_col: usize,
         new_row: usize,
-    ) -> bool {
+    ) -> Result<(usize, Option<Entity>), &'static str> {
         let size_class = &mut self.size_classes[occupied.size_class as usize];
         
-        // Remove from old cell using swap-based removal
+        // Remove from old cell using swap-based removal (O(1) with vec_idx!)
         let old_grid = if occupied.grid_offset == 0 {
             &mut size_class.grid_a
         } else {
             &mut size_class.grid_b
         };
         
-        if !old_grid.remove_entity_swap(occupied.col, occupied.row, entity) {
-            return false; // Entity not found in old cell
+        let (success, swapped_entity) = old_grid.remove_entity_swap(
+            occupied.col,
+            occupied.row,
+            occupied.vec_idx,
+        );
+        
+        if !success {
+            return Err("Entity not found in old cell");
         }
         
         // Insert into new cell
@@ -452,8 +526,12 @@ impl SpatialHash {
             &mut size_class.grid_b
         };
         
-        new_grid.insert_entity(new_col, new_row, entity);
-        true
+        let new_vec_idx = new_grid.insert_entity(new_col, new_row, entity);
+        if new_vec_idx == usize::MAX {
+            return Err("Cell overflow - rebuild needed");
+        }
+        
+        Ok((new_vec_idx, swapped_entity))
     }
     
     /// Rebuild all grids with proportional headroom distribution
@@ -505,6 +583,61 @@ impl SpatialHash {
             // Rebuild with headroom
             size_class.grid_a.rebuild_with_headroom(&grid_a_cells);
             size_class.grid_b.rebuild_with_headroom(&grid_b_cells);
+        }
+    }
+    
+    /// Rebuild spatial hash from a flat list of entities
+    /// Used in full rebuild mode where we don't have OccupiedCell components
+    /// 
+    /// This properly distributes entities into cells and calls rebuild_with_headroom
+    /// to maintain correct arena structure.
+    pub fn rebuild_from_entity_list(&mut self, entities: &[(Entity, FixedVec2, FixedNum)]) {
+        // Group entities by size class and cell
+        for size_class in &mut self.size_classes {
+            size_class.entity_count = 0;
+        }
+        
+        // Create cell collections for each size class
+        let mut size_class_cells: Vec<(Vec<Vec<Entity>>, Vec<Vec<Entity>>)> = self.size_classes.iter()
+            .map(|sc| {
+                let grid_a_cells = vec![Vec::new(); sc.grid_a.cols * sc.grid_a.rows];
+                let grid_b_cells = vec![Vec::new(); sc.grid_b.cols * sc.grid_b.rows];
+                (grid_a_cells, grid_b_cells)
+            })
+            .collect();
+        
+        // Classify and distribute entities
+        for &(entity, pos, radius) in entities {
+            let size_class_idx = self.classify_entity(radius) as usize;
+            let size_class = &self.size_classes[size_class_idx];
+            
+            // Find nearest center in Grid A
+            let (col_a, row_a) = size_class.grid_a.pos_to_cell(pos);
+            let center_a = size_class.grid_a.cell_center(col_a, row_a);
+            let dist_a_sq = (pos - center_a).length_squared();
+            
+            // Find nearest center in Grid B
+            let (col_b, row_b) = size_class.grid_b.pos_to_cell(pos);
+            let center_b = size_class.grid_b.cell_center(col_b, row_b);
+            let dist_b_sq = (pos - center_b).length_squared();
+            
+            // Insert into whichever grid is closer
+            let (grid_a_cells, grid_b_cells) = &mut size_class_cells[size_class_idx];
+            if dist_a_sq < dist_b_sq {
+                let cell_idx = row_a * size_class.grid_a.cols + col_a;
+                grid_a_cells[cell_idx].push(entity);
+            } else {
+                let cell_idx = row_b * size_class.grid_b.cols + col_b;
+                grid_b_cells[cell_idx].push(entity);
+            }
+        }
+        
+        // Rebuild each size class with proper headroom distribution
+        for (size_class_idx, (grid_a_cells, grid_b_cells)) in size_class_cells.into_iter().enumerate() {
+            let size_class = &mut self.size_classes[size_class_idx];
+            size_class.grid_a.rebuild_with_headroom(&grid_a_cells);
+            size_class.grid_b.rebuild_with_headroom(&grid_b_cells);
+            size_class.entity_count = size_class.grid_a.total_entries() + size_class.grid_b.total_entries();
         }
     }
 }

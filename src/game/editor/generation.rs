@@ -6,7 +6,7 @@ use crate::game::simulation::{StaticObstacle, MapFlowField, SimConfig};
 use crate::game::camera::RtsCamera;
 use crate::game::pathfinding::HierarchicalGraph;
 use crate::game::spatial_hash::SpatialHash;
-use crate::game::config::{GameConfig, GameConfigHandle};
+use crate::game::config::{GameConfig, GameConfigHandle, InitialConfig};
 use rand::Rng;
 use super::components::*;
 use super::input::spawn_obstacle;
@@ -21,6 +21,7 @@ pub fn handle_generation(
     editor_resources: Res<EditorResources>,
     config_handle: Res<GameConfigHandle>,
     game_configs: Res<Assets<GameConfig>>,
+    initial_config: Res<InitialConfig>,
     loading_query: Query<Entity, With<LoadingOverlayRoot>>,
     mut map_flow_field: ResMut<MapFlowField>,
     mut graph: ResMut<HierarchicalGraph>,
@@ -80,14 +81,14 @@ pub fn handle_generation(
     sim_config.map_height = FixedNum::from_num(map_height);
     info!("Updated SimConfig: map size = {}x{}", map_width, map_height);
     
-    // Update SpatialHash with new map dimensions
+    // Update SpatialHash with new map dimensions using InitialConfig values
     spatial_hash.resize(
         FixedNum::from_num(map_width),
         FixedNum::from_num(map_height),
-        &[0.5, 10.0, 25.0],  // Use default entity radii
-        4.0,  // Default radius to cell ratio
-        100_000,  // Use default max entity count
-        1.5  // Default overcapacity ratio
+        &initial_config.spatial_hash_entity_radii,
+        initial_config.spatial_hash_radius_to_cell_ratio,
+        initial_config.spatial_hash_max_entity_count,
+        initial_config.spatial_hash_arena_overcapacity_ratio
     );
     info!("Updated SpatialHash for new map size");
 
