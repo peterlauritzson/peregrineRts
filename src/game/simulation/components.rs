@@ -5,7 +5,6 @@
 
 use bevy::prelude::*;
 use crate::game::fixed_math::{FixedVec2, FixedNum};
-use crate::game::pathfinding::RegionId;
 
 // ============================================================================
 // Position & Physics Components
@@ -102,38 +101,6 @@ pub enum ForceType {
 // ============================================================================
 
 /// Cached neighbor list for collision detection.
-// ============================================================================
-// Pathfinding Cache Components
-// ============================================================================
-
-/// Cached pathfinding data to avoid expensive region lookups every frame.
-/// 
-/// **Performance Impact:** 3.75x speedup by caching cluster/region
-/// - Without cache: ~75ns per unit per frame (full lookup)
-/// - With cache + skip-frame: ~20ns per unit per frame
-/// 
-/// See: PATHFINDING.md Section 2.3 - Caching Strategy
-#[derive(Component, Debug, Clone, Copy)]
-pub struct PathCache {
-    /// Currently occupied cluster (x, y)
-    pub cached_cluster: (usize, usize),
-    /// Currently occupied region within cluster
-    pub cached_region: RegionId,
-    /// Frames since last validation (revalidate every 4 frames)
-    pub frames_since_validation: u8,
-}
-
-impl Default for PathCache {
-    fn default() -> Self {
-        Self {
-            cached_cluster: (0, 0),
-            cached_region: RegionId(0),
-            // Force validation on first frame
-            frames_since_validation: 4,
-        }
-    }
-}
-
 // ============================================================================
 // Spatial Hash Tracking
 // ============================================================================

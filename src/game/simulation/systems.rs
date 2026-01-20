@@ -124,7 +124,6 @@ pub fn process_input(
             SimAcceleration(FixedVec2::ZERO),
             Collider::default(),
             CollisionState::default(),
-            PathCache::default(),
             // OccupiedCell added by update_spatial_hash on first frame
         ));
     }
@@ -146,7 +145,6 @@ fn compute_navigation_target(
     threshold_sq: FixedNum,
     graph: &HierarchicalGraph,
     flow_field: &crate::game::structures::FlowField,
-    path_cache: &mut PathCache,
 ) -> NavigationTarget {
     // Check if we've arrived
     let delta = goal - pos;
@@ -154,41 +152,24 @@ fn compute_navigation_target(
         return NavigationTarget::Arrived;
     }
     
-    // Determine current location (with caching)
+    // Determine current location
     let current_grid = match flow_field.world_to_grid(pos) {
         Some(grid) => grid,
         None => return NavigationTarget::Direct(goal), // Off grid - move toward goal
     };
     
-    let (current_cluster, current_region_opt) = if path_cache.frames_since_validation >= 4 {
-        // Full validation every 4 frames
-        path_cache.frames_since_validation = 0;
-        
-        let new_cluster = (current_grid.0 / CLUSTER_SIZE, current_grid.1 / CLUSTER_SIZE);
-        let new_region = graph.clusters.get(&new_cluster)
-            .and_then(|cluster| {
-                world_to_cluster_local(pos, new_cluster, flow_field)
-                    .and_then(|local_pos| {
-                        crate::game::pathfinding::get_region_id(
-                            &cluster.regions,
-                            cluster.region_count,
-                            local_pos
-                        )
-                    })
-            });
-        
-        // Update cache
-        path_cache.cached_cluster = new_cluster;
-        if let Some(region) = new_region {
-            path_cache.cached_region = region;
-        }
-        
-        (new_cluster, new_region)
-    } else {
-        // Use cached values (fast path)
-        path_cache.frames_since_validation += 1;
-        (path_cache.cached_cluster, Some(path_cache.cached_region))
-    };
+    let current_cluster = (current_grid.0 / CLUSTER_SIZE, current_grid.1 / CLUSTER_SIZE);
+    let current_region_opt = graph.clusters.get(&current_cluster)
+        .and_then(|cluster| {
+            world_to_cluster_local(pos, current_cluster, flow_field)
+                .and_then(|local_pos| {
+                    crate::game::pathfinding::get_region_id(
+                        &cluster.regions,
+                        cluster.region_count,
+                        local_pos
+                    )
+                })
+        });
     
     // CASE 1: Same cluster as goal
     if current_cluster == goal_cluster {
@@ -321,7 +302,7 @@ fn compute_navigation_target(
 /// Follow assigned paths using flow fields and steering
 pub fn follow_path(
     mut commands: Commands,
-    mut query: Query<(Entity, &SimPosition, &SimVelocity, &mut SimAcceleration, &mut Path, &mut PathCache)>,
+    mut query: Query<(Entity, &SimPosition, &SimVelocity, &mut SimAcceleration, &mut Path)>,
     no_path_query: Query<Entity, (Without<Path>, With<SimPosition>)>,
     sim_config: Res<SimConfig>,
     graph: Res<HierarchicalGraph>,
@@ -346,7 +327,7 @@ pub fn follow_path(
     #[cfg(feature = "perf_stats")]
     let mut early_arrivals = 0;
 
-    for (entity, pos, vel, mut acc, mut path, mut path_cache) in query.iter_mut() {
+    for (entity, pos, vel, mut acc, mut path) in query.iter_mut() {
         match &mut *path {
             Path::Direct(target) => {
                 let delta = *target - pos.0;
@@ -412,7 +393,6 @@ pub fn follow_path(
                     threshold_sq,
                     &graph,
                     flow_field,
-                    &mut path_cache,
                 );
                 
                 // Act on navigation decision

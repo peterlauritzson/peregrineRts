@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 use peregrine::game::fixed_math::{FixedVec2, FixedNum};
-use peregrine::game::simulation::{SimulationPlugin, MapFlowField, SimPosition, SimPositionPrev, SimVelocity, SimAcceleration, Collider, CollisionState, StaticObstacle, OccupiedCell, PathCache, layers};
+use peregrine::game::simulation::{SimulationPlugin, MapFlowField, SimPosition, SimPositionPrev, SimVelocity, SimAcceleration, Collider, CollisionState, StaticObstacle, OccupiedCell, layers};
 use peregrine::game::config::GameConfigPlugin;
 use peregrine::game::pathfinding::{PathfindingPlugin, PathRequest, Path, HierarchicalGraph};
 use peregrine::game::loading::LoadingProgress;
@@ -90,7 +90,7 @@ fn test_pathfinding_around_wall() {
         Collider::default(),
         CollisionState::default(),
         OccupiedCell::default(),
-        PathCache::default(),
+        
     )).id();
 
     // 4. Send Path Request
@@ -223,7 +223,7 @@ fn test_pathfinding_close_target_line_of_sight() {
         Collider::default(),
         CollisionState::default(),
         OccupiedCell::default(),
-        PathCache::default(),
+        
     )).id();
 
     app.world_mut().write_message(PathRequest {
@@ -333,7 +333,7 @@ fn test_pathfinding_close_target_obstacle() {
         Collider::default(),
         CollisionState::default(),
         OccupiedCell::default(),
-        PathCache::default(),
+        
     )).id();
 
     app.world_mut().write_message(PathRequest {
