@@ -141,6 +141,8 @@ fn handle_pending_map_generation(
     mut spatial_hash: ResMut<crate::game::spatial_hash::SpatialHash>,
     mut map_flow_field: ResMut<crate::game::simulation::MapFlowField>,
     mut graph: ResMut<crate::game::pathfinding::HierarchicalGraph>,
+    mut nav_lookup: ResMut<crate::game::pathfinding::NavigationLookup>,
+    mut nav_routing: ResMut<crate::game::pathfinding::NavigationRouting>,
     mut map_status: ResMut<crate::game::simulation::MapStatus>,
     mut meshes: ResMut<Assets<Mesh>>,
     ground_plane_query: Query<(Entity, &Mesh3d), With<crate::game::GroundPlane>>,
@@ -242,7 +244,7 @@ fn handle_pending_map_generation(
     
     // Build graph using new region-based system (synchronous, fast)
     info!("Building pathfinding graph with region-based system...");
-    graph.build_graph(&map_flow_field.0, false);
+    graph.build_graph_with_regions_sync(&map_flow_field.0, Some(&mut *nav_lookup), Some(&mut *nav_routing));
 
     info!("Pathfinding graph build complete!");
     
@@ -258,6 +260,8 @@ fn handle_pending_map_generation(
 /// happened (e.g., loading existing map or starting editor)
 fn build_graph_after_map_ready(
     mut graph: ResMut<crate::game::pathfinding::HierarchicalGraph>,
+    mut nav_lookup: ResMut<crate::game::pathfinding::NavigationLookup>,
+    mut nav_routing: ResMut<crate::game::pathfinding::NavigationRouting>,
     map_flow_field: Res<crate::game::simulation::MapFlowField>,
     mut loading_progress: ResMut<LoadingProgress>,
 ) {
@@ -273,7 +277,7 @@ fn build_graph_after_map_ready(
     loading_progress.progress = 0.5;
     
     info!("Building pathfinding graph with region-based system...");
-    graph.build_graph(&map_flow_field.0, false);
+    graph.build_graph_with_regions_sync(&map_flow_field.0, Some(&mut *nav_lookup), Some(&mut *nav_routing));
 
     info!("Pathfinding graph build complete!");
     

@@ -2,13 +2,16 @@ use bevy::prelude::*;
 use serde::{Serialize, Deserialize};
 use std::collections::{BTreeMap, BinaryHeap};
 use crate::game::fixed_math::FixedNum;
-use super::types::{CLUSTER_SIZE, Portal, ClusterIslandId, IslandId};
+use super::types::{CLUSTER_SIZE, Portal, ClusterIslandId, IslandId, MAX_ISLANDS};
 use super::cluster::Cluster;
 use std::cmp::Reverse;
 
+/// Value indicating no route exists in routing table
+const NO_ROUTE: usize = usize::MAX;
+
 /// Hierarchical pathfinding graph for large-scale RTS navigation.
 ///
-/// NEW: Region-Based Navigation with Island Awareness
+/// NEW: Region-Based Navigation with Island Awareness + Arena Optimization
 ///
 /// # Architecture
 ///
@@ -18,9 +21,17 @@ use std::cmp::Reverse;
 /// 4. **Local Routing:** [region][region] → next_region per cluster
 /// 5. **Global Routing:** [(cluster, island)][(cluster, island)] → next_portal
 ///
+/// # Arena Optimization (2026-01-20)
+///
+/// Following the spatial_hash 100x speedup approach:
+/// - **Clusters:** Array instead of BTreeMap - O(1) access
+/// - **Island Routing:** Flattened 1D array instead of nested BTreeMap
+/// - **Sized dynamically:** Based on actual map dimensions during build
+///
 /// # Benefits
 ///
 /// - **Memory:** ~20MB vs ~500MB (96% reduction from flow fields)
+/// - **Speed:** O(1) array access vs O(log n) BTreeMap lookups
 /// - **Last Mile:** Direct movement in same region (convexity guarantee)
 /// - **Island Awareness:** Routes to correct side of obstacles
 /// - **Scalability:** O(1) lookups for movement decisions
@@ -29,57 +40,199 @@ use std::cmp::Reverse;
 ///
 /// - [PATHFINDING.md](documents/Design%20docs/PATHFINDING.md) - Complete design doc
 /// - [PATHFINDING_MIGRATION.md](documents/Design%20docs/PATHFINDING_MIGRATION.md) - Migration plan
-#[derive(Resource, Default, Serialize, Deserialize, Clone)]
+#[derive(Resource, Serialize, Deserialize, Clone)]
 pub struct HierarchicalGraph {
-    // Core data
-    pub clusters: BTreeMap<(usize, usize), Cluster>,
+    // Map dimensions
+    pub cluster_cols: usize,
+    pub cluster_rows: usize,
     pub initialized: bool,
     
-    // Island-aware routing
-    /// Island-to-island routing table: [source][dest] = next_portal_id
-    /// Key: (cluster, island) pairs
-    /// Value: Portal ID to take from source island toward dest island
-    pub island_routing_table: BTreeMap<ClusterIslandId, BTreeMap<ClusterIslandId, usize>>,
+    // ARENA: Cluster storage - direct 2D array access
+    /// Clusters stored in row-major order: [y * cluster_cols + x]
+    /// Option<Cluster> allows sparse maps (None for out-of-bounds clusters)
+    pub cluster_storage: Vec<Option<Cluster>>,
     
-    /// Portal registry for inter-cluster navigation
-    /// Maps portal_id to Portal data (position, clusters it connects)
-    pub portals: BTreeMap<usize, Portal>,
+    // ARENA: Island routing table - flattened for O(1) access
+    /// Routes from (cluster, island) to (cluster, island) -> portal_id
+    /// Index: source_linear_island_id * total_island_capacity + dest_linear_island_id
+    /// NO_ROUTE (usize::MAX) indicates no path exists
+    pub island_routing_storage: Vec<usize>,
+    
+    /// Total capacity for island IDs (cluster_cols * cluster_rows * MAX_ISLANDS)
+    pub total_island_capacity: usize,
+    
+    /// ARENA: Portal registry for inter-cluster navigation (O(1) access by portal ID)
+    /// Portal IDs are sequential starting from 0, stored in Vec during building
+    /// Vec is acceptable here since portals are built once at map load, never grown during runtime
+    pub portals: Vec<Portal>,
     pub next_portal_id: usize,
     
-    /// Portal-to-island mapping: which island can access this portal in its cluster?
-    /// Maps portal_id -> island_id in that portal's cluster
-    /// This is populated during populate_island_portal_connectivity
-    pub portal_island_map: BTreeMap<usize, IslandId>,
+    /// ARENA: Portal-to-island mapping (O(1) access by portal ID)
+    /// portals[id] -> which island can access this portal in its cluster
+    pub portal_island_map: Vec<Option<IslandId>>,
     
-    /// Portal-to-portal connections for cross-cluster navigation
-    /// Maps portal_id to list of (connected_portal_id, cost)
-    pub portal_connections: BTreeMap<usize, Vec<(usize, FixedNum)>>,
+    /// ARENA: Portal-to-portal connections (O(1) access by portal ID)
+    /// portals[id] -> Vec of (neighbor_portal_id, cost)
+    pub portal_connections: Vec<Vec<(usize, FixedNum)>>,
+}
+
+impl Default for HierarchicalGraph {
+    fn default() -> Self {
+        Self::new(0, 0)
+    }
 }
 
 impl HierarchicalGraph {
+    /// Create a new graph with specified cluster dimensions
+    pub fn new(cluster_cols: usize, cluster_rows: usize) -> Self {
+        let total_clusters = cluster_cols * cluster_rows;
+        let total_island_capacity = total_clusters * MAX_ISLANDS;
+        let routing_table_size = total_island_capacity * total_island_capacity;
+        
+        Self {
+            cluster_cols,
+            cluster_rows,
+            initialized: false,
+            cluster_storage: vec![None; total_clusters],
+            island_routing_storage: vec![NO_ROUTE; routing_table_size],
+            total_island_capacity,
+            portals: Vec::new(),
+            next_portal_id: 0,
+            portal_island_map: Vec::new(),
+            portal_connections: Vec::new(),
+        }
+    }
+    
+    /// Convert cluster coordinates to linear index
+    #[inline]
+    fn cluster_to_index(&self, cx: usize, cy: usize) -> usize {
+        cy * self.cluster_cols + cx
+    }
+    
+    /// Get cluster by coordinates (O(1) array access)
+    #[inline]
+    pub fn get_cluster(&self, cx: usize, cy: usize) -> Option<&Cluster> {
+        if cx >= self.cluster_cols || cy >= self.cluster_rows {
+            return None;
+        }
+        let idx = self.cluster_to_index(cx, cy);
+        self.cluster_storage.get(idx)?.as_ref()
+    }
+    
+    /// Get mutable cluster by coordinates
+    #[inline]
+    pub fn get_cluster_mut(&mut self, cx: usize, cy: usize) -> Option<&mut Cluster> {
+        if cx >= self.cluster_cols || cy >= self.cluster_rows {
+            return None;
+        }
+        let idx = self.cluster_to_index(cx, cy);
+        self.cluster_storage.get_mut(idx)?.as_mut()
+    }
+    
+    /// Set cluster at coordinates
+    #[inline]
+    pub fn set_cluster(&mut self, cx: usize, cy: usize, cluster: Cluster) {
+        if cx >= self.cluster_cols || cy >= self.cluster_rows {
+            warn!("Attempted to set cluster out of bounds: ({}, {})", cx, cy);
+            return;
+        }
+        let idx = self.cluster_to_index(cx, cy);
+        if let Some(slot) = self.cluster_storage.get_mut(idx) {
+            *slot = Some(cluster);
+        }
+    }
+    
+    /// Convert ClusterIslandId to linear island index for routing table
+    #[inline]
+    fn island_to_linear_id(&self, cluster_island: ClusterIslandId) -> usize {
+        let (cx, cy) = cluster_island.cluster;
+        let cluster_idx = cy * self.cluster_cols + cx;
+        cluster_idx * MAX_ISLANDS + cluster_island.island.0 as usize
+    }
+    
+    /// Get routing table index for source -> dest lookup
+    #[inline]
+    fn routing_table_index(&self, source: ClusterIslandId, dest: ClusterIslandId) -> usize {
+        let source_linear = self.island_to_linear_id(source);
+        let dest_linear = self.island_to_linear_id(dest);
+        source_linear * self.total_island_capacity + dest_linear
+    }
+    
+    /// Set route in the flattened routing table (O(1))
+    #[inline]
+    pub fn set_island_route(&mut self, source: ClusterIslandId, dest: ClusterIslandId, portal_id: usize) {
+        let idx = self.routing_table_index(source, dest);
+        if let Some(slot) = self.island_routing_storage.get_mut(idx) {
+            *slot = portal_id;
+        }
+    }
+    
+    /// Get route from the flattened routing table (O(1))
+    #[inline]
+    pub fn get_island_route(&self, source: ClusterIslandId, dest: ClusterIslandId) -> Option<usize> {
+        let idx = self.routing_table_index(source, dest);
+        let portal_id = *self.island_routing_storage.get(idx)?;
+        if portal_id == NO_ROUTE {
+            None
+        } else {
+            Some(portal_id)
+        }
+    }
+    
+    /// Iterator over all valid clusters
+    pub fn clusters_iter(&self) -> impl Iterator<Item = ((usize, usize), &Cluster)> {
+        self.cluster_storage.iter().enumerate().filter_map(|(idx, cluster_opt)| {
+            cluster_opt.as_ref().map(|cluster| {
+                let cx = idx % self.cluster_cols;
+                let cy = idx / self.cluster_cols;
+                ((cx, cy), cluster)
+            })
+        })
+    }
+    
+    /// Mutable iterator over all valid clusters
+    pub fn clusters_iter_mut(&mut self) -> impl Iterator<Item = ((usize, usize), &mut Cluster)> {
+        let cols = self.cluster_cols;
+        self.cluster_storage.iter_mut().enumerate().filter_map(move |(idx, cluster_opt)| {
+            cluster_opt.as_mut().map(|cluster| {
+                let cx = idx % cols;
+                let cy = idx / cols;
+                ((cx, cy), cluster)
+            })
+        })
+    }
+    
     pub fn reset(&mut self) {
         self.portals.clear();
         self.next_portal_id = 0;
         self.portal_connections.clear();
-        self.clusters.clear();
-        self.island_routing_table.clear();
+        
+        // Clear all clusters
+        for cluster_slot in &mut self.cluster_storage {
+            *cluster_slot = None;
+        }
+        
+        // Reset routing table to NO_ROUTE
+        for route in &mut self.island_routing_storage {
+            *route = NO_ROUTE;
+        }
+        
         self.initialized = false;
     }
 
     
     /// Build island-aware routing table using Dijkstra from each (cluster, island) pair
     pub fn build_island_routing_table(&mut self) {
-        self.island_routing_table.clear();
-        
-        if self.clusters.is_empty() {
-            return;
+        // Reset routing table to NO_ROUTE
+        for route in &mut self.island_routing_storage {
+            *route = NO_ROUTE;
         }
         
         info!("[ROUTING TABLE] Building island-aware routing table...");
         
-        // Collect all (cluster, island) pairs
+        // Collect all (cluster, island) pairs from valid clusters
         let mut cluster_islands = Vec::new();
-        for (&cluster_id, cluster) in &self.clusters {
+        for (cluster_id, cluster) in self.clusters_iter() {
             for island_idx in 0..cluster.island_count {
                 let island_id = IslandId(island_idx as u8);
                 cluster_islands.push(ClusterIslandId::new(cluster_id, island_id));
@@ -93,7 +246,8 @@ impl HierarchicalGraph {
             self.build_routing_for_island(source);
         }
         
-        let total_entries: usize = self.island_routing_table.values().map(|m| m.len()).sum();
+        // Count actual routes (exclude NO_ROUTE entries)
+        let total_entries = self.island_routing_storage.iter().filter(|&&r| r != NO_ROUTE).count();
         info!(
             "[ROUTING TABLE] Complete: {} island pairs, ~{} KB memory",
             total_entries,
@@ -102,7 +256,6 @@ impl HierarchicalGraph {
     }
     
     /// Build routing from one (cluster, island) to all others
-
     fn build_routing_for_island(&mut self, source: ClusterIslandId) {
         let mut distances: BTreeMap<ClusterIslandId, FixedNum> = BTreeMap::new();
         let mut next_portal: BTreeMap<ClusterIslandId, usize> = BTreeMap::new();
@@ -127,24 +280,25 @@ impl HierarchicalGraph {
             }
             
             // Explore neighbors via portals
-            if let Some(cluster) = self.clusters.get(&current.cluster) {
+            let (cx, cy) = current.cluster;
+            if let Some(cluster) = self.get_cluster(cx, cy) {
                 let mut found_any_portal = false;
                 // Get portals accessible from this island
                 for direction in super::types::Direction::ALL {
                     if let Some(portal_id) = cluster.neighbor_connectivity[current.island.0 as usize][direction.as_index()] {
                         found_any_portal = true;
                         // Find which (cluster, island) this portal leads to
-                        if let Some(_portal) = self.portals.get(&portal_id) {
+                        if portal_id < self.portals.len() {
                             // Find the connected portal (cross-cluster edge)
-                            if let Some(neighbors) = self.portal_connections.get(&portal_id) {
-                                for &(neighbor_portal_id, edge_cost) in neighbors {
-                                    if let Some(neighbor_portal) = self.portals.get(&neighbor_portal_id) {
+                            if portal_id < self.portal_connections.len() {
+                                for &(neighbor_portal_id, edge_cost) in &self.portal_connections[portal_id] {
+                                    if let Some(neighbor_portal) = self.portals.get(neighbor_portal_id) {
                                         let neighbor_cluster = neighbor_portal.cluster;
                                         
                                         // Determine which island in the neighbor cluster this portal connects to
                                         // Use the portal_island_map we populated earlier
-                                        if let Some(&neighbor_island) = self.portal_island_map.get(&neighbor_portal_id) {
-                                            let neighbor = ClusterIslandId::new(neighbor_cluster, neighbor_island);
+                                        if let Some(Some(neighbor_island)) = self.portal_island_map.get(neighbor_portal_id) {
+                                            let neighbor = ClusterIslandId::new(neighbor_cluster, *neighbor_island);
                                             
                                             let new_cost = cost + edge_cost;
                                             let should_update = distances.get(&neighbor)
@@ -186,8 +340,10 @@ impl HierarchicalGraph {
                 source, destination_count);
         }
         
-        // Store routing table for this source
-        self.island_routing_table.insert(source, next_portal);
+        // Store routing table for this source using the flattened arena
+        for (dest, portal_id) in next_portal {
+            self.set_island_route(source, dest, portal_id);
+        }
     }
     
     /// Lookup next portal to take from current (cluster, island) toward goal (cluster, island)
@@ -200,10 +356,8 @@ impl HierarchicalGraph {
             return None;
         }
         
-        self.island_routing_table
-            .get(&current)?
-            .get(&goal)
-            .copied()
+        // O(1) array lookup instead of nested BTreeMap
+        self.get_island_route(current, goal)
     }
     
     /// Populate neighbor_connectivity: link each island to portals in each direction
@@ -216,10 +370,15 @@ impl HierarchicalGraph {
         
         info!("[CONNECTIVITY] Linking islands to their boundary portals...");
         
+        // Collect all clusters first to avoid borrow checker issues
+        let cluster_ids: Vec<_> = self.clusters_iter().map(|(id, _)| id).collect();
+        
         // For each cluster
-        for (&cluster_id, cluster) in &self.clusters {
+        for &cluster_id in &cluster_ids {
+            let (cx, cy) = cluster_id;
+            
             // For each portal owned by this cluster
-            for (&_portal_id, portal) in &self.portals {
+            for (_portal_id, portal) in self.portals.iter().enumerate() {
                 if portal.cluster != cluster_id {
                     continue; // Portal belongs to a different cluster
                 }
@@ -256,14 +415,16 @@ impl HierarchicalGraph {
                 let portal_world = flow_field.grid_to_world(portal.node.x, portal.node.y);
                 
                 if let Some(portal_local) = world_to_cluster_local(portal_world, cluster_id, flow_field) {
-                    if let Some(region_id) = get_region_id(&cluster.regions, cluster.region_count, portal_local) {
-                        // Find which island this region belongs to
-                        if let Some(region) = &cluster.regions[region_id.0 as usize] {
-                            let _island_id = region.island;
-                            
-                            // Link this island to this portal in this direction
-                            // Note: We need to modify the cluster, so we'll collect updates first
-                            // For now, we'll just track (cluster_id, island_idx, direction, portal_id)
+                    if let Some(cluster) = self.get_cluster(cx, cy) {
+                        if let Some(region_id) = get_region_id(&cluster.regions, cluster.region_count, portal_local) {
+                            // Find which island this region belongs to
+                            if let Some(region) = &cluster.regions[region_id.0 as usize] {
+                                let _island_id = region.island;
+                                
+                                // Link this island to this portal in this direction
+                                // Note: We need to modify the cluster, so we'll collect updates first
+                                // For now, we'll just track (cluster_id, island_idx, direction, portal_id)
+                            }
                         }
                     }
                 }
@@ -273,8 +434,8 @@ impl HierarchicalGraph {
         // Now apply updates (need to do this in a second pass to avoid borrow checker issues)
         let mut updates: Vec<((usize, usize), usize, Direction, usize, IslandId)> = Vec::new();
         
-        for (&cluster_id, cluster) in &self.clusters {
-            for (&portal_id, portal) in &self.portals {
+        for (cluster_id, cluster) in self.clusters_iter() {
+            for (portal_id, portal) in self.portals.iter().enumerate() {
                 if portal.cluster != cluster_id {
                     continue;
                 }
@@ -355,15 +516,102 @@ impl HierarchicalGraph {
         // Apply updates
         for (cluster_id, island_idx, direction, portal_id, island_id) in updates {
             // Store portal->island mapping
-            self.portal_island_map.insert(portal_id, island_id);
+            // Ensure capacity
+            while self.portal_island_map.len() <= portal_id {
+                self.portal_island_map.push(None);
+            }
+            self.portal_island_map[portal_id] = Some(island_id);
             
             // Store island->portal mapping in neighbor_connectivity
-            if let Some(cluster) = self.clusters.get_mut(&cluster_id) {
+            let (cx, cy) = cluster_id;
+            if let Some(cluster) = self.get_cluster_mut(cx, cy) {
                 cluster.neighbor_connectivity[island_idx][direction.as_index()] = Some(portal_id);
             }
         }
         
-        info!("[CONNECTIVITY] Populated neighbor_connectivity for {} clusters", self.clusters.len());
+        let cluster_count = self.cluster_storage.iter().filter(|c| c.is_some()).count();
+        info!("[CONNECTIVITY] Populated neighbor_connectivity for {} clusters", cluster_count);
+    }
+    
+    /// Populate NavigationRouting resource with routing tables from graph
+    /// 
+    /// Copies data from HierarchicalGraph into NavigationRouting arenas:
+    /// - Island routing: global island-to-island routing table
+    /// - Region routing: cluster-local region-to-region routing tables
+    fn populate_navigation_routing(&self, routing: &mut super::navigation_routing::NavigationRouting) {
+        use super::types::{ClusterArenaIdx, IslandArenaIdx, LocalRegionId};
+        
+        info!("[NAV ROUTING] Populating routing tables from graph...");
+        
+        // Copy island routing table (macro-level: island → island → portal)
+        // The graph's island_routing_storage is already in the correct format
+        for cy in 0..self.cluster_rows {
+            for cx in 0..self.cluster_cols {
+                let cluster_idx = cy * self.cluster_cols + cx;
+                
+                if let Some(cluster) = self.get_cluster(cx, cy) {
+                    // For each island in this cluster
+                    for island_idx in 0..cluster.island_count {
+                        if let Some(_island) = &cluster.islands[island_idx] {
+                            let source_global_island_idx = IslandArenaIdx((cluster_idx * MAX_ISLANDS + island_idx) as u32);
+                            
+                            // For each possible destination island
+                            for dest_cy in 0..self.cluster_rows {
+                                for dest_cx in 0..self.cluster_cols {
+                                    let dest_cluster_idx = dest_cy * self.cluster_cols + dest_cx;
+                                    
+                                    if let Some(dest_cluster) = self.get_cluster(dest_cx, dest_cy) {
+                                        for dest_island_idx in 0..dest_cluster.island_count {
+                                            if dest_cluster.islands[dest_island_idx].is_some() {
+                                                let dest_global_island_idx = IslandArenaIdx((dest_cluster_idx * MAX_ISLANDS + dest_island_idx) as u32);
+                                                
+                                                // Look up portal from graph's routing table
+                                                let source_id = ClusterIslandId::new((cx, cy), IslandId(island_idx as u8));
+                                                let dest_id = ClusterIslandId::new((dest_cx, dest_cy), IslandId(dest_island_idx as u8));
+                                                
+                                                if let Some(portal_id) = self.get_next_portal_for_island(source_id, dest_id) {
+                                                    routing.island_routing.set_route(source_global_island_idx, dest_global_island_idx, portal_id);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        info!("[NAV ROUTING] Populated island routing table");
+        
+        // Copy region routing tables (meso-level: cluster/region → cluster/region → next_region)
+        // Each cluster has local_routing[start_region][end_region] = next_region
+        for cy in 0..self.cluster_rows {
+            for cx in 0..self.cluster_cols {
+                let cluster_idx = ClusterArenaIdx((cy * self.cluster_cols + cx) as u32);
+                
+                if let Some(cluster) = self.get_cluster(cx, cy) {
+                    // Copy this cluster's local routing table
+                    for start_region in 0..cluster.region_count {
+                        for end_region in 0..cluster.region_count {
+                            let next_region_u8 = cluster.local_routing[start_region][end_region];
+                            
+                            // For intra-cluster routing, both start and end cluster are the same
+                            routing.region_routing.set_route(
+                                cluster_idx,
+                                cluster_idx,
+                                LocalRegionId(start_region as u8),
+                                LocalRegionId(end_region as u8),
+                                LocalRegionId(next_region_u8),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        
+        info!("[NAV ROUTING] Populated region routing tables");
     }
     
     /// NEW: Build graph using region-based navigation (replaces old portal system)
@@ -375,8 +623,14 @@ impl HierarchicalGraph {
     /// 4. Island-aware routing table
     ///
     /// Memory: ~20MB vs ~500MB for old system
-    pub fn build_graph_with_regions_sync(&mut self, flow_field: &crate::game::structures::FlowField) {
+    pub fn build_graph_with_regions_sync(
+        &mut self, 
+        flow_field: &crate::game::structures::FlowField, 
+        nav_lookup: Option<&mut super::navigation_lookup::NavigationLookup>,
+        nav_routing: Option<&mut super::navigation_routing::NavigationRouting>
+    ) {
         use super::region_decomposition::decompose_cluster_into_regions;
+        use super::region_decomposition::build_region_lookup_grid;
         use super::region_connectivity::build_region_connectivity;
         use super::island_detection::identify_islands;
         
@@ -388,6 +642,13 @@ impl HierarchicalGraph {
         
         let width_clusters = (flow_field.width + CLUSTER_SIZE - 1) / CLUSTER_SIZE;
         let height_clusters = (flow_field.height + CLUSTER_SIZE - 1) / CLUSTER_SIZE;
+        
+        // Initialize graph storage based on actual map dimensions
+        // This is done once at map load, so we size it exactly to what we need
+        if self.cluster_cols != width_clusters || self.cluster_rows != height_clusters {
+            info!("[GRAPH BUILD] Initializing arena for {}x{} clusters", width_clusters, height_clusters);
+            *self = Self::new(width_clusters, height_clusters);
+        }
         
         info!("[REGION BUILD] Initializing {} clusters...", width_clusters * height_clusters);
         
@@ -405,23 +666,26 @@ impl HierarchicalGraph {
                     cluster.regions[i] = Some(region);
                 }
                 
-                self.clusters.insert(cluster_id, cluster);
+                // PERF: Build region lookup grid for O(1) region queries
+                build_region_lookup_grid(&mut cluster, cluster_id, flow_field);
+                
+                self.set_cluster(cx, cy, cluster);
             }
         }
         
-        let total_regions: usize = self.clusters.values().map(|c| c.region_count).sum();
+        let total_regions: usize = self.clusters_iter().map(|(_, c)| c.region_count).sum();
         info!("[REGION BUILD] Decomposed into {} total regions", total_regions);
         
         // Phase 2: Build region connectivity and local routing within each cluster
-        let cluster_ids: Vec<_> = self.clusters.keys().cloned().collect();
-        for cluster_id in &cluster_ids {
-            if let Some(cluster) = self.clusters.get_mut(cluster_id) {
+        let cluster_ids: Vec<_> = self.clusters_iter().map(|(id, _)| id).collect();
+        for &(cx, cy) in &cluster_ids {
+            if let Some(cluster) = self.get_cluster_mut(cx, cy) {
                 build_region_connectivity(cluster);
                 identify_islands(cluster);
             }
         }
         
-        let total_islands: usize = self.clusters.values().map(|c| c.island_count).sum();
+        let total_islands: usize = self.clusters_iter().map(|(_, c)| c.island_count).sum();
         info!("[REGION BUILD] Identified {} total islands", total_islands);
         
         // Phase 3: Build portals between clusters (for inter-cluster routing)
@@ -582,6 +846,16 @@ impl HierarchicalGraph {
         
         self.initialized = true;
         info!("[REGION BUILD] Graph build complete!");
+        
+        // Phase 5: Populate navigation lookup for O(1) queries
+        if let Some(lookup) = nav_lookup {
+            lookup.populate_from_graph(self, flow_field);
+        }
+        
+        // Phase 6: Populate navigation routing tables for O(1) path queries
+        if let Some(routing) = nav_routing {
+            self.populate_navigation_routing(routing);
+        }
     }
     
     // ============================================================================
@@ -589,19 +863,18 @@ impl HierarchicalGraph {
     // ============================================================================
     
     /// Build the pathfinding graph using the NEW region-based system
-    pub fn build_graph(&mut self, flow_field: &crate::game::structures::FlowField, _use_legacy: bool) {
+    pub fn build_graph(&mut self, flow_field: &crate::game::structures::FlowField, _use_legacy: bool, nav_lookup: Option<&mut super::navigation_lookup::NavigationLookup>) {
         // Always use new region-based system
         // Legacy parameter kept for backward compatibility but ignored
-        self.build_graph_with_regions_sync(flow_field);
+        self.build_graph_with_regions_sync(flow_field, nav_lookup, None);
     }
     
     /// Get statistics about the graph (for debugging/UI)
     pub fn get_stats(&self) -> GraphStats {
-
         let portal_count = self.portals.len();
-        let cluster_count = self.clusters.len();
-        let total_regions: usize = self.clusters.values().map(|c| c.region_count).sum();
-        let total_islands: usize = self.clusters.values().map(|c| c.island_count).sum();
+        let cluster_count = self.cluster_storage.iter().filter(|c| c.is_some()).count();
+        let total_regions: usize = self.clusters_iter().map(|(_, c)| c.region_count).sum();
+        let total_islands: usize = self.clusters_iter().map(|(_, c)| c.island_count).sum();
         
         GraphStats {
             cluster_count,
@@ -614,7 +887,7 @@ impl HierarchicalGraph {
     
     /// Get the number of clusters
     pub fn cluster_count(&self) -> usize {
-        self.clusters.len()
+        self.cluster_storage.iter().filter(|c| c.is_some()).count()
     }
 }
 

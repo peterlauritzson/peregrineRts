@@ -7,7 +7,7 @@
 use bevy::prelude::*;
 use crate::game::fixed_math::{FixedVec2, FixedNum};
 use crate::game::config::{GameConfig, GameConfigHandle};
-use crate::game::pathfinding::{Path, HierarchicalGraph};
+use crate::game::pathfinding::{Path, PathState, HierarchicalGraph};
 use super::components::ForceSource;
 use super::resources::{DebugConfig, MapFlowField};
 
@@ -36,7 +36,7 @@ pub fn toggle_debug(
                 info!("  Total regions: {} in {} clusters ({} islands)", 
                       stats.region_count, stats.cluster_count, stats.island_count);
             }
-            info!("  Total clusters: {}", graph.clusters.len());
+            info!("  Total clusters: {}", graph.cluster_count());
             info!("\n=== LEGEND ===");
             info!("  Colored rectangles = Regions (convex navigable areas)");
             info!("  Same color = Same island (connected regions)");
@@ -94,13 +94,18 @@ pub fn draw_unit_paths(
         let mut current_pos = transform.translation;
         current_pos.y = 0.6;
 
-        match path {
-            Path::Direct(target) => {
+        let path_state = match path {
+            Path::Active(state) => state,
+            Path::Completed | Path::Blocked => continue,
+        };
+        
+        match path_state {
+            PathState::Direct(target) => {
                 let next_pos = Vec3::new(target.x.to_num(), 0.6, target.y.to_num());
                 gizmos.line(current_pos, next_pos, Color::srgb(0.0, 1.0, 0.0));
                 gizmos.sphere(next_pos, 0.2, Color::srgb(0.0, 1.0, 0.0));
             },
-            Path::LocalAStar { waypoints, current_index } => {
+            PathState::LocalAStar { waypoints, current_index } => {
                 if *current_index >= waypoints.len() { continue; }
                 for i in *current_index..waypoints.len() {
                     let wp = waypoints[i];
@@ -110,7 +115,7 @@ pub fn draw_unit_paths(
                     current_pos = next_pos;
                 }
             },
-            Path::Hierarchical { goal, goal_cluster, goal_region: _, goal_island } => {
+            PathState::Hierarchical { goal, goal_cluster, goal_region: _, goal_island, .. } => {
                 // Draw path as: unit -> portal -> portal -> ... -> goal
                 use crate::game::pathfinding::{get_region_id, ClusterIslandId, CLUSTER_SIZE, world_to_cluster_local};
                 
@@ -120,9 +125,10 @@ pub fn draw_unit_paths(
                 if let Some((gx, gy)) = flow_field.world_to_grid(unit_pos) {
                     let current_cluster = (gx / CLUSTER_SIZE, gy / CLUSTER_SIZE);
                     
-                    if current_cluster == *goal_cluster {
+                    if current_cluster == goal_cluster.as_tuple() {
                         // Same cluster - check if same region
-                        if let Some(current_cluster_data) = graph.clusters.get(&current_cluster) {
+                        let (ccx, ccy) = current_cluster;
+                        if let Some(current_cluster_data) = graph.get_cluster(ccx, ccy) {
                             // Convert to cluster-local coordinates
                             let curr_reg = world_to_cluster_local(unit_pos, current_cluster, flow_field)
                                 .and_then(|local_pos| get_region_id(&current_cluster_data.regions, current_cluster_data.region_count, local_pos));
@@ -158,7 +164,8 @@ pub fn draw_unit_paths(
                     }
                     
                     // Different cluster - use island routing to find portal sequence
-                    if let Some(current_cluster_data) = graph.clusters.get(&current_cluster) {
+                    let (ccx, ccy) = current_cluster;
+                    if let Some(current_cluster_data) = graph.get_cluster(ccx, ccy) {
                         // Convert to cluster-local coordinates
                         if let Some(curr_reg) = world_to_cluster_local(unit_pos, current_cluster, flow_field)
                             .and_then(|local_pos| get_region_id(&current_cluster_data.regions, current_cluster_data.region_count, local_pos)) {
@@ -168,7 +175,7 @@ pub fn draw_unit_paths(
                                 .unwrap_or(crate::game::pathfinding::IslandId(0));
                             
                             let from_island_id = ClusterIslandId::new(current_cluster, current_island);
-                            let to_island_id = ClusterIslandId::new(*goal_cluster, *goal_island);
+                            let to_island_id = ClusterIslandId::new(goal_cluster.as_tuple(), *goal_island);
                             
                             // Collect all portals in the path
                             let mut portal_sequence = Vec::new();
@@ -183,7 +190,7 @@ pub fn draw_unit_paths(
                                     
                                     // Determine the island ID on the other side of this portal
 
-                                    if let Some(portal) = graph.portals.get(&next_portal_id) {
+                                    if let Some(portal) = graph.portals.get(next_portal_id) {
                                         let next_cluster = portal.cluster;
                                         // For simplification, just assume we reach the correct island
                                         // In reality we'd need to query which island contains the portal endpoint
@@ -204,7 +211,7 @@ pub fn draw_unit_paths(
                             // Draw the path through all portals
                             for portal_id in portal_sequence {
 
-                                if let Some(portal) = graph.portals.get(&portal_id) {
+                                if let Some(portal) = graph.portals.get(portal_id) {
                                     let portal_pos = flow_field.grid_to_world(portal.node.x, portal.node.y);
                                     let portal_pos_3d = Vec3::new(portal_pos.x.to_num(), 0.6, portal_pos.y.to_num());
                                     

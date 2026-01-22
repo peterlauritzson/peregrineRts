@@ -1,6 +1,7 @@
 use crate::game::structures::FlowField;
 use crate::game::fixed_math::{FixedVec2, FixedNum};
-use super::types::{Region, Rect, CLUSTER_SIZE, MAX_REGIONS, RegionId, IslandId};
+use super::types::{Region, Rect, CLUSTER_SIZE, MAX_REGIONS, RegionId, IslandId, ClusterId};
+use super::graph::HierarchicalGraph;
 use smallvec::SmallVec;
 use bevy::prelude::*;
 
@@ -124,6 +125,79 @@ fn find_horizontal_strips_with_dilation(
     }
     
     strips
+}
+
+// ============================================================================
+// PERF: Fast Point Containment Checks
+// ============================================================================
+
+/// Convert world position to cluster-local grid coordinates
+/// Check if a world position is inside a cluster (O(1) rectangle check).
+/// Returns false if cluster doesn't exist or point is outside cluster bounds.
+/// 
+/// # Arguments
+/// * `pos` - World position to check
+/// * `cluster_id` - Cluster to check against
+/// * `graph` - Hierarchical graph (for validation)
+/// * `flow_field` - Flow field (for world<->grid conversion)
+pub(crate) fn point_in_cluster(
+    pos: FixedVec2,
+    cluster_id: ClusterId,
+    graph: &HierarchicalGraph,
+    flow_field: &FlowField,
+) -> bool {
+    let (cx, cy) = cluster_id.as_tuple();
+    
+    // Bounds check: cluster must exist
+    if cx >= graph.cluster_cols || cy >= graph.cluster_rows {
+        return false;
+    }
+    
+    // Calculate cluster world bounds
+    let cluster_grid_min_x = cx * CLUSTER_SIZE;
+    let cluster_grid_min_y = cy * CLUSTER_SIZE;
+    let cluster_grid_max_x = ((cx + 1) * CLUSTER_SIZE).min(flow_field.width);
+    let cluster_grid_max_y = ((cy + 1) * CLUSTER_SIZE).min(flow_field.height);
+    
+    // Convert to world coordinates
+    let world_min = flow_field.grid_to_world(cluster_grid_min_x, cluster_grid_min_y);
+    let world_max = flow_field.grid_to_world(cluster_grid_max_x, cluster_grid_max_y);
+    
+    // Rectangle containment check (4 comparisons - very fast)
+    pos.x >= world_min.x && pos.x <= world_max.x &&
+    pos.y >= world_min.y && pos.y <= world_max.y
+}
+
+/// Check if a world position is inside a specific region (O(1) rectangle check).
+/// Returns false if cluster/region doesn't exist or point is outside region bounds.
+/// 
+/// # Arguments
+/// * `pos` - World position to check
+/// * `cluster_id` - Cluster containing the region
+/// * `region_id` - Region to check against
+/// * `graph` - Hierarchical graph
+pub(crate) fn point_in_region(
+    pos: FixedVec2,
+    cluster_id: ClusterId,
+    region_id: RegionId,
+    graph: &HierarchicalGraph,
+) -> bool {
+    let (cx, cy) = cluster_id.as_tuple();
+    
+    // Get cluster (validates cluster exists)
+    let cluster = match graph.get_cluster(cx, cy) {
+        Some(c) => c,
+        None => return false,
+    };
+    
+    // Get region (validates region exists in this cluster)
+    let region = match cluster.regions.get(region_id.0 as usize) {
+        Some(Some(r)) => r,
+        _ => return false, // Region doesn't exist or out of bounds
+    };
+    
+    // Rectangle containment check (4 comparisons - very fast)
+    region.bounds.contains(pos)
 }
 
 /// Check if a tile is walkable after applying obstacle dilation
@@ -283,6 +357,8 @@ fn rect_to_vertices(rect: Rect) -> SmallVec<[FixedVec2; 8]> {
 /// Find which region contains a given point in CLUSTER-LOCAL coordinates
 /// Point must be in the range [0, CLUSTER_SIZE] relative to the cluster origin
 pub(crate) fn get_region_id(regions: &[Option<Region>], region_count: usize, point: FixedVec2) -> Option<RegionId> {
+    // DEPRECATED: This function is kept for compatibility but should not be used in hot paths
+    // Use get_region_id_fast() with the cluster's region_lookup_grid instead
     for i in 0..region_count {
         if let Some(region) = &regions[i] {
             // Fast rejection test using bounding box
@@ -303,6 +379,83 @@ pub(crate) fn get_region_id(regions: &[Option<Region>], region_count: usize, poi
         }
     }
     None
+}
+
+/// PERF: Fast O(1) region lookup using world coordinates directly (no grid conversion)
+/// Returns None if point is outside cluster or in unwalkable area
+#[inline]
+pub(crate) fn get_region_id_by_world_pos(
+    cluster: &super::cluster::Cluster,
+    world_pos: FixedVec2,
+) -> Option<RegionId> {
+    // Quantize world position to match HashMap keys (0.5 world unit resolution)
+    let x_quantized = (world_pos.x.to_num::<f32>() * 2.0) as i32;
+    let y_quantized = (world_pos.y.to_num::<f32>() * 2.0) as i32;
+    
+    cluster.region_world_lookup.get(&(x_quantized, y_quantized)).copied()
+}
+
+/// PERF: Fast O(1) island lookup using world coordinates directly (no searching!)
+/// Returns None if point is outside cluster or in unwalkable area
+/// This eliminates the O(N) linear search through regions to find nearest island
+#[inline]
+pub(crate) fn get_island_id_by_world_pos(
+    cluster: &super::cluster::Cluster,
+    world_pos: FixedVec2,
+) -> Option<super::types::IslandId> {
+    // Quantize world position to match HashMap keys (0.5 world unit resolution)
+    let x_quantized = (world_pos.x.to_num::<f32>() * 2.0) as i32;
+    let y_quantized = (world_pos.y.to_num::<f32>() * 2.0) as i32;
+    
+    cluster.island_world_lookup.get(&(x_quantized, y_quantized)).copied()
+}
+
+/// Build the region lookup grid for a cluster after regions have been created
+/// This enables O(1) region lookups instead of O(N) linear search
+pub(crate) fn build_region_lookup_grid(
+    cluster: &mut super::cluster::Cluster,
+    cluster_id: (usize, usize),
+    flow_field: &FlowField,
+) {
+    let (cx, cy) = cluster_id;
+    let start_x = cx * CLUSTER_SIZE;
+    let start_y = cy * CLUSTER_SIZE;
+    
+    // Iterate through every grid cell in the cluster
+    for local_y in 0..CLUSTER_SIZE {
+        for local_x in 0..CLUSTER_SIZE {
+            let world_x = start_x + local_x;
+            let world_y = start_y + local_y;
+            
+            // Skip out of bounds
+            if world_x >= flow_field.width || world_y >= flow_field.height {
+                cluster.region_lookup_grid[local_y][local_x] = None;
+                continue;
+            }
+            
+            // Convert grid to world position
+            let world_pos = flow_field.grid_to_world(world_x, world_y);
+            
+            // Find which region contains this position (using slow method during setup)
+            let region_id = get_region_id(&cluster.regions, cluster.region_count, world_pos);
+            
+            // Store in lookup grid
+            cluster.region_lookup_grid[local_y][local_x] = region_id.map(|r| r.0);
+            
+            // ALSO store in world-coordinate HashMaps (quantized to 0.5 world units)
+            // This allows O(1) lookup without world_to_grid conversion in hot path
+            if let Some(reg_id) = region_id {
+                let x_quantized = (world_pos.x.to_num::<f32>() * 2.0) as i32;
+                let y_quantized = (world_pos.y.to_num::<f32>() * 2.0) as i32;
+                cluster.region_world_lookup.insert((x_quantized, y_quantized), reg_id);
+                
+                // ALSO populate island lookup for O(1) island queries (no searching!)
+                if let Some(region) = &cluster.regions[reg_id.0 as usize] {
+                    cluster.island_world_lookup.insert((x_quantized, y_quantized), region.island);
+                }
+            }
+        }
+    }
 }
 
 /// Convert world position to cluster-local coordinates for region lookup

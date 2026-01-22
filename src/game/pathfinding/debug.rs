@@ -45,7 +45,7 @@ pub(super) fn draw_graph_gizmos(
     let camera_center = Vec2::new(center_pos.x, center_pos.z);
     
     // NEW: Draw regions and islands with different colors
-    for (cluster_id, cluster) in &graph.clusters {
+    for (cluster_id, cluster) in graph.clusters_iter() {
         let cluster_x_tiles = cluster_id.0 * super::types::CLUSTER_SIZE;
         let cluster_y_tiles = cluster_id.1 * super::types::CLUSTER_SIZE;
         
@@ -115,7 +115,7 @@ pub(super) fn draw_graph_gizmos(
     
     // Draw inter-cluster portals (for cross-cluster routing)
 
-    for portal in graph.portals.values() {
+    for portal in &graph.portals {
         let pos = flow_field.grid_to_world(portal.node.x, portal.node.y);
         let portal_pos = Vec2::new(pos.x.to_num(), pos.y.to_num());
         

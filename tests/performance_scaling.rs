@@ -621,58 +621,25 @@ fn timed_physics(world: &mut World) {
     }
 }
 
-fn timed_pathfinding(world: &mut World) {
+/// Timing wrapper for process_path_requests (handles PathRequest messages -> Path components)
+fn timed_process_path_requests(world: &mut World) {
     let t = Instant::now();
-    world.run_system_once(profiled_process_path_requests).ok();
+    world.run_system_once(peregrine::game::pathfinding::process_path_requests).ok();
     let elapsed = t.elapsed().as_secs_f32() * 1000.0;
     if let Some(timings) = world.get_resource::<SystemTimings>() {
         *timings.pathfinding_ms.lock().unwrap() = elapsed;
     }
 }
 
-/// Profiled version of process_path_requests that tracks detailed timings
-fn profiled_process_path_requests(
-    mut path_requests: MessageReader<PathRequest>,
-    mut commands: Commands,
-    map_flow_field: Res<MapFlowField>,
-    graph: Res<HierarchicalGraph>,
-    pf_timings: Res<PathfindingTimings>,
-) {
-    use peregrine::game::pathfinding::CLUSTER_SIZE;
-    
-    if path_requests.is_empty() {
-        return;
-    }
-
-    let request_count = path_requests.len();
-    *pf_timings.total_requests.lock().unwrap() += request_count;
-    
-    let flow_field = &map_flow_field.0;
-    if flow_field.width == 0 || !graph.initialized {
-        return;
-    }
-
-    // Reset detailed timings for this batch
-    *pf_timings.goal_validation_ms.lock().unwrap() = 0.0;
-    *pf_timings.line_of_sight_ms.lock().unwrap() = 0.0;
-    *pf_timings.connectivity_check_ms.lock().unwrap() = 0.0;
-    *pf_timings.local_astar_ms.lock().unwrap() = 0.0;
-    *pf_timings.portal_graph_astar_ms.lock().unwrap() = 0.0;
-    *pf_timings.flow_field_lookup_ms.lock().unwrap() = 0.0;
-
-    for request in path_requests.read() {
-        let goal_node_opt = flow_field.world_to_grid(request.goal);
-
-        if let Some(goal_node) = goal_node_opt {
-            // Lazy pathfinding: just set goal on Path component
-            let goal_cluster = (goal_node.0 / CLUSTER_SIZE, goal_node.1 / CLUSTER_SIZE);
-            commands.entity(request.entity).insert(peregrine::game::pathfinding::Path::Hierarchical {
-                goal: request.goal,
-                goal_cluster,
-                goal_region: None, // Will be determined during movement
-                goal_island: peregrine::game::pathfinding::IslandId(0), // Default to island 0
-            });
-        }
+/// Timing wrapper for follow_path (executes navigation along assigned paths)
+fn timed_follow_path(world: &mut World) {
+    let t = Instant::now();
+    world.run_system_once(peregrine::game::pathfinding::follow_path).ok();
+    let elapsed = t.elapsed().as_secs_f32() * 1000.0;
+    if let Some(timings) = world.get_resource::<SystemTimings>() {
+        // Add to pathfinding time (follow_path is part of pathfinding cost)
+        let current = *timings.pathfinding_ms.lock().unwrap();
+        *timings.pathfinding_ms.lock().unwrap() = current + elapsed;
     }
 }
 
@@ -911,7 +878,8 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
     // Add pathfinding systems (only run if pattern is not None)
     if pathfinding_pattern != PathfindingPattern::None {
         app.add_systems(Update, generate_pathfinding_requests.after(timed_physics));
-        app.add_systems(Update, timed_pathfinding.after(generate_pathfinding_requests));
+        app.add_systems(Update, timed_process_path_requests.after(generate_pathfinding_requests));
+        app.add_systems(Update, timed_follow_path.after(timed_process_path_requests));
     }
     
     // All precomputation complete - start timing actual simulation ticks

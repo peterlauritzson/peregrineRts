@@ -71,21 +71,52 @@ pub struct PathRequest {
     pub goal: FixedVec2,
 }
 
+/// Cached navigation cell for the goal position
+/// Precomputed during path request processing to avoid repeated lookups
+#[derive(Component, Clone, Copy, Debug)]
+pub struct GoalNavCell(pub crate::game::pathfinding::navigation_lookup::NavigationCell);
+
+/// Path component with state machine to avoid expensive component removal in hot loop
 #[derive(Component, Debug, Clone)]
 pub enum Path {
+    /// Active path - unit is navigating
+    Active(PathState),
+    /// Path completed - unit arrived at destination (marked for cleanup)
+    Completed,
+    /// Path blocked - no route exists (marked for cleanup)
+    Blocked,
+}
+
+/// Active path variants
+#[derive(Debug, Clone)]
+pub enum PathState {
     Direct(FixedVec2),
     LocalAStar { waypoints: Vec<FixedVec2>, current_index: usize },
     Hierarchical {
         goal: FixedVec2,
-        goal_cluster: (usize, usize),
+        goal_cluster: ClusterId,
         goal_region: Option<RegionId>,  // Cached goal region (None if not in any region)
         goal_island: IslandId,
+        
+        // PERF: Cached navigation state to avoid recomputing every frame
+        /// Current cluster the unit is in (revalidated each frame cheaply)
+        current_cluster: Option<ClusterId>,
+        /// Current region the unit is in (revalidated each frame cheaply)
+        current_region: Option<RegionId>,
+        /// Next expected cluster after crossing boundary (for fast transition)
+        next_expected_cluster: Option<ClusterId>,
+        /// Next expected region after crossing boundary (for fast transition)
+        next_expected_region: Option<RegionId>,
+        /// Current target position to navigate toward
+        current_target: Option<FixedVec2>,
+        /// Whether current target is an inter-cluster portal
+        is_inter_cluster_target: bool,
     }
 }
 
 impl Default for Path {
     fn default() -> Self {
-        Path::Direct(FixedVec2::ZERO)
+        Path::Active(PathState::Direct(FixedVec2::ZERO))
     }
 }
 
@@ -137,6 +168,20 @@ pub struct RegionPortal {
     pub center: FixedVec2,
     /// ID of the connected region
     pub next_region: RegionId,
+}
+
+/// Cluster identifier (x, y coordinates in cluster grid)
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ClusterId(pub usize, pub usize);
+
+impl ClusterId {
+    pub fn new(x: usize, y: usize) -> Self {
+        Self(x, y)
+    }
+    
+    pub fn as_tuple(&self) -> (usize, usize) {
+        (self.0, self.1)
+    }
 }
 
 /// Region identifier (0-31 within a cluster)
@@ -215,3 +260,37 @@ impl ClusterIslandId {
         Self { cluster, island }
     }
 }
+
+// ============================================================================
+// Type-Safe Arena Index Wrappers (Zero-Cost Abstractions)
+// ============================================================================
+
+/// Cluster arena index in the global cluster grid
+/// Computed as: cluster_y * clusters_x + cluster_x
+/// 
+/// Distinct from ClusterId which stores (x, y) tuple - this is the linearized index
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClusterArenaIdx(pub u32);
+
+/// Global region arena index
+/// Computed as: cluster_idx * MAX_REGIONS + local_region_id
+/// 
+/// Distinct from RegionId which is a local ID (0..MAX_REGIONS) within a cluster
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegionArenaIdx(pub u32);
+
+/// Global island arena index
+/// Computed as: cluster_idx * MAX_ISLANDS + local_island_id
+/// 
+/// Distinct from IslandId which is a local ID (0..MAX_ISLANDS) within a cluster
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IslandArenaIdx(pub u32);
+
+/// Local region ID within a cluster (0..MAX_REGIONS)
+/// Type-safe wrapper to prevent confusion with global RegionArenaIdx
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocalRegionId(pub u8);

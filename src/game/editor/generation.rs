@@ -127,7 +127,7 @@ pub fn handle_generation(
     // This ensures clusters and portals are valid for the new map size
     // before apply_new_obstacles tries to regenerate cluster flow fields
     info!("Building hierarchical graph for new map...");
-    graph.build_graph(&map_flow_field.0, false); // false = use new region-based system
+    graph.build_graph(&map_flow_field.0, false, None); // false = use new region-based system
     let stats = graph.get_stats();
     info!("Graph built - {} clusters, {} regions, {} islands", 
         stats.cluster_count, 

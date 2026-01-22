@@ -1,6 +1,6 @@
 use serde::{Serialize, Deserialize};
 use crate::game::fixed_math::FixedNum;
-use super::types::{Portal, Node, Region, Island, MAX_REGIONS, MAX_ISLANDS, NO_PATH};
+use super::types::{Portal, Node, Region, Island, RegionId, MAX_REGIONS, MAX_ISLANDS, NO_PATH};
 
 /// Represents a spatial cluster in the hierarchical pathfinding graph.
 ///
@@ -50,6 +50,24 @@ pub struct Cluster {
     /// Neighbor connectivity: [island_id][direction] -> Option<portal_id>
     /// Direction: 0=North, 1=South, 2=East, 3=West, 4=NE, 5=NW, 6=SE, 7=SW (use Direction enum for type safety)
     pub neighbor_connectivity: [[Option<usize>; 8]; MAX_ISLANDS],
+    
+    /// PERF: Region lookup grid for O(1) point-in-region queries
+    /// Maps cluster-local grid positions to region IDs (None if unwalkable)
+    /// Size: CLUSTER_SIZE × CLUSTER_SIZE (25×25 = 625 bytes per cluster)
+    /// This replaces O(N) linear search through regions with O(1) array access
+    pub region_lookup_grid: Box<[[Option<u8>; super::types::CLUSTER_SIZE]; super::types::CLUSTER_SIZE]>,
+    
+    /// PERF: Fast region lookup by world coordinates (HashMap fallback)
+    /// Maps quantized world coordinates to region IDs
+    /// Used when entity is in cluster but grid lookup would require expensive world_to_grid conversion
+    /// Key: (x_quantized, y_quantized) in world space, quantized to 0.5 world units
+    pub region_world_lookup: std::collections::HashMap<(i32, i32), RegionId>,
+    
+    /// PERF: Fast island lookup by world coordinates (O(1) no searching!)
+    /// Maps quantized world coordinates to island IDs
+    /// Key: (x_quantized, y_quantized) in world space, quantized to 0.5 world units
+    /// This eliminates O(N) search through regions to find nearest island
+    pub island_world_lookup: std::collections::HashMap<(i32, i32), super::types::IslandId>,
 }
 
 impl Cluster {
@@ -62,6 +80,9 @@ impl Cluster {
             island_count: 0,
             local_routing: [[NO_PATH; MAX_REGIONS]; MAX_REGIONS],
             neighbor_connectivity: [[None; 8]; MAX_ISLANDS],
+            region_lookup_grid: Box::new([[None; super::types::CLUSTER_SIZE]; super::types::CLUSTER_SIZE]),
+            region_world_lookup: std::collections::HashMap::new(),
+            island_world_lookup: std::collections::HashMap::new(),
         }
     }
     
@@ -79,7 +100,7 @@ pub(super) fn create_portal_vertical(
     
     let id1 = graph.next_portal_id;
     graph.next_portal_id += 1;
-    graph.portals.insert(id1, Portal { 
+    graph.portals.push(Portal { 
         id: id1, 
         node: Node { x: x1, y: mid_y }, 
         range_min: Node { x: x1, y: y_start },
@@ -90,7 +111,7 @@ pub(super) fn create_portal_vertical(
 
     let id2 = graph.next_portal_id;
     graph.next_portal_id += 1;
-    graph.portals.insert(id2, Portal { 
+    graph.portals.push(Portal { 
         id: id2, 
         node: Node { x: x2, y: mid_y }, 
         range_min: Node { x: x2, y: y_start },
@@ -100,8 +121,12 @@ pub(super) fn create_portal_vertical(
     });
     
     let cost = FixedNum::from_num(1.0);
-    graph.portal_connections.entry(id1).or_default().push((id2, cost));
-    graph.portal_connections.entry(id2).or_default().push((id1, cost));
+    // Ensure capacity for portal connections
+    while graph.portal_connections.len() <= id2.max(id1) {
+        graph.portal_connections.push(Vec::new());
+    }
+    graph.portal_connections[id1].push((id2, cost));
+    graph.portal_connections[id2].push((id1, cost));
 }
 
 pub(super) fn create_portal_horizontal(
@@ -116,7 +141,7 @@ pub(super) fn create_portal_horizontal(
     
     let id1 = graph.next_portal_id;
     graph.next_portal_id += 1;
-    graph.portals.insert(id1, Portal { 
+    graph.portals.push(Portal { 
         id: id1, 
         node: Node { x: mid_x, y: y1 }, 
         range_min: Node { x: x_start, y: y1 },
@@ -127,7 +152,7 @@ pub(super) fn create_portal_horizontal(
 
     let id2 = graph.next_portal_id;
     graph.next_portal_id += 1;
-    graph.portals.insert(id2, Portal { 
+    graph.portals.push(Portal { 
         id: id2, 
         node: Node { x: mid_x, y: y2 }, 
         range_min: Node { x: x_start, y: y2 },
@@ -137,8 +162,12 @@ pub(super) fn create_portal_horizontal(
     });
     
     let cost = FixedNum::from_num(1.0);
-    graph.portal_connections.entry(id1).or_default().push((id2, cost));
-    graph.portal_connections.entry(id2).or_default().push((id1, cost));
+    // Ensure capacity for portal connections
+    while graph.portal_connections.len() <= id2.max(id1) {
+        graph.portal_connections.push(Vec::new());
+    }
+    graph.portal_connections[id1].push((id2, cost));
+    graph.portal_connections[id2].push((id1, cost));
 }
 
 /// Create a diagonal portal connecting two clusters at different positions
@@ -163,7 +192,7 @@ pub(super) fn create_portal_diagonal(
 
     let id2 = graph.next_portal_id;
     graph.next_portal_id += 1;
-    graph.portals.insert(id2, Portal { 
+    graph.portals.push(Portal { 
         id: id2, 
         node: Node { x: x2, y: y2 }, 
         range_min: Node { x: x2, y: y2 },
@@ -174,6 +203,10 @@ pub(super) fn create_portal_diagonal(
     
     // Diagonal distance: sqrt(2) ≈ 1.414
     let cost = FixedNum::from_num(1.414);
-    graph.portal_connections.entry(id1).or_default().push((id2, cost));
-    graph.portal_connections.entry(id2).or_default().push((id1, cost));
+    // Ensure capacity for portal connections
+    while graph.portal_connections.len() <= id2.max(id1) {
+        graph.portal_connections.push(Vec::new());
+    }
+    graph.portal_connections[id1].push((id2, cost));
+    graph.portal_connections[id2].push((id1, cost));
 }

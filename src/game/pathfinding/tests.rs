@@ -50,7 +50,7 @@ fn test_direction_mapping_consistency() {
     assert!(graph.portals.len() > 0, "No portals created");
     
     // Get cluster (0,0)
-    let cluster_00 = graph.clusters.get(&(0, 0)).expect("Cluster (0,0) should exist");
+    let cluster_00 = graph.get_cluster(0, 0).expect("Cluster (0,0) should exist");
     
     // There should be portals to the East (cluster 1,0) and North (cluster 0,1)
     let has_east_portal = cluster_00.neighbor_connectivity[0][Direction::East.as_index()].is_some();
@@ -72,7 +72,7 @@ fn test_direction_mapping_consistency() {
     
     // Check that portal directions are correct
     if let Some(east_portal_id) = cluster_00.neighbor_connectivity[0][Direction::East.as_index()] {
-        let portal = graph.portals.get(&east_portal_id).expect("Portal should exist");
+        let portal = graph.portals.get(east_portal_id).expect("Portal should exist");
         
         // Portal should be on the eastern edge of cluster (0,0)
         assert_eq!(portal.node.x, CLUSTER_SIZE - 1, 
@@ -80,7 +80,7 @@ fn test_direction_mapping_consistency() {
     }
     
     if let Some(north_portal_id) = cluster_00.neighbor_connectivity[0][Direction::North.as_index()] {
-        let portal = graph.portals.get(&north_portal_id).expect("Portal should exist");
+        let portal = graph.portals.get(north_portal_id).expect("Portal should exist");
         
         // Portal should be on the northern edge of cluster (0,0)
         assert_eq!(portal.node.y, CLUSTER_SIZE - 1,
@@ -102,7 +102,8 @@ fn test_simple_path_north() {
     assert!(graph.initialized, "Graph should be initialized");
     
     let start_cluster = (1, 0);
-    let start_cluster_data = graph.clusters.get(&start_cluster).unwrap();
+    let (scx, scy) = start_cluster;
+    let start_cluster_data = graph.get_cluster(scx, scy).unwrap();
     
     // Use Direction enum for type-safe access
     let north_portal_id = start_cluster_data.neighbor_connectivity[0][Direction::North.as_index()];
@@ -113,7 +114,7 @@ fn test_simple_path_north() {
         "Cluster (1,0) should have a North portal to reach (1,1)");
     
     if let Some(portal_id) = north_portal_id {
-        let portal = graph.portals.get(&portal_id).unwrap();
+        let portal = graph.portals.get(portal_id).unwrap();
         let expected_y = CLUSTER_SIZE - 1;
         
         assert_eq!(portal.node.y, expected_y,
@@ -134,7 +135,7 @@ fn test_simple_path_east() {
     graph.build_graph(&ff, false);
     
     let start_cluster = (0, 1);
-    let start_cluster_data = graph.clusters.get(&start_cluster).unwrap();
+    let start_cluster_data = graph.get_cluster(start_cluster.0, start_cluster.1).unwrap();
     
     // Use Direction enum
     let east_portal_id = start_cluster_data.neighbor_connectivity[0][Direction::East.as_index()];
@@ -143,7 +144,7 @@ fn test_simple_path_east() {
         "Cluster (0,1) should have an East portal to reach (1,1)");
     
     if let Some(portal_id) = east_portal_id {
-        let portal = graph.portals.get(&portal_id).unwrap();
+        let portal = graph.portals.get(portal_id).unwrap();
         let expected_x = CLUSTER_SIZE - 1;
         
         assert_eq!(portal.node.x, expected_x,
@@ -177,21 +178,23 @@ fn test_path_around_obstacle_north_side() {
     let start_cluster = (1, 1);
     let goal_cluster = (1, 2);
     
-    println!("Start cluster islands: {}", graph.clusters.get(&start_cluster).map(|c| c.island_count).unwrap_or(0));
-    println!("Goal cluster islands: {}", graph.clusters.get(&goal_cluster).map(|c| c.island_count).unwrap_or(0));
+    let (scx, scy) = start_cluster;
+    let (gcx, gcy) = goal_cluster;
+    println!("Start cluster islands: {}", graph.get_cluster(scx, scy).map(|c| c.island_count).unwrap_or(0));
+    println!("Goal cluster islands: {}", graph.get_cluster(gcx, gcy).map(|c| c.island_count).unwrap_or(0));
     
     // Check for portals between start and goal clusters
     println!("\nPortals connecting start->goal:");
-    for (&portal_id, portal) in &graph.portals {
+    for (portal_id, portal) in graph.portals.iter().enumerate() {
         if portal.cluster == start_cluster {
-            if let Some(connections) = graph.portal_connections.get(&portal_id) {
+            if let Some(connections) = (portal_id < graph.portal_connections.len()).then(|| &graph.portal_connections[portal_id]) {
                 for &(neighbor_portal_id, _cost) in connections {
-                    if let Some(neighbor_portal) = graph.portals.get(&neighbor_portal_id) {
+                    if let Some(neighbor_portal) = graph.portals.get(neighbor_portal_id) {
                         if neighbor_portal.cluster == goal_cluster {
                             println!("  Portal {} in {:?} -> Portal {} in {:?}", 
                                 portal_id, start_cluster, neighbor_portal_id, goal_cluster);
-                            println!("    Portal {} island: {:?}", portal_id, graph.portal_island_map.get(&portal_id));
-                            println!("    Portal {} island: {:?}", neighbor_portal_id, graph.portal_island_map.get(&neighbor_portal_id));
+                            println!("    Portal {} island: {:?}", portal_id, graph.portal_island_map.get(portal_id));
+                            println!("    Portal {} island: {:?}", neighbor_portal_id, graph.portal_island_map.get(neighbor_portal_id));
                         }
                     }
                 }
@@ -200,10 +203,10 @@ fn test_path_around_obstacle_north_side() {
     }
     
     // The path should exist (might need to route west around the obstacle)
-    let route_exists = graph.island_routing_table
-        .get(&ClusterIslandId::new(start_cluster, IslandId(0)))
-        .and_then(|routes| routes.get(&ClusterIslandId::new(goal_cluster, IslandId(0))))
-        .is_some();
+    let route_exists = graph.get_island_route(
+        ClusterIslandId::new(start_cluster, IslandId(0)),
+        ClusterIslandId::new(goal_cluster, IslandId(0))
+    ).is_some();
     
     // If no direct route, that's actually OK - the wall blocks it
     // The important thing is that the portal-island mapping is correct
@@ -222,11 +225,11 @@ fn test_direction_enum_consistency() {
     graph.build_graph(&ff, false);
     
     // For each cluster with neighbors, verify portals point the right way
-    for (&cluster_id, cluster) in &graph.clusters {
+    for (cluster_id, cluster) in graph.clusters_iter() {
         for island_idx in 0..cluster.island_count {
             for direction in Direction::ALL {
                 if let Some(portal_id) = cluster.neighbor_connectivity[island_idx][direction.as_index()] {
-                    let portal = graph.portals.get(&portal_id).unwrap();
+                    let portal = graph.portals.get(portal_id).unwrap();
                     
                     // Verify the portal is actually in that direction
                     let cluster_x_tiles = cluster_id.0 * CLUSTER_SIZE;
@@ -328,8 +331,8 @@ fn test_routing_table_correctness() {
         
         // Find which cluster this portal leads to
         let mut next_cluster = current.cluster;
-        for &(other_portal_id, _cost) in graph.portal_connections.get(&next_portal_id).unwrap_or(&vec![]) {
-            if let Some(other_portal) = graph.portals.get(&other_portal_id) {
+        for &(other_portal_id, _cost) in (next_portal_id < graph.portal_connections.len()).then(|| &graph.portal_connections[next_portal_id]).unwrap_or(&vec![]) {
+            if let Some(other_portal) = graph.portals.get(other_portal_id) {
                 if other_portal.cluster != current.cluster {
                     next_cluster = other_portal.cluster;
                     break;
@@ -370,7 +373,7 @@ fn test_intra_cluster_routing() {
     let mut graph = HierarchicalGraph::default();
     graph.build_graph(&ff, false);
     
-    let cluster = graph.clusters.get(&(0, 0)).expect("Cluster (0,0) should exist");
+    let cluster = graph.get_cluster(0, 0).expect("Cluster (0,0) should exist");
     
     if cluster.region_count > 1 {
         for i in 0..cluster.region_count {
@@ -405,7 +408,7 @@ fn test_goal_island_detection() {
     let mut graph = HierarchicalGraph::default();
     graph.build_graph(&ff, false);
     
-    let cluster = graph.clusters.get(&(1, 1)).expect("Cluster (1,1) should exist");
+    let cluster = graph.get_cluster(1, 1).expect("Cluster (1,1) should exist");
     
     // Test that we can look up regions on both sides of the wall
     let left_pos = FixedVec2::new(FixedNum::from_num(32.5), FixedNum::from_num(37.5));
@@ -442,7 +445,7 @@ fn get_first_portal_toward_goal(
     let goal = ClusterIslandId::new(goal_cluster, goal_island);
     
     let portal_id = graph.get_next_portal_for_island(start, goal)?;
-    let portal = graph.portals.get(&portal_id)?;
+    let portal = graph.portals.get(portal_id)?;
     
     Some((portal_id, portal))
 }
@@ -468,7 +471,7 @@ fn test_first_portal_direction_makes_sense() {
     if let Some((portal_id, portal)) = get_first_portal_toward_goal(
         &graph, start_cluster, IslandId(0), goal_cluster, IslandId(0)
     ) {
-        let start_cluster_data = graph.clusters.get(&start_cluster).unwrap();
+        let start_cluster_data = graph.get_cluster(start_cluster.0, start_cluster.1).unwrap();
         
         // Determine which direction this portal is in
         let mut portal_direction = None;
@@ -496,7 +499,7 @@ fn test_first_portal_direction_makes_sense() {
     if let Some((portal_id, portal)) = get_first_portal_toward_goal(
         &graph, start_cluster, IslandId(0), goal_cluster, IslandId(0)
     ) {
-        let start_cluster_data = graph.clusters.get(&start_cluster).unwrap();
+        let start_cluster_data = graph.get_cluster(start_cluster.0, start_cluster.1).unwrap();
         
         let mut portal_direction = None;
         for direction in Direction::ALL {
@@ -523,7 +526,7 @@ fn test_first_portal_direction_makes_sense() {
     if let Some((portal_id, portal)) = get_first_portal_toward_goal(
         &graph, start_cluster, IslandId(0), goal_cluster, IslandId(0)
     ) {
-        let start_cluster_data = graph.clusters.get(&start_cluster).unwrap();
+        let start_cluster_data = graph.get_cluster(start_cluster.0, start_cluster.1).unwrap();
         
         let mut portal_direction = None;
         for direction in Direction::ALL {
@@ -588,8 +591,8 @@ fn test_path_length_reasonableness() {
             
             // Find next cluster
             let mut next_cluster = current.cluster;
-            for &(other_portal_id, _) in graph.portal_connections.get(&next_portal_id).unwrap_or(&vec![]) {
-                if let Some(other_portal) = graph.portals.get(&other_portal_id) {
+            for &(other_portal_id, _) in (next_portal_id < graph.portal_connections.len()).then(|| &graph.portal_connections[next_portal_id]).unwrap_or(&vec![]) {
+                if let Some(other_portal) = graph.portals.get(other_portal_id) {
                     if other_portal.cluster != current.cluster {
                         next_cluster = other_portal.cluster;
                         break;
@@ -643,7 +646,8 @@ fn test_no_opposite_direction_without_obstacles() {
         if let Some((portal_id, _portal)) = get_first_portal_toward_goal(
             &graph, start_cluster, IslandId(0), goal_cluster, IslandId(0)
         ) {
-            let start_cluster_data = graph.clusters.get(&start_cluster).unwrap();
+            let (scx, scy) = start_cluster;
+            let start_cluster_data = graph.get_cluster(scx, scy).unwrap();
             
             // Find which direction this portal is in
             let mut portal_direction = None;
@@ -725,8 +729,8 @@ fn test_obstacle_avoidance_chooses_correct_side() {
         
         // Find next cluster
         let mut next_cluster = current.cluster;
-        for &(other_portal_id, _) in graph.portal_connections.get(&next_portal_id).unwrap_or(&vec![]) {
-            if let Some(other_portal) = graph.portals.get(&other_portal_id) {
+        for &(other_portal_id, _) in (next_portal_id < graph.portal_connections.len()).then(|| &graph.portal_connections[next_portal_id]).unwrap_or(&vec![]) {
+            if let Some(other_portal) = graph.portals.get(other_portal_id) {
                 if other_portal.cluster != current.cluster {
                     next_cluster = other_portal.cluster;
                     break;
@@ -776,7 +780,7 @@ fn test_goal_island_detection_with_obstacles() {
     let mut graph = HierarchicalGraph::default();
     graph.build_graph(&ff, false);
     
-    let cluster = graph.clusters.get(&(2, 2)).expect("Cluster (2,2) should exist");
+    let cluster = graph.get_cluster(2, 2).expect("Cluster (2,2) should exist");
     
     println!("\n=== Goal Island Detection Test ===");
     println!("Cluster (2,2) has {} islands", cluster.island_count);
@@ -885,7 +889,7 @@ fn test_region_lookup_near_boundaries() {
     let mut graph = HierarchicalGraph::default();
     graph.build_graph(&ff, false);
     
-    let cluster = graph.clusters.get(&(1, 1)).expect("Cluster (1,1) should exist");
+    let cluster = graph.get_cluster(1, 1).expect("Cluster (1,1) should exist");
     
     println!("\n=== Boundary Region Lookup Test ===");
     println!("Cluster (1,1) has {} regions", cluster.region_count);
@@ -940,7 +944,7 @@ fn test_fallback_to_island_zero_scenario() {
     let mut graph = HierarchicalGraph::default();
     graph.build_graph(&ff, false);
     
-    let cluster = graph.clusters.get(&(2, 2)).expect("Cluster (2,2) should exist");
+    let cluster = graph.get_cluster(2, 2).expect("Cluster (2,2) should exist");
     
     println!("\n=== Island 0 Fallback Test ===");
     println!("Cluster (2,2) has {} islands, {} regions", 
