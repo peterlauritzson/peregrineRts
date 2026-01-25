@@ -6,7 +6,8 @@
 
 use bevy::prelude::*;
 use crate::game::config::{GameConfig, GameConfigHandle, InitialConfig};
-use crate::game::fixed_math::FixedNum;
+use crate::game::fixed_math::{FixedNum, FixedVec2};
+use crate::game::map::MapSize;
 use crate::game::spatial_hash::SpatialHash;
 
 use crate::game::simulation::resources::*;
@@ -39,8 +40,12 @@ pub fn init_sim_config_from_initial(
     // Copy all values from InitialConfig to SimConfig
     sim_config.tick_rate = config.tick_rate;
     sim_config.unit_speed = FixedNum::from_num(config.unit_speed);
-    sim_config.map_width = FixedNum::from_num(config.map_width);
-    sim_config.map_height = FixedNum::from_num(config.map_height);
+    let half_width = FixedNum::from_num(config.map_width) / FixedNum::from_num(2.0);
+    let half_height = FixedNum::from_num(config.map_height) / FixedNum::from_num(2.0);
+    sim_config.map_size = MapSize {
+        top_left: FixedVec2::new(-half_width, -half_height),
+        bottom_right: FixedVec2::new(half_width, half_height),
+    };
     sim_config.unit_radius = FixedNum::from_num(config.unit_radius);
     sim_config.collision_push_strength = FixedNum::from_num(config.collision_push_strength);
     sim_config.collision_restitution = FixedNum::from_num(config.collision_restitution);
@@ -78,8 +83,8 @@ pub fn init_sim_config_from_initial(
     
     // Initialize spatial hash with proper configuration
     spatial_hash.resize(
-        sim_config.map_width,
-        sim_config.map_height,
+        sim_config.map_size.get_width(),
+        sim_config.map_size.get_height(),
         &config.spatial_hash_entity_radii,
         config.spatial_hash_radius_to_cell_ratio,
         config.spatial_hash_max_entity_count,
@@ -92,7 +97,7 @@ pub fn init_sim_config_from_initial(
     commands.insert_resource(SpatialHashRebuilt);
     
     info!("SimConfig initialized with map size: {}x{}", 
-          sim_config.map_width.to_num::<f32>(), sim_config.map_height.to_num::<f32>());
+          sim_config.map_size.get_width().to_num::<f32>(), sim_config.map_size.get_height().to_num::<f32>());
     info!("SpatialHash initialized with {} size classes ", spatial_hash.size_classes().len());
 }
 

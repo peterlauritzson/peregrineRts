@@ -2,6 +2,7 @@ use bevy::prelude::*;
 use crate::game::GroundPlane;
 use crate::game::structures::{FlowField, CELL_SIZE};
 use crate::game::fixed_math::{FixedVec2, FixedNum};
+use crate::game::map::MapSize;
 use crate::game::simulation::{StaticObstacle, MapFlowField, SimConfig};
 use crate::game::camera::RtsCamera;
 use crate::game::pathfinding::HierarchicalGraph;
@@ -77,8 +78,12 @@ pub fn handle_generation(
     editor_state.current_map_size = Vec2::new(map_width, map_height);
     
     // Update SimConfig with new map dimensions
-    sim_config.map_width = FixedNum::from_num(map_width);
-    sim_config.map_height = FixedNum::from_num(map_height);
+    let half_width = FixedNum::from_num(map_width) / FixedNum::from_num(2.0);
+    let half_height = FixedNum::from_num(map_height) / FixedNum::from_num(2.0);
+    sim_config.map_size = MapSize {
+        top_left: FixedVec2::new(-half_width, -half_height),
+        bottom_right: FixedVec2::new(half_width, half_height),
+    };
     info!("Updated SimConfig: map size = {}x{}", map_width, map_height);
     
     // Update SpatialHash with new map dimensions using InitialConfig values

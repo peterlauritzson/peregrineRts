@@ -47,8 +47,8 @@ pub fn apply_velocity(
     let max_velocity_sq = max_velocity * max_velocity;
     let max_acceleration = sim_config.max_acceleration;
     let max_acceleration_sq = max_acceleration * max_acceleration;
-    let half_w = sim_config.map_width / FixedNum::from_num(2.0);
-    let half_h = sim_config.map_height / FixedNum::from_num(2.0);
+    let half_w = sim_config.map_size.get_width() / FixedNum::from_num(2.0);
+    let half_h = sim_config.map_size.get_height() / FixedNum::from_num(2.0);
 
     for (mut pos, mut vel, mut acc) in query.iter_mut() {
         // Clamp acceleration to max_acceleration to prevent runaway forces

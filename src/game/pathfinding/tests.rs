@@ -44,7 +44,7 @@ fn test_direction_mapping_consistency() {
     let ff = create_test_flowfield(width, height);
     
     let mut graph = HierarchicalGraph::default();
-    graph.build_graph(&ff, false);
+    graph.build_graph(&ff, false, None);
     
     // Check that portals exist between clusters
     assert!(graph.portals.len() > 0, "No portals created");
@@ -97,7 +97,7 @@ fn test_simple_path_north() {
     let ff = create_test_flowfield(width, height);
     
     let mut graph = HierarchicalGraph::default();
-    graph.build_graph(&ff, false);
+    graph.build_graph(&ff, false, None);
     
     assert!(graph.initialized, "Graph should be initialized");
     
@@ -132,7 +132,7 @@ fn test_simple_path_east() {
     let ff = create_test_flowfield(width, height);
     
     let mut graph = HierarchicalGraph::default();
-    graph.build_graph(&ff, false);
+    graph.build_graph(&ff, false, None);
     
     let start_cluster = (0, 1);
     let start_cluster_data = graph.get_cluster(start_cluster.0, start_cluster.1).unwrap();
@@ -172,7 +172,7 @@ fn test_path_around_obstacle_north_side() {
     }
     
     let mut graph = HierarchicalGraph::default();
-    graph.build_graph(&ff, false);
+    graph.build_graph(&ff, false, None);
     
     // Test route from cluster (1,1) to cluster (1,2)
     let start_cluster = (1, 1);
@@ -222,7 +222,7 @@ fn test_direction_enum_consistency() {
     let ff = create_test_flowfield(width, height);
     
     let mut graph = HierarchicalGraph::default();
-    graph.build_graph(&ff, false);
+    graph.build_graph(&ff, false, None);
     
     // For each cluster with neighbors, verify portals point the right way
     for (cluster_id, cluster) in graph.clusters_iter() {
@@ -307,7 +307,7 @@ fn test_routing_table_correctness() {
     let ff = create_test_flowfield(width, height);
     
     let mut graph = HierarchicalGraph::default();
-    graph.build_graph(&ff, false);
+    graph.build_graph(&ff, false, None);
     
     let start = ClusterIslandId::new((0, 0), IslandId(0));
     let goal = ClusterIslandId::new((3, 3), IslandId(0));
@@ -371,7 +371,7 @@ fn test_intra_cluster_routing() {
     add_wall(&mut ff, 10, 10, 2, 10);
     
     let mut graph = HierarchicalGraph::default();
-    graph.build_graph(&ff, false);
+    graph.build_graph(&ff, false, None);
     
     let cluster = graph.get_cluster(0, 0).expect("Cluster (0,0) should exist");
     
@@ -406,7 +406,7 @@ fn test_goal_island_detection() {
     add_wall(&mut ff, 37, 30, 2, 15);
     
     let mut graph = HierarchicalGraph::default();
-    graph.build_graph(&ff, false);
+    graph.build_graph(&ff, false, None);
     
     let cluster = graph.get_cluster(1, 1).expect("Cluster (1,1) should exist");
     
@@ -460,7 +460,7 @@ fn test_first_portal_direction_makes_sense() {
     let ff = create_test_flowfield(width, height);
     
     let mut graph = HierarchicalGraph::default();
-    graph.build_graph(&ff, false);
+    graph.build_graph(&ff, false, None);
     
     // Test case 1: Target is directly north
     // Start at (1, 0), goal at (1, 3)
@@ -555,7 +555,7 @@ fn test_path_length_reasonableness() {
     let ff = create_test_flowfield(width, height);
     
     let mut graph = HierarchicalGraph::default();
-    graph.build_graph(&ff, false);
+    graph.build_graph(&ff, false, None);
     
     // Test various start/goal combinations
     let test_cases = vec![
@@ -632,7 +632,7 @@ fn test_no_opposite_direction_without_obstacles() {
     let ff = create_test_flowfield(width, height);
     
     let mut graph = HierarchicalGraph::default();
-    graph.build_graph(&ff, false);
+    graph.build_graph(&ff, false, None);
     
     // Test all cardinal directions to ensure first portal is never opposite
     let test_cases = vec![
@@ -702,7 +702,7 @@ fn test_obstacle_avoidance_chooses_correct_side() {
     }
     
     let mut graph = HierarchicalGraph::default();
-    graph.build_graph(&ff, false);
+    graph.build_graph(&ff, false, None);
     
     // Start west of wall, goal east of wall, but goal is in the north
     // Should path around the NORTH end of the wall, not the south
@@ -778,7 +778,7 @@ fn test_goal_island_detection_with_obstacles() {
     }
     
     let mut graph = HierarchicalGraph::default();
-    graph.build_graph(&ff, false);
+    graph.build_graph(&ff, false, None);
     
     let cluster = graph.get_cluster(2, 2).expect("Cluster (2,2) should exist");
     
@@ -887,7 +887,7 @@ fn test_region_lookup_near_boundaries() {
     add_wall(&mut ff, 35, 35, 2, 15); // Vertical wall creating left/right regions
     
     let mut graph = HierarchicalGraph::default();
-    graph.build_graph(&ff, false);
+    graph.build_graph(&ff, false, None);
     
     let cluster = graph.get_cluster(1, 1).expect("Cluster (1,1) should exist");
     
@@ -942,7 +942,7 @@ fn test_fallback_to_island_zero_scenario() {
     }
     
     let mut graph = HierarchicalGraph::default();
-    graph.build_graph(&ff, false);
+    graph.build_graph(&ff, false, None);
     
     let cluster = graph.get_cluster(2, 2).expect("Cluster (2,2) should exist");
     

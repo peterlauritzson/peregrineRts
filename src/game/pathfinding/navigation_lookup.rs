@@ -7,6 +7,7 @@ use bevy::prelude::*;
 use super::types::{CLUSTER_SIZE, Region, Island, MAX_REGIONS, ClusterArenaIdx, RegionArenaIdx, IslandArenaIdx};
 use super::cluster::Cluster;
 use super::graph::HierarchicalGraph;
+use crate::game::fixed_math::{FixedVec2, FixedNum};
 
 // ============================================================================
 // Navigation Lookup Structures
@@ -160,84 +161,174 @@ impl NavigationLookup {
     pub fn populate_from_graph(&mut self, graph: &HierarchicalGraph, flow_field: &crate::game::structures::FlowField) {
         info!("[NAV LOOKUP] Populating navigation lookup grid from graph...");
         
-        // Step 1: Copy cluster/region/island data into arenas
-        let mut region_arena_idx = 0;
-        let mut island_arena_idx = 0;
+        // Step 0: Resize grid and arenas to match actual map dimensions
+        let map_width = flow_field.width;
+        let map_height = flow_field.height;
         
+        if self.width != map_width || self.height != map_height {
+            info!("[NAV LOOKUP] Resizing grid from {}×{} to {}×{}", 
+                  self.width, self.height, map_width, map_height);
+            
+            // Recreate grid with correct dimensions
+            self.grid = (0..map_height)
+                .map(|_| vec![NavigationCell::default(); map_width].into_boxed_slice())
+                .collect::<Vec<_>>()
+                .into_boxed_slice();
+            
+            // Recreate arenas with correct dimensions
+            self.arenas = NavigationArenas::new(map_width, map_height);
+            
+            // Update stored dimensions
+            self.width = map_width;
+            self.height = map_height;
+        }
+        
+        // Step 1: Copy cluster/region/island data into arenas using BLOCKED indexing
+        // Regions: cluster_idx × MAX_REGIONS + local_region_id
+        // Islands: cluster_idx × MAX_ISLANDS + local_island_id
         for cy in 0..self.arenas.clusters_y {
             for cx in 0..self.arenas.clusters_x {
-                let cluster_idx = cy * self.arenas.clusters_x + cx;
+                let cluster_idx = super::types::ClusterArenaIdx::from_coords(cx, cy, self.arenas.clusters_x);
                 
                 if let Some(source_cluster) = graph.get_cluster(cx, cy) {
                     // Copy cluster data
-                    let dest_cluster = &mut self.arenas.clusters[cluster_idx];
+                    let dest_cluster = &mut self.arenas.clusters[cluster_idx.0 as usize];
                     *dest_cluster = source_cluster.clone();
                     
-                    // Copy regions from this cluster into region arena
+                    // Copy regions using blocked indexing
                     for i in 0..source_cluster.region_count {
                         if let Some(region) = &source_cluster.regions[i] {
-                            self.arenas.regions[region_arena_idx] = Some(region.clone());
-                            region_arena_idx += 1;
+                            let region_arena_idx = super::types::RegionArenaIdx::from_cluster_and_local(
+                                cluster_idx,
+                                region.id
+                            );
+                            self.arenas.regions[region_arena_idx.0 as usize] = Some(region.clone());
                         }
                     }
                     
-                    // Copy islands from this cluster into island arena
+                    // Copy islands using blocked indexing
                     for i in 0..source_cluster.island_count {
                         if let Some(island) = &source_cluster.islands[i] {
-                            self.arenas.islands[island_arena_idx] = Some(island.clone());
-                            island_arena_idx += 1;
+                            let island_arena_idx = super::types::IslandArenaIdx::from_cluster_and_local(
+                                cluster_idx,
+                                island.id
+                            );
+                            self.arenas.islands[island_arena_idx.0 as usize] = Some(island.clone());
                         }
                     }
                 }
             }
         }
         
-        info!("[NAV LOOKUP] Populated {} regions and {} islands into arenas", 
-              region_arena_idx, island_arena_idx);
+        info!("[NAV LOOKUP] Populated arenas with blocked indexing");
+        
+        // Debug: Check if region_world_lookup HashMaps are populated
+        let mut total_hash_entries = 0;
+        for cluster in self.arenas.clusters.iter() {
+            total_hash_entries += cluster.region_world_lookup.len();
+        }
+        info!("[NAV LOOKUP] Total region_world_lookup entries across all clusters: {}", total_hash_entries);
         
         // Step 2: Fill the navigation grid
         // For each grid cell, determine which cluster/region/island it belongs to
         for grid_y in 0..self.height {
             for grid_x in 0..self.width {
-                let world_pos = flow_field.grid_to_world(grid_x, grid_y);
-                
                 // Calculate cluster
                 let cluster_x = grid_x / super::types::CLUSTER_SIZE;
                 let cluster_y = grid_y / super::types::CLUSTER_SIZE;
-                let cluster_idx = ClusterArenaIdx((cluster_y * self.arenas.clusters_x + cluster_x) as u32);
+                let cluster_idx = super::types::ClusterArenaIdx::from_coords(
+                    cluster_x, 
+                    cluster_y, 
+                    self.arenas.clusters_x
+                );
                 
-                // Look up region and island from cluster data
-                if let Some(cluster) = graph.get_cluster(cluster_x, cluster_y) {
-                    // Use existing lookup to find region (O(1) via HashMap or grid)
-                    let region_id_opt = super::region_decomposition::get_region_id_by_world_pos(cluster, world_pos);
+                // Initialize with cluster_idx - every cell belongs to a cluster
+                // Region/island indices default to 0 if no region is found (unwalkable cells)
+                let mut nav_cell = NavigationCell {
+                    cluster_idx,
+                    region_idx: RegionArenaIdx(0),
+                    island_idx: IslandArenaIdx(0),
+                };
+                
+                // Look up region and island from cluster data (use arenas, not graph!)
+                // The arenas were already populated in Step 1 with cloned cluster data
+                let cluster = &self.arenas.clusters[cluster_idx.0 as usize];
+                {
+                    // Use fast local grid lookup instead of world position hashmap
+                    // This is faster and avoids floating point quantization issues
+                    let local_x = grid_x % super::types::CLUSTER_SIZE;
+                    let local_y = grid_y % super::types::CLUSTER_SIZE;
+                    
+                    // Manually lookup region using local coordinates because the prebuilt 
+                    // region_lookup_grid in the cluster might be empty due to coordinate 
+                    // space issues during build (it expects global coords but regions are local).
+                    // Regions are defined in [0..CLUSTER_SIZE] local space.
+                    let local_point = FixedVec2::new(
+                        FixedNum::from_num(local_x) + FixedNum::from_num(0.5),
+                        FixedNum::from_num(local_y) + FixedNum::from_num(0.5)
+                    );
+                    
+                    let region_id_opt = super::region_decomposition::get_region_id(
+                        &cluster.regions, 
+                        cluster.region_count, 
+                        local_point
+                    );
                     
                     if let Some(region_id) = region_id_opt {
                         // Get island from region
                         if let Some(region) = &cluster.regions[region_id.0 as usize] {
                             let island_id = region.island;
                             
-                            // Calculate arena indices using type-safe wrappers
-                            let region_arena_idx = RegionArenaIdx((cluster_idx.0 as usize * super::types::MAX_REGIONS) as u32 + region_id.0 as u32);
-                            let island_arena_idx = IslandArenaIdx((cluster_idx.0 as usize * super::types::MAX_ISLANDS) as u32 + island_id.0 as u32);
-                            
-                            self.grid[grid_y][grid_x] = NavigationCell {
+                            // Calculate arena indices using type-safe utility methods
+                            let region_arena_idx = super::types::RegionArenaIdx::from_cluster_and_local(
                                 cluster_idx,
-                                region_idx: region_arena_idx,
-                                island_idx: island_arena_idx,
-                            };
+                                region_id
+                            );
+                            let island_arena_idx = super::types::IslandArenaIdx::from_cluster_and_local(
+                                cluster_idx,
+                                island_id
+                            );
+                            
+                            nav_cell.region_idx = region_arena_idx;
+                            nav_cell.island_idx = island_arena_idx;
                         }
                     }
+                }
+                
+                self.grid[grid_y][grid_x] = nav_cell;
+            }
+        }
+        
+        // Log statistics about populated cells
+        let mut cells_with_regions = 0;
+        let mut cells_without_regions = 0;
+        for row in self.grid.iter() {
+            for cell in row.iter() {
+                if cell.region_idx.0 != 0 {
+                    cells_with_regions += 1;
+                } else {
+                    cells_without_regions += 1;
                 }
             }
         }
         
         info!("[NAV LOOKUP] Navigation lookup grid population complete!");
+        info!("[NAV LOOKUP] Cells with regions: {}, cells without regions (unwalkable): {}", 
+            cells_with_regions, cells_without_regions);
     }
 }
 
 impl Default for NavigationLookup {
     fn default() -> Self {
-        // Create empty 1x1 lookup (will be replaced when graph is built)
+        // TODO(PERF): This allocates a 1×1 grid that gets immediately discarded and replaced
+        // when populate_from_graph() resizes to the actual map dimensions. This causes:
+        // 1. Double allocation (waste)
+        // 2. Heap fragmentation (the 1×1 allocation becomes garbage)
+        // 3. For large maps (~12MB for 1000×1000), we want clean contiguous allocation
+        // 
+        // Better approach: Use lazy initialization (empty/None state) until map is loaded,
+        // then allocate once with correct dimensions. Would avoid throw-away allocations
+        // and improve memory locality over long play sessions.
         Self::new(1, 1)
     }
 }

@@ -10,11 +10,28 @@ use flate2::Compression;
 
 pub const MAP_VERSION: u32 = 1;
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct MapSize {
+    pub top_left: FixedVec2,
+    pub bottom_right: FixedVec2,
+}
+
+impl MapSize {
+    pub fn get_width(&self) -> FixedNum {
+        self.bottom_right.x - self.top_left.x
+    }
+
+    pub fn get_height(&self) -> FixedNum {
+        self.bottom_right.y - self.top_left.y
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct MapData {
     pub version: u32,
-    pub map_width: FixedNum,
-    pub map_height: FixedNum,
+    pub size: MapSize,
+    // pub map_width: FixedNum,
+    // pub map_height: FixedNum,
     pub cell_size: FixedNum,
     pub cluster_size: usize,
     pub obstacles: Vec<MapObstacle>,

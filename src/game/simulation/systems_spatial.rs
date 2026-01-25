@@ -174,12 +174,12 @@ pub fn init_flow_field(
     mut map_flow_field: ResMut<MapFlowField>,
     sim_config: Res<SimConfig>,
 ) {
-    let width = (sim_config.map_width / FixedNum::from_num(CELL_SIZE)).ceil().to_num::<usize>();
-    let height = (sim_config.map_height / FixedNum::from_num(CELL_SIZE)).ceil().to_num::<usize>();
+    let width = (sim_config.map_size.get_width() / FixedNum::from_num(CELL_SIZE)).ceil().to_num::<usize>();
+    let height = (sim_config.map_size.get_height() / FixedNum::from_num(CELL_SIZE)).ceil().to_num::<usize>();
     let cell_size = FixedNum::from_num(CELL_SIZE);
     let origin = FixedVec2::new(
-        -sim_config.map_width / FixedNum::from_num(2.0),
-        -sim_config.map_height / FixedNum::from_num(2.0),
+        -sim_config.map_size.get_width() / FixedNum::from_num(2.0),
+        -sim_config.map_size.get_height() / FixedNum::from_num(2.0),
     );
 
     map_flow_field.0 = FlowField::new(width, height, cell_size, origin);

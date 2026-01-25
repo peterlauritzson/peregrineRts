@@ -273,6 +273,14 @@ impl ClusterIslandId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ClusterArenaIdx(pub u32);
 
+impl ClusterArenaIdx {
+    /// Compute cluster arena index from cluster coordinates
+    #[inline]
+    pub fn from_coords(cluster_x: usize, cluster_y: usize, clusters_x: usize) -> Self {
+        Self((cluster_y * clusters_x + cluster_x) as u32)
+    }
+}
+
 /// Global region arena index
 /// Computed as: cluster_idx * MAX_REGIONS + local_region_id
 /// 
@@ -280,6 +288,22 @@ pub struct ClusterArenaIdx(pub u32);
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RegionArenaIdx(pub u32);
+
+impl RegionArenaIdx {
+    /// Compute global region arena index from cluster index and local region ID
+    #[inline]
+    pub fn from_cluster_and_local(cluster_idx: ClusterArenaIdx, local_region_id: RegionId) -> Self {
+        Self(cluster_idx.0 * MAX_REGIONS as u32 + local_region_id.0 as u32)
+    }
+}
+
+impl IslandArenaIdx {
+    /// Compute global island arena index from cluster index and local island ID
+    #[inline]
+    pub fn from_cluster_and_local(cluster_idx: ClusterArenaIdx, local_island_id: IslandId) -> Self {
+        Self(cluster_idx.0 * MAX_ISLANDS as u32 + local_island_id.0 as u32)
+    }
+}
 
 /// Global island arena index
 /// Computed as: cluster_idx * MAX_ISLANDS + local_island_id

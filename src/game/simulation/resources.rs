@@ -4,7 +4,8 @@
 /// including configuration and performance tracking.
 
 use bevy::prelude::*;
-use crate::game::fixed_math::{FixedNum};
+use crate::game::fixed_math::{FixedNum, FixedVec2};
+use crate::game::map::MapSize;
 use crate::game::structures::FlowField;
 // NOLINT: Duration is a data type for storing time values, not for profiling/timing
 use std::time::Duration;
@@ -109,8 +110,7 @@ pub struct MapFlowField(pub FlowField);
 pub struct SimConfig {
     pub tick_rate: f64,
     pub unit_speed: FixedNum,
-    pub map_width: FixedNum,
-    pub map_height: FixedNum,
+    pub map_size: MapSize,
     pub unit_radius: FixedNum,
     pub collision_push_strength: FixedNum,
     pub collision_restitution: FixedNum,
@@ -158,8 +158,10 @@ impl Default for SimConfig {
         Self {
             tick_rate: 30.0,
             unit_speed: FixedNum::from_num(5.0),
-            map_width: FixedNum::from_num(2048.0),
-            map_height: FixedNum::from_num(2048.0),
+            map_size: MapSize {
+                top_left: FixedVec2::new(FixedNum::from_num(-1024.0), FixedNum::from_num(-1024.0)),
+                bottom_right: FixedVec2::new(FixedNum::from_num(1024.0), FixedNum::from_num(1024.0)),
+            },
             unit_radius: FixedNum::from_num(0.5),
             collision_push_strength: FixedNum::from_num(1.0),
             collision_restitution: FixedNum::from_num(0.5),

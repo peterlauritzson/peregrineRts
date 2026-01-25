@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use crate::game::GameState;
 use crate::game::editor::PendingMapGeneration;
+use crate::game::map::MapSize;
 
 pub struct LoadingPlugin;
 
@@ -167,8 +168,12 @@ fn handle_pending_map_generation(
 
     
     // Update SimConfig with new map dimensions
-    sim_config.map_width = FixedNum::from_num(map_width);
-    sim_config.map_height = FixedNum::from_num(map_height);
+    let half_width = FixedNum::from_num(map_width) / FixedNum::from_num(2.0);
+    let half_height = FixedNum::from_num(map_height) / FixedNum::from_num(2.0);
+    sim_config.map_size = MapSize {
+        top_left: FixedVec2::new(-half_width, -half_height),
+        bottom_right: FixedVec2::new(half_width, half_height),
+    };
     info!("Updated SimConfig: map size = {}x{}", map_width, map_height);
     
     // Update SpatialHash with new map dimensions using InitialConfig values

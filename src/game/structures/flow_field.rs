@@ -92,18 +92,17 @@ impl FlowField {
 
     pub fn world_to_grid(&self, world_pos: FixedVec2) -> Option<(usize, usize)> {
         let local_pos = world_pos - self.origin;
-        if local_pos.x < FixedNum::ZERO || local_pos.y < FixedNum::ZERO {
+        
+        // Convert to grid coordinates (can be negative if position is left/below origin)
+        let grid_x = (local_pos.x / self.cell_size).to_num::<i32>();
+        let grid_y = (local_pos.y / self.cell_size).to_num::<i32>();
+
+        // Check bounds - reject if outside the grid
+        if grid_x < 0 || grid_y < 0 || grid_x >= self.width as i32 || grid_y >= self.height as i32 {
             return None;
         }
 
-        let x = (local_pos.x / self.cell_size).to_num::<usize>();
-        let y = (local_pos.y / self.cell_size).to_num::<usize>();
-
-        if x < self.width && y < self.height {
-            Some((x, y))
-        } else {
-            None
-        }
+        Some((grid_x as usize, grid_y as usize))
     }
 
     pub fn grid_to_world(&self, x: usize, y: usize) -> FixedVec2 {

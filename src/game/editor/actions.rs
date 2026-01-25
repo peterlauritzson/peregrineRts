@@ -210,10 +210,14 @@ pub fn editor_button_system(
                         let stats = graph.get_stats();
                         info!("Saving map with {} regions in {} clusters", stats.region_count, stats.cluster_count);
                         
+                        let half_width = FixedNum::from_num(editor_state.current_map_size.x) / FixedNum::from_num(2.0);
+                        let half_height = FixedNum::from_num(editor_state.current_map_size.y) / FixedNum::from_num(2.0);
                         let map_data = MapData {
                             version: MAP_VERSION,
-                            map_width: FixedNum::from_num(editor_state.current_map_size.x),
-                            map_height: FixedNum::from_num(editor_state.current_map_size.y),
+                            size: crate::game::map::MapSize {
+                                top_left: FixedVec2::new(-half_width, -half_height),
+                                bottom_right: FixedVec2::new(half_width, half_height),
+                            },
                             cell_size: FixedNum::from_num(CELL_SIZE),
                             cluster_size: CLUSTER_SIZE,
                             obstacles,

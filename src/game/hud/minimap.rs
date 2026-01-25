@@ -19,15 +19,17 @@ pub fn minimap_system(
 ) {
     let Ok((minimap_entity, minimap_node)) = q_minimap.single() else { return };
     
-    let map_width = sim_config.map_width.to_num::<f32>();
-    let map_height = sim_config.map_height.to_num::<f32>();
+    let map_width = sim_config.map_size.get_width().to_num::<f32>();
+    let map_height = sim_config.map_size.get_height().to_num::<f32>();
+    let map_min_x = sim_config.map_size.top_left.x.to_num::<f32>();
+    let map_min_y = sim_config.map_size.top_left.y.to_num::<f32>();
     let minimap_w = minimap_node.size().x;
     let minimap_h = minimap_node.size().y;
 
     // Spawn new dots
     for (unit_entity, pos, selected) in q_units.iter() {
-        let x_pct = (pos.0.x.to_num::<f32>() + map_width / 2.0) / map_width;
-        let y_pct = (pos.0.y.to_num::<f32>() + map_height / 2.0) / map_height;
+        let x_pct = (pos.0.x.to_num::<f32>() - map_min_x) / map_width;
+        let y_pct = (pos.0.y.to_num::<f32>() - map_min_y) / map_height;
 
         let x = (x_pct * minimap_w).clamp(0.0, minimap_w);
         let y = (y_pct * minimap_h).clamp(0.0, minimap_h);
@@ -52,8 +54,8 @@ pub fn minimap_system(
     // Update existing dots
     for (dot_entity, dot_link, mut node, mut bg_color) in q_dots.iter_mut() {
         if let Ok((pos, selected)) = q_units_lookup.get(dot_link.0) {
-             let x_pct = (pos.0.x.to_num::<f32>() + map_width / 2.0) / map_width;
-             let y_pct = (pos.0.y.to_num::<f32>() + map_height / 2.0) / map_height;
+             let x_pct = (pos.0.x.to_num::<f32>() - map_min_x) / map_width;
+             let y_pct = (pos.0.y.to_num::<f32>() - map_min_y) / map_height;
              
              let x = (x_pct * minimap_w).clamp(0.0, minimap_w);
              let y = (y_pct * minimap_h).clamp(0.0, minimap_h);
@@ -70,8 +72,8 @@ pub fn minimap_system(
     // Update Camera Frame
     if let Ok(camera_transform) = q_camera.single() {
         if let Ok(mut frame_node) = q_camera_frame.single_mut() {
-            let x_pct = (camera_transform.translation.x + map_width / 2.0) / map_width;
-            let y_pct = (camera_transform.translation.z + map_height / 2.0) / map_height;
+            let x_pct = (camera_transform.translation.x - map_min_x) / map_width;
+            let y_pct = (camera_transform.translation.z - map_min_y) / map_height;
 
             let x = (x_pct * minimap_w).clamp(0.0, minimap_w);
             let y = (y_pct * minimap_h).clamp(0.0, minimap_h);
@@ -110,10 +112,12 @@ pub fn minimap_input_system(
         let pct_x = relative_x / rect.width();
         let pct_y = relative_y / rect.height();
         
-        let map_width = sim_config.map_width.to_num::<f32>();
-        let map_height = sim_config.map_height.to_num::<f32>();
-        let map_x = pct_x * map_width - map_width / 2.0;
-        let map_z = pct_y * map_height - map_height / 2.0;
+        let map_width = sim_config.map_size.get_width().to_num::<f32>();
+        let map_height = sim_config.map_size.get_height().to_num::<f32>();
+        let map_min_x = sim_config.map_size.top_left.x.to_num::<f32>();
+        let map_min_y = sim_config.map_size.top_left.y.to_num::<f32>();
+        let map_x = pct_x * map_width + map_min_x;
+        let map_z = pct_y * map_height + map_min_y;
         
         for mut cam_transform in q_camera.iter_mut() {
             // Simple move. Ideally we'd account for camera angle offset.

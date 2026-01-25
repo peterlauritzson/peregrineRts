@@ -162,6 +162,18 @@ impl NavigationRouting {
             region_routing: RegionRoutingArena::new(num_clusters),
         }
     }
+
+    /// Check if routing tables are sized correctly for the given number of clusters
+    pub fn is_sized_correctly(&self, num_clusters: usize) -> bool {
+        let required_capacity = num_clusters * MAX_ISLANDS;
+        self.island_routing.total_island_capacity == required_capacity
+    }
+
+    /// Resize routing tables to accommodate the specified number of clusters.
+    /// Warning: This clears all existing routing data!
+    pub fn resize(&mut self, num_clusters: usize) {
+        *self = Self::new(num_clusters);
+    }
 }
 
 impl Default for NavigationRouting {

@@ -543,6 +543,14 @@ impl HierarchicalGraph {
         
         info!("[NAV ROUTING] Populating routing tables from graph...");
         
+        // Ensure routing tables are sized correctly for the current map
+        let num_clusters = self.cluster_cols * self.cluster_rows;
+        
+        if !routing.is_sized_correctly(num_clusters) {
+            info!("[NAV ROUTING] Resizing routing tables for {} clusters", num_clusters);
+            routing.resize(num_clusters);
+        }
+        
         // Copy island routing table (macro-level: island → island → portal)
         // The graph's island_routing_storage is already in the correct format
         for cy in 0..self.cluster_rows {

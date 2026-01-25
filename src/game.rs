@@ -102,8 +102,8 @@ fn setup_game(
     info!("Game setup started");
 
     // Ground Plane - sized to match map dimensions
-    let map_width = sim_config.map_width.to_num::<f32>();
-    let map_height = sim_config.map_height.to_num::<f32>();
+    let map_width = sim_config.map_size.get_width().to_num::<f32>();
+    let map_height = sim_config.map_size.get_height().to_num::<f32>();
     info!("Creating ground plane: {}x{}", map_width, map_height);
     
     commands.spawn((

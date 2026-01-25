@@ -11,7 +11,7 @@ use peregrine::game::GameState;
 fn build_graph_incremental(app: &mut App) {
     // Build the graph from the current MapFlowField
     let flow_field = app.world().resource::<MapFlowField>().0.clone();
-    app.world_mut().resource_mut::<HierarchicalGraph>().build_graph(&flow_field, false);
+    app.world_mut().resource_mut::<HierarchicalGraph>().build_graph(&flow_field, false, None);
 }
 
 #[test]
