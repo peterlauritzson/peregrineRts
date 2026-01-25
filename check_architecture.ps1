@@ -10,6 +10,7 @@
     - Non-preallocated dynamic structures (Vec::new, HashMap::new, etc.)
     - Non-fixed capacity data structures (Vec, HashMap, String, etc.)
     - Constant computations that should be extracted
+    - ECS component add/remove operations (archetype stability)
     
     Memory Safety Guidelines:
     - All collections must be created with capacity OR
@@ -22,6 +23,11 @@
     - Extract constant computations to const declarations
     - Use // NO_PERFORMANCE_IMPACT to allow dynamic types when justified
     - Use // NO_CONSTANT_OK to allow inline computations when appropriate
+    
+    ECS Architecture Guidelines:
+    - Avoid adding/removing components at runtime (causes archetype changes)
+    - Use state enum fields within components instead of structural changes
+    - Use // ECS_HANDLING_OK only for intentional, long-term structural changes
 .PARAMETER Verbose
     Show detailed information about checks
 #>
@@ -713,6 +719,100 @@ foreach ($file in $gameFiles) {
 if ($constantComputationViolations -eq 0) {
     Write-Pass "No repeated constant computations or loop-invariant code found (or all marked with NO_CONSTANT_OK)"
 }
+
+# ============================================================================
+# CHECK 10: ECS Component Add/Remove Operations (Archetype Stability)
+# ============================================================================
+Write-Section "Checking for ECS Component Add/Remove Operations"
+
+$ecsHandlingViolations = 0
+
+# Patterns for component structural changes that impact ECS performance
+$ecsModificationPatterns = @(
+    @{ Pattern = '\.insert\s*\(\s*\w+\s*,'; Method = 'insert (component)'; Message = 'Adding component causes archetype change - prefer state enum fields. Structural changes should be rare and long-lasting' }
+    @{ Pattern = '\.remove::<[^>]+>\s*\('; Method = 'remove (component)'; Message = 'Removing component causes archetype change - use state field instead. Structural changes should be rare and long-lasting' }
+    @{ Pattern = 'commands\.entity\([^)]+\)\.insert\s*\('; Method = 'Commands::insert'; Message = 'Adding component via Commands causes archetype change - prefer state enum fields' }
+    @{ Pattern = 'commands\.entity\([^)]+\)\.remove::<'; Method = 'Commands::remove'; Message = 'Removing component via Commands causes archetype change - use state field instead' }
+    @{ Pattern = '\.insert_bundle\s*\('; Method = 'insert_bundle'; Message = 'Adding bundle causes archetype change - ensure this is for long-term structural change only' }
+    @{ Pattern = '\.remove_bundle::<'; Method = 'remove_bundle'; Message = 'Removing bundle causes archetype change - ensure this is for long-term structural change only' }
+)
+
+foreach ($file in $gameFiles) {
+    $content = Get-Content $file.FullName -Raw
+    $lines = Get-Content $file.FullName
+    
+    # Skip test modules
+    if ($content -match '#\[cfg\(test\)\]' -or $file.Name -match 'test') {
+        continue
+    }
+    
+    foreach ($check in $ecsModificationPatterns) {
+        $matches = Select-String -Path $file.FullName -Pattern $check.Pattern -AllMatches
+        foreach ($match in $matches) {
+            $lineNum = $match.LineNumber
+            $lineContent = $lines[$lineNum - 1].Trim()
+            
+            # Skip comments
+            if ($lineContent -match '^\s*//') {
+                continue
+            }
+            
+            # Check for ECS_HANDLING_OK escape hatch
+            $hasEscapeHatch = $false
+            
+            # Check current line
+            if ($lineContent -match '//\s*ECS_HANDLING_OK') {
+                $hasEscapeHatch = $true
+            }
+            
+            # Check previous line
+            if ($lineNum -gt 1) {
+                $prevLine = $lines[$lineNum - 2].Trim()
+                if ($prevLine -match '//\s*ECS_HANDLING_OK') {
+                    $hasEscapeHatch = $true
+                }
+            }
+            
+            # Check next line (in case comment is below)
+            if ($lineNum -lt $lines.Count) {
+                $nextLine = $lines[$lineNum].Trim()
+                if ($nextLine -match '//\s*ECS_HANDLING_OK') {
+                    $hasEscapeHatch = $true
+                }
+            }
+            
+            if (-not $hasEscapeHatch) {
+                # Flag all component add/remove operations in game logic
+                # These are particularly problematic in simulation/hot paths
+                $isCritical = $file.FullName -match '(simulation|pathfinding|unit|hud)' -or 
+                              $file.Name -match 'systems\.rs'
+                
+                if ($isCritical) {
+                    $relativePath = $file.FullName.Replace("$PWD\\", "")
+                    Write-Violation -File $relativePath -Line $lineNum `
+                        -Message "$($check.Message). Add // ECS_HANDLING_OK if this is intentional and long-lasting." `
+                        -Code $lineContent
+                    $ecsHandlingViolations++
+                }
+                else {
+                    # Warn for non-critical paths
+                    $relativePath = $file.FullName.Replace("$PWD\\", "")
+                    Write-Warning -File $relativePath -Line $lineNum `
+                        -Message "$($check.Message). Add // ECS_HANDLING_OK if this is intentional."
+                }
+            }
+        }
+    }
+}
+
+if ($ecsHandlingViolations -eq 0) {
+    Write-Pass "No problematic ECS component add/remove operations found (or all marked with ECS_HANDLING_OK)"
+}
+
+Write-Host ""
+Write-Host "TIP: Avoid adding/removing components at runtime. Use state enum fields in existing components instead." -ForegroundColor Gray
+Write-Host "     Example: Instead of removing 'Moving' component, use 'MovementState::Idle' field." -ForegroundColor Gray
+Write-Host "     Add // ECS_HANDLING_OK only for rare, long-term structural changes (spawn/despawn scenarios)." -ForegroundColor Gray
 
 # ============================================================================
 # SUMMARY

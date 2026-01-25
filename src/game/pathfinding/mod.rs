@@ -43,7 +43,9 @@ impl Plugin for PathfindingPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<PathRequest>();
         app.init_resource::<HierarchicalGraph>();
-        app.init_resource::<NavigationLookup>();        app.init_resource::<NavigationRouting>();        app.add_systems(Update, (debug::draw_graph_gizmos).run_if(in_state(GameState::InGame).or(in_state(GameState::Editor))));
+        app.init_resource::<NavigationLookup>();        
+        app.init_resource::<NavigationRouting>();        
+        app.add_systems(Update, (debug::draw_graph_gizmos).run_if(in_state(GameState::InGame).or(in_state(GameState::Editor))));
         app.add_systems(FixedUpdate, systems::process_path_requests.run_if(in_state(GameState::InGame).or(in_state(GameState::Editor))));
         app.add_systems(FixedUpdate, navigation::follow_path.run_if(in_state(GameState::InGame).or(in_state(GameState::Editor))));
         
