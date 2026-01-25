@@ -3659,6 +3659,7 @@ dependencies = [
  "chrono",
  "fastrand",
  "fixed",
+ "fixedbitset",
  "flate2",
  "peregrine_macros",
  "rand",

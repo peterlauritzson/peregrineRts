@@ -15,6 +15,7 @@ mod hud;
 pub mod loading;  // Made public for test access to LoadingProgress
 mod editor;
 pub mod profiling;  // Made public for profiling helpers
+pub mod collections;  // Generic high-performance data structures
 
 use camera::RtsCameraPlugin;
 use unit::UnitPlugin;
