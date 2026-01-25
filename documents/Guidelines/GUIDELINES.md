@@ -33,3 +33,10 @@ To maintain a high standard for a AAA RTS codebase, we adhere to the following g
 ### 5. Documentation & Comments
 *   **Public API**: All `pub` structs, enums, and functions must have `///` doc comments explaining *what* they do and *why*.
 *   **Complex Logic**: Inline comments `//` should explain the *why* of a complex algorithm, not the *how* (the code shows the how).
+
+### 6. ECS Architecture Stability
+*   **Minimize Component Add/Remove Operations**: Adding or removing components from entities at runtime causes structural changes in ECS that impact performance and cache coherency.
+    *   *Rule*: Structural changes (inserting/removing components) should be extremely rare and only used for a small number of entities when the change is expected to persist long-term.
+    *   *Solution*: Prefer setting component fields to indicate state changes rather than removing/adding components. Use query filters to check for specific states.
+    *   *Example*: Instead of removing a `Moving` component when a unit stops, add a `MovementState` enum field to a `Movement` component and check its value.
+    *   *Benefit*: Maintains stable archetypes, improves query performance, and reduces memory fragmentation.
