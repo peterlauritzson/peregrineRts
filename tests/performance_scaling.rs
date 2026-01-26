@@ -761,10 +761,24 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
     app.insert_resource(PathfindingTimings::default());
     
     // Initialize pathfinding resources
+    // Scale cell size based on unit count to keep memory manageable
+    let cell_size = if config.unit_count > 100_000 {
+        10.0  // Large tests: 10 units/cell → ~140x140 grid for 500k units
+    } else if config.unit_count > 10_000 {
+        4.0   // Medium tests: 4 units/cell
+    } else {
+        1.0   // Small tests: 1 unit/cell (fine resolution)
+    };
+    
+    let grid_width = (map_size / cell_size).ceil() as usize;
+    let grid_height = (map_size / cell_size).ceil() as usize;
+    
+    println!("  Grid: {}x{} cells (cell_size={:.1})", grid_width, grid_height, cell_size);
+    
     let flow_field = FlowField::new(
-        map_size as usize,
-        map_size as usize,
-        FixedNum::from_num(1.0), // 1 world unit per cell
+        grid_width,
+        grid_height,
+        FixedNum::from_num(cell_size),
         FixedVec2::new(
             FixedNum::from_num(-map_size / 2.0),
             FixedNum::from_num(-map_size / 2.0),
@@ -799,6 +813,10 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
             Collider::default(), // Collision detection enabled
             CollisionState::default(),
             OccupiedCell::default(),
+            // Pathfinding components (required for ActivePathSet navigation)
+            peregrine::game::pathfinding::Path::Inactive,
+            peregrine::game::pathfinding::GoalNavCell::default(),
+            peregrine::game::collections::InclusionIndex::default(),
         ));
     }
     
@@ -852,12 +870,28 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
     // NOTE: This is a one-time precomputation cost (happens during loading), NOT included in tick timing
     let graph_build_start = Instant::now();
     let mut hierarchical_graph = HierarchicalGraph::default();
-    {
+    
+    // Initialize NavigationLookup and NavigationRouting resources BEFORE building graph
+    let mut nav_lookup = peregrine::game::pathfinding::NavigationLookup::default();
+    let mut nav_routing = peregrine::game::pathfinding::NavigationRouting::default();
+    
+    if pathfinding_pattern != PathfindingPattern::None {
         let flow_field_ref = app.world().resource::<MapFlowField>();
-        hierarchical_graph.build_graph(&flow_field_ref.0, false); // false = use new region-based pathfinding
+        // Build graph with navigation resources (they'll be populated during build)
+        hierarchical_graph.build_graph_with_regions_sync(
+            &flow_field_ref.0,
+            Some(&mut nav_lookup),
+            Some(&mut nav_routing),
+        );
+        println!("  Graph built in {:.2}s", graph_build_start.elapsed().as_secs_f32());
     }
     let graph_build_time = graph_build_start.elapsed();
+    
+    // Insert all pathfinding resources
     app.insert_resource(hierarchical_graph);
+    app.insert_resource(nav_lookup);
+    app.insert_resource(nav_routing);
+    app.insert_resource(peregrine::game::pathfinding::ActivePathSet::default());
     
     // Add pathfinding request generator (deterministic)
     app.insert_resource(PathRequestGenerator {
@@ -880,6 +914,7 @@ fn run_perf_test(config: PerfTestConfig) -> PerfTestResult {
         app.add_systems(Update, generate_pathfinding_requests.after(timed_physics));
         app.add_systems(Update, timed_process_path_requests.after(generate_pathfinding_requests));
         app.add_systems(Update, timed_follow_path.after(timed_process_path_requests));
+        app.add_systems(Update, peregrine::game::pathfinding::sweep_inactive_paths.after(timed_follow_path));
     }
     
     // All precomputation complete - start timing actual simulation ticks

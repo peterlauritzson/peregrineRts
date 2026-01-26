@@ -73,12 +73,14 @@ pub struct PathRequest {
 
 /// Cached navigation cell for the goal position
 /// Precomputed during path request processing to avoid repeated lookups
-#[derive(Component, Clone, Copy, Debug)]
+#[derive(Component, Clone, Copy, Debug, Default)]
 pub struct GoalNavCell(pub crate::game::pathfinding::navigation_lookup::NavigationCell);
 
 /// Path component with state machine to avoid expensive component removal in hot loop
 #[derive(Component, Debug, Clone)]
 pub enum Path {
+    /// No active path - unit is idle
+    Inactive,
     /// Active path - unit is navigating
     Active(PathState),
     /// Path completed - unit arrived at destination (marked for cleanup)

@@ -70,6 +70,7 @@ fn find_nearest_island(cluster: &Cluster, local_pos: FixedVec2) -> IslandId {
 }
 
 #[allow(dead_code)]
+#[allow(non_snake_case)]
 pub fn OLD_process_path_requests(
     mut path_requests: MessageReader<PathRequest>,
     mut commands: Commands,
@@ -175,10 +176,11 @@ pub fn OLD_process_path_requests(
 /// Process path requests and assign paths to entities (NEW IMPLEMENTATION)
 pub fn process_path_requests(
     mut path_requests: MessageReader<PathRequest>,
-    mut commands: Commands,
     map_flow_field: Res<MapFlowField>,
     _graph: Res<HierarchicalGraph>,  // Kept for now, may be needed for validation later
     nav_lookup: Res<super::navigation_lookup::NavigationLookup>,
+    mut active_paths: ResMut<super::resources::ActivePathSet>,
+    mut query: Query<(&mut super::types::Path, &mut super::types::GoalNavCell, &mut crate::game::collections::InclusionIndex)>,
 ) {
     if path_requests.is_empty() {
         return;
@@ -214,9 +216,18 @@ pub fn process_path_requests(
             .map(|i| i.id)
             .unwrap_or(IslandId(0));
         
-        // Insert Path component (deferred automatically by Commands)
-        commands.entity(request.entity).insert((
-            super::types::Path::Active(super::types::PathState::Hierarchical {
+        // Mutate existing Path component (no component insertion/removal!)
+        // IMPORTANT: Only add to ActivePathSet if query succeeds!
+        if let Ok((mut path, mut goal_nav_cell, mut inclusion_idx)) = query.get_mut(request.entity) {
+            // Register entity in active path set for O(active_paths) iteration
+            let include_result = active_paths.include(request.entity);
+            
+            // Update InclusionIndex if entity was added to hot storage
+            if let crate::game::collections::IncludeResult::Hot(idx) = include_result {
+                *inclusion_idx = idx;
+            }
+            
+            *path = super::types::Path::Active(super::types::PathState::Hierarchical {
                 goal,
                 goal_cluster,
                 goal_region,
@@ -227,18 +238,21 @@ pub fn process_path_requests(
                 next_expected_region: None,
                 current_target: None,
                 is_inter_cluster_target: false,
-            }),
-            super::types::GoalNavCell(nav_cell),  // Cache goal navigation cell
-        ));
+            });
+            *goal_nav_cell = super::types::GoalNavCell(nav_cell);
+        } else {
+            // This should NEVER happen if entities are spawned correctly
+            error!("Path request for entity {:?} FAILED - entity missing Path/GoalNavCell/InclusionIndex components! This is a BUG!", request.entity);
+        }
     }
 }
 
 // These helper functions are deprecated - will be replaced by NavigationLookup
 #[allow(dead_code)]
-fn validate_goal(goal: FixedVec2, walkability_map: &crate::game::structures::FlowField) -> Option<FixedVec2> {
+fn validate_goal(_goal: FixedVec2, _walkability_map: &crate::game::structures::FlowField) -> Option<FixedVec2> {
     // For now, just pass through - assume goal is valid
     // Later: implement snap_to_walkable logic
-    Some(goal)
+    Some(_goal)
 }
 
 #[allow(dead_code)]

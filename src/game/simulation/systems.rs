@@ -49,7 +49,7 @@ pub fn process_input(
     mut stop_events: MessageReader<UnitStopCommand>,
     mut spawn_events: MessageReader<SpawnUnitCommand>,
     mut path_requests: MessageWriter<PathRequest>,
-    query: Query<&SimPosition>,
+    mut query: Query<(&SimPosition, &mut Path)>,
 ) {
     
     
@@ -63,8 +63,11 @@ pub fn process_input(
     stops.sort_by_key(|e| e.player_id);
 
     for event in stops {
-        commands.entity(event.entity).remove::<Path>();
-        // Also reset velocity?
+        // Set path to inactive instead of removing component
+        if let Ok((_, mut path)) = query.get_mut(event.entity) {
+            *path = Path::Inactive;
+        }
+        // Also reset velocity
         // MEMORY_OK: ECS component insert, not collection growth
         commands.entity(event.entity).insert(SimVelocity(FixedVec2::ZERO));
     }
@@ -74,14 +77,15 @@ pub fn process_input(
     moves.sort_by_key(|e| e.player_id);
     
     for event in moves {
-        if let Ok(_pos) = query.get(event.entity) {
-            // Send Path Request instead of setting target directly
+        if let Ok((_pos, mut path)) = query.get_mut(event.entity) {
+            // Set path to inactive (don't remove component!)
+            *path = Path::Inactive;
+            
+            // Send Path Request - process_path_requests will set it to Active
             path_requests.write(PathRequest {
                 entity: event.entity,
                 goal: event.target,
             });
-            // Remove old path component to stop movement until path is found
-            commands.entity(event.entity).remove::<Path>();
         }
     }
 
@@ -104,6 +108,9 @@ pub fn process_input(
             SimAcceleration(FixedVec2::ZERO),
             Collider::default(),
             CollisionState::default(),
+            crate::game::collections::InclusionIndex::default(),  // For ActivePathSet tracking
+            crate::game::pathfinding::Path::Inactive,  // All units have Path component (starts inactive)
+            crate::game::pathfinding::GoalNavCell::default(),  // Cached navigation cell (updated on path request)
             // OccupiedCell added by update_spatial_hash on first frame
         ));
     }

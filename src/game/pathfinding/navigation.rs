@@ -218,6 +218,7 @@ fn compute_navigation_target(
 
 /// Follow assigned paths using flow fields and steering (OLD IMPLEMENTATION - PRESERVED FOR REFERENCE)
 #[allow(dead_code)]
+#[allow(non_snake_case)]
 pub fn OLD_follow_path(
     mut query: Query<(&SimPosition, &SimVelocity, &mut SimAcceleration, &mut Path)>,
     _no_path_query: Query<Entity, (Without<Path>, With<SimPosition>)>,
@@ -245,10 +246,10 @@ pub fn OLD_follow_path(
     let mut early_arrivals = 0;
 
     for (pos, vel, mut acc, mut path) in query.iter_mut() {
-        // PERF: Skip completed/blocked paths without removal (cleanup system handles it)
+        // PERF: Skip completed/blocked/inactive paths without removal (cleanup system handles it)
         let path_state = match &mut *path {
             super::Path::Active(state) => state,
-            super::Path::Completed | super::Path::Blocked => continue,
+            super::Path::Completed | super::Path::Blocked | super::Path::Inactive => continue,
         };
         
         match path_state {
@@ -439,6 +440,8 @@ pub fn OLD_follow_path(
 /// Follow assigned paths using hierarchical navigation with O(1) lookups
 /// 
 /// NEW: Uses NavigationLookup and NavigationRouting for precomputed pathfinding
+/// PERF: Iterates over ActivePathSet (O(active_paths)) instead of all entities (O(total_entities))
+/// 
 /// Simple flow:
 /// 1. Look up current cluster/region/island (O(1) via NavigationLookup)
 /// 2. Use cached GoalNavCell (precomputed during path request)
@@ -447,6 +450,7 @@ pub fn OLD_follow_path(
 ///    - Same cluster, different region → Region routing
 ///    - Different cluster → Island routing to find portal
 pub fn follow_path(
+    active_paths: Res<super::resources::ActivePathSet>,
     mut query: Query<(&SimPosition, &SimVelocity, &mut SimAcceleration, &mut Path, &super::types::GoalNavCell)>,
     sim_config: Res<SimConfig>,
     nav_lookup: Res<crate::game::pathfinding::NavigationLookup>,
@@ -465,9 +469,14 @@ pub fn follow_path(
     let threshold = if step_dist > sim_config.arrival_threshold { step_dist } else { sim_config.arrival_threshold };
     let threshold_sq = threshold * threshold;
     
-    for (pos, vel, mut acc, mut path, goal_nav_cell) in query.iter_mut() {
+    // PERF: Iterate ONLY over entities with active paths (O(active) instead of O(total))
+    for entity in active_paths.iter() {
+        let Ok((pos, vel, mut acc, mut path, goal_nav_cell)) = query.get_mut(entity) else {
+            continue; // Entity was despawned or doesn't have required components
+        };
+        
         let Path::Active(ref mut state) = *path else {
-            continue; // Skip completed/blocked paths
+            continue; // Skip completed/blocked paths (will be excluded in sweep)
         };
         
         match state {
@@ -629,15 +638,41 @@ pub fn follow_path(
     }
 }
 
-/// Cleanup system - removes completed/blocked paths periodically to prevent query bloat
-/// Runs less frequently than follow_path to avoid structural changes in hot loop
-pub fn cleanup_completed_paths(
-    mut commands: Commands,
-    query: Query<(Entity, &Path)>,
+/// Sweep system - marks completed/blocked paths for exclusion and batches cleanup
+/// This is more efficient than removing paths one by one in the hot loop
+pub fn sweep_inactive_paths(
+    mut active_paths: ResMut<super::resources::ActivePathSet>,
+    mut query: Query<(Entity, &mut Path, &crate::game::collections::InclusionIndex)>,
 ) {
-    for (entity, path) in query.iter() {
-        if matches!(path, Path::Completed | Path::Blocked) {
-            commands.entity(entity).remove::<Path>();
+    // Collect entities to exclude with their InclusionIndex (can't mutate while iterating)
+    let to_exclude: Vec<(Entity, crate::game::collections::InclusionIndex)> = active_paths.iter()
+        .filter_map(|entity| {
+            if let Ok((_, path, inclusion_idx)) = query.get(entity) {
+                if matches!(*path, Path::Completed | Path::Blocked | Path::Inactive) {
+                    Some((entity, *inclusion_idx))
+                } else {
+                    None
+                }
+            } else {
+                // Entity despawned or missing required component
+                warn!("Entity {:?} in active paths but missing required components (despawned?)", entity);
+                None
+            }
+        })
+        .collect();
+    
+    // Mark all collected entities for exclusion AND reset their paths to Inactive
+    for (entity, inclusion_idx) in to_exclude {
+        active_paths.exclude(entity, Some(inclusion_idx));
+        
+        // Reset path to Inactive (no component removal!)
+        if let Ok((_, mut path, _)) = query.get_mut(entity) {
+            *path = Path::Inactive;
         }
     }
+    
+    // Batch sweep all tombstones (also handles mode migration if needed)
+    active_paths.sweep(|_old_idx, _new_idx| {
+        // No index updates needed - we don't use component-based indexing
+    });
 }

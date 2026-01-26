@@ -28,4 +28,4 @@ pub mod inclusion_set;
 mod tests;
 
 pub use components::InclusionIndex;
-pub use inclusion_set::{SetConfig, InclusionSet, IncludeResult, IndexUpdate};
+pub use inclusion_set::{SetConfig, InclusionSet, IncludeResult, IndexUpdate, SetStats};

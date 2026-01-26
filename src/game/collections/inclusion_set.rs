@@ -81,8 +81,8 @@ pub enum IncludeResult {
     Hot(InclusionIndex),
     /// Item was added to bitset storage (no component needed)
     Bitset,
-    /// Item already existed (keep existing component if any)
-    AlreadyPresent(Option<InclusionIndex>),
+    /// Item already existed (keep existing component state)
+    AlreadyPresent,
 }
 
 /// Index update information returned by sweep
@@ -95,71 +95,39 @@ pub struct IndexUpdate {
 /// Hot Vec storage mode.
 struct HotStorage<T: Copy> {
     items: Box<[Option<T>]>,  // Pre-allocated, fixed-size array
-    count: usize,              // Number of live items (not tombstoned)
+    count: usize,              // Current size (may have None holes)
+    live_count: usize,         // Number of non-None items
     capacity: usize,
-    tombstones: FixedBitSet,
-    tombstone_count: usize,    // Cached count of tombstones
-    /// Bitset tracking which entity IDs are present (for O(1) contains/duplicate checks)
-    presence: FixedBitSet,
     sorted: bool,
-    max_capacity: usize,
 }
 
 impl<T> HotStorage<T>
 where
     T: Copy + Into<usize> + From<u32> + PartialOrd,
 {
-    fn new(capacity: usize, max_capacity: usize, sorted: bool) -> Self {
+    fn new(capacity: usize, sorted: bool) -> Self {
         // Pre-allocate fixed-size array
         let items = (0..capacity).map(|_| None).collect::<Vec<_>>().into_boxed_slice();
         
         Self {
             items,
             count: 0,
+            live_count: 0,
             capacity,
-            tombstones: FixedBitSet::with_capacity(capacity),
-            tombstone_count: 0,
-            presence: FixedBitSet::with_capacity(max_capacity),
             sorted,
-            max_capacity,
         }
     }
 
     fn insert(&mut self, item: T) -> Option<usize> {
-        let key: usize = item.into();
-
-        // Check presence bitset for duplicates
-        if key < self.presence.len() && self.presence[key] {
-            // Already present - find its index
-            for (idx, slot) in self.items.iter().enumerate() {
-                if let Some(stored) = slot {
-                    if !self.tombstones[idx] && (*stored).into() == key {
-                        return Some(idx);
-                    }
-                }
-            }
-        }
-
-        // Ensure presence bitset is large enough
-        if key >= self.presence.len() {
-            if key >= self.max_capacity {
-                warn!("HotStorage: Index {} exceeds max_capacity {}", key, self.max_capacity);      
-                return None;
-            }
-            self.presence.grow(key + 1);
-        }
-
         // Find insertion point
         if self.sorted {
             // Binary search for sorted insertion
             let mut insert_pos = self.count;
             for idx in 0..self.count {
                 if let Some(stored) = self.items[idx] {
-                    if !self.tombstones[idx] {
-                        if stored.partial_cmp(&item).unwrap() == std::cmp::Ordering::Greater {
-                            insert_pos = idx;
-                            break;
-                        }
+                    if stored.partial_cmp(&item).unwrap() == std::cmp::Ordering::Greater {
+                        insert_pos = idx;
+                        break;
                     }
                 }
             }
@@ -171,15 +139,11 @@ where
             
             for idx in (insert_pos..self.count).rev() {
                 self.items[idx + 1] = self.items[idx];
-                if self.tombstones[idx] {
-                    self.tombstones.set(idx + 1, true);
-                    self.tombstones.set(idx, false);
-                }
             }
             
             self.items[insert_pos] = Some(item);
-            self.presence.set(key, true);
             self.count += 1;
+            self.live_count += 1;
             Some(insert_pos)
         } else {
             // Unsorted - append at end
@@ -189,23 +153,18 @@ where
             
             let index = self.count;
             self.items[index] = Some(item);
-            self.presence.set(key, true);
             self.count += 1;
+            self.live_count += 1;
             Some(index)
         }
     }
 
-    /// Mark item at specific index for removal.
-    /// Returns true if verification passed and item was marked.
+    /// Mark item at specific index for removal (sets to None immediately).
+    /// Returns true if verification passed and item was removed.
     fn mark_removed_at(&mut self, item: T, index: usize) -> bool {
         // Verify index is valid and matches item
         if index >= self.count {
             warn!("mark_removed_at: index {} out of bounds (count={})", index, self.count);
-            return false;
-        }
-        
-        if self.tombstones[index] {
-            // Already tombstoned
             return false;
         }
         
@@ -218,27 +177,23 @@ where
                 return false;
             }
             
-            self.tombstones.set(index, true);
-            self.tombstone_count += 1;
+            // Set to None immediately (bitset managed by caller)
+            self.items[index] = None;
+            self.live_count -= 1;
             true
         } else {
-            warn!("mark_removed_at: index {} is empty", index);
+            // Already None
             false
         }
     }
 
-    /// Remove item immediately and compact the array (expensive: O(n) per call).
-    /// Use for single/rare removals. For batch removals, prefer mark_removed_at() + sweep().
-    /// Returns index updates via callback for all shifted items.
+    /// Remove item immediately using swap-remove (O(1)).
+    /// Swaps the removed item with the last item in the array, then decrements count.
+    /// Calls update_fn(old_index, new_index) if the last item was moved.
     fn remove_immediate_at(&mut self, item: T, index: usize, mut update_fn: impl FnMut(usize, usize)) -> bool {
         // Verify index is valid and matches item
         if index >= self.count {
             warn!("remove_immediate_at: index {} out of bounds (count={})", index, self.count);
-            return false;
-        }
-        
-        if self.tombstones[index] {
-            warn!("remove_immediate_at: index {} is already tombstoned", index);
             return false;
         }
         
@@ -251,64 +206,42 @@ where
                 return false;
             }
             
-            // Clear presence bit
-            if key < self.presence.len() {
-                self.presence.set(key, false);
-            }
-            
-            // Shift all items after this down by 1
-            for i in index..(self.count - 1) {
-                self.items[i] = self.items[i + 1];
-                // Also shift tombstone bits
-                if self.tombstones[i + 1] {
-                    self.tombstones.set(i, true);
-                } else {
-                    self.tombstones.set(i, false);
-                }
-                // Notify about index change
-                if !self.tombstones[i] {
-                    update_fn(i + 1, i);
+            // Swap-remove: replace with last item
+            let last_idx = self.count - 1;
+            if index != last_idx {
+                // Swap with last item
+                self.items[index] = self.items[last_idx];
+                // Notify that the last item moved to this index (only if non-None)
+                if self.items[index].is_some() {
+                    update_fn(last_idx, index);
                 }
             }
             
             // Clear the last slot
-            self.items[self.count - 1] = None;
-            self.tombstones.set(self.count - 1, false);
+            self.items[last_idx] = None;
             self.count -= 1;
+            self.live_count -= 1;
             
             true
         } else {
-            warn!("remove_immediate_at: index {} is empty", index);
+            // Already None
             false
         }
     }
 
-    /// Sweep tombstoned items and call update_fn for each index that moved.
-    /// Takes a callback to avoid allocating a Vec.
+    /// Sweep None holes and call update_fn for each index that moved.
+    /// Compacts the array so all live items are at the front.
     fn sweep(&mut self, mut update_fn: impl FnMut(usize, usize)) {
-        if self.tombstone_count == 0 {
-            return;
+        if self.live_count == self.count {
+            return; // No holes
         }
 
-        // Clear presence bits for tombstoned items
-        for idx in 0..self.count {
-            if self.tombstones[idx] {
-                if let Some(item) = self.items[idx] {
-                    let key = item.into();
-                    if key < self.presence.len() {
-                        self.presence.set(key, false);
-                    }
-                }
-                self.items[idx] = None;
-            }
-        }
-
-        // Compact items array and call update_fn for moves
+        // Compact items array: move all Some values to front
         let mut write_idx = 0;
         for read_idx in 0..self.count {
-            if !self.tombstones[read_idx] {
+            if let Some(item) = self.items[read_idx] {
                 if read_idx != write_idx {
-                    self.items[write_idx] = self.items[read_idx];
+                    self.items[write_idx] = Some(item);
                     self.items[read_idx] = None;
                     update_fn(read_idx, write_idx);
                 }
@@ -316,31 +249,23 @@ where
             }
         }
 
-        self.count = write_idx;
-        self.tombstones.clear();
-        self.tombstone_count = 0;
+        self.count = self.live_count;
     }
 
     fn count(&self) -> usize {
-        self.count - self.tombstone_count
+        self.live_count
     }
 
     fn iter(&self) -> impl Iterator<Item = T> + '_ {
         self.items[..self.count]
             .iter()
-            .enumerate()
-            .filter(move |(idx, _)| !self.tombstones[*idx])
-            .filter_map(|(_, slot)| *slot)
+            .filter_map(|slot| *slot)
     }
 
-    fn contains(&self, item: T) -> bool {
-        let key: usize = item.into();
-        // O(1) check via presence bitset - much faster than HashMap or linear search!
-        key < self.presence.len() && self.presence[key]
-    }
+
 
     fn get_at(&self, index: usize) -> Option<T> {
-        if index < self.count && !self.tombstones[index] {
+        if index < self.count {
             self.items[index]
         } else {
             None
@@ -348,81 +273,30 @@ where
     }
 }
 
-/// Bitset storage mode.
-struct BitsetStorage {
-    bits: FixedBitSet,
-    max_capacity: usize,
-    count: usize,
-}
-
-impl BitsetStorage {
-    fn new(max_capacity: usize) -> Self {
-        Self {
-            bits: FixedBitSet::with_capacity(max_capacity),
-            max_capacity,
-            count: 0,
-        }
-    }
-
-    fn insert(&mut self, key: usize) -> bool {
-        if key >= self.max_capacity {
-            warn!(
-                "InclusionSet: Index {} exceeds max_capacity {}",
-                key, self.max_capacity
-            );
-            return false;
-        }
-
-        if key >= self.bits.len() {
-            self.bits.grow(key + 1);
-        }
-
-        if !self.bits[key] {
-            self.bits.set(key, true);
-            self.count += 1;
-        }
-        true
-    }
-
-    fn remove(&mut self, key: usize) {
-        if key < self.bits.len() && self.bits[key] {
-            self.bits.set(key, false);
-            self.count -= 1;
-        }
-    }
-
-    fn contains(&self, key: usize) -> bool {
-        key < self.bits.len() && self.bits[key]
-    }
-
-    fn count(&self) -> usize {
-        self.count
-    }
-
-    fn iter(&self) -> impl Iterator<Item = usize> + '_ {
-        self.bits.ones()
-    }
-
-    fn clear(&mut self) {
-        self.bits.clear();
-        self.count = 0;
-    }
-}
-
-/// Storage mode state machine.
+/// Storage mode: either use hot Vec or rely on bitset only.
 enum StorageMode<T: Copy> {
     Hot(HotStorage<T>),
-    Bitset(BitsetStorage),
+    BitsetOnly,  // When hot Vec disabled or too full, use bitset directly
 }
 
 /// Set of included entities with O(included) iteration.
 ///
 /// **Type Requirements**: T must convert to dense, sequential indices (0, 1, 2, 3, ...)  
 /// See module docs for detailed type constraints.
+///
+/// # Architecture
+/// - **bitset**: Always maintained, tracks which entity IDs are present (for contains() and fallback storage)
+/// - **mode**: Either Hot(Vec) for fast iteration OR BitsetOnly when Vec is disabled/full
 pub struct InclusionSet<T>
 where
     T: Copy + Into<usize> + From<u32> + PartialOrd,
 {
+    /// Always maintained, serves dual purpose: presence checks + fallback storage
+    bitset: FixedBitSet,
+    /// Track count manually (faster than bitset.count_ones())
+    bitset_count: usize,
+    /// Track highest index for efficient iteration
+    highest_set: usize,
     mode: StorageMode<T>,
     config: SetConfig,
     _phantom: PhantomData<T>,
@@ -448,17 +322,15 @@ where
         }
 
         let mode = if let Some(hot_capacity) = config.hot_capacity {
-            StorageMode::Hot(HotStorage::new(
-                hot_capacity,
-                config.max_capacity,
-                config.sorted,
-            ))
+            StorageMode::Hot(HotStorage::new(hot_capacity, config.sorted))
         } else {
-            // Bitset-only mode
-            StorageMode::Bitset(BitsetStorage::new(config.max_capacity))
+            StorageMode::BitsetOnly
         };
 
         Self {
+            bitset: FixedBitSet::with_capacity(config.max_capacity),
+            bitset_count: 0,
+            highest_set: 0,
             mode,
             config,
             _phantom: PhantomData,
@@ -472,24 +344,44 @@ where
     /// - `IncludeResult::Bitset` - Item added to bitset storage, no component needed
     /// - `IncludeResult::AlreadyPresent` - Item was already in the set
     pub fn include(&mut self, item: T) -> IncludeResult {
+        let key = item.into();
+        
+        // Reject indices exceeding max_capacity
+        if key >= self.config.max_capacity {
+            warn!("InclusionSet: Index {} exceeds max_capacity {} - REJECTING", key, self.config.max_capacity);
+            return IncludeResult::AlreadyPresent; // Treat as no-op
+        }
+        
+        // Check bitset first (O(1) duplicate check)
+        if key < self.bitset.len() && self.bitset[key] {
+            return IncludeResult::AlreadyPresent;
+        }
+        
+        // Grow bitset if needed (once to max_capacity)
+        if key >= self.bitset.len() {
+            self.bitset.grow(self.config.max_capacity);
+        }
+        
+        // Set in bitset (always!)
+        self.bitset.set(key, true);
+        self.bitset_count += 1;
+        if key > self.highest_set {
+            self.highest_set = key;
+        }
+        
+        // Try to add to hot storage if enabled
         match &mut self.mode {
             StorageMode::Hot(hot) => {
-                if let Some(index) = hot.insert(item) {
-                    IncludeResult::Hot(InclusionIndex(index))
-                } else {
-                    // Hot storage full - migrate to bitset
-                    self.migrate_to_bitset();
-                    // Try again in bitset mode
-                    if let StorageMode::Bitset(bitset) = &mut self.mode {
-                        bitset.insert(item.into());
+                match hot.insert(item) {
+                    Some(index) => IncludeResult::Hot(InclusionIndex(index)),
+                    None => {
+                        // Hot storage full - migrate to bitset-only
+                        self.migrate_to_bitset();
+                        IncludeResult::Bitset
                     }
-                    IncludeResult::Bitset
                 }
             }
-            StorageMode::Bitset(bitset) => {
-                bitset.insert(item.into());
-                IncludeResult::Bitset
-            }
+            StorageMode::BitsetOnly => IncludeResult::Bitset,
         }
     }
 
@@ -498,6 +390,15 @@ where
     /// For hot storage, requires the InclusionIndex component for verification.
     /// For bitset storage, index is ignored.
     pub fn exclude(&mut self, item: T, index: Option<InclusionIndex>) -> bool {
+        let key = item.into();
+        
+        // Clear from bitset immediately (always!)
+        if key < self.bitset.len() && self.bitset[key] {
+            self.bitset.set(key, false);
+            self.bitset_count -= 1;
+        }
+        
+        // Remove from hot storage if applicable
         match &mut self.mode {
             StorageMode::Hot(hot) => {
                 if let Some(idx) = index {
@@ -507,10 +408,7 @@ where
                     false
                 }
             }
-            StorageMode::Bitset(bitset) => {
-                bitset.remove(item.into());
-                true
-            }
+            StorageMode::BitsetOnly => true,
         }
     }
 
@@ -520,6 +418,15 @@ where
     /// For hot storage: Removes and shifts all subsequent items, calling update_fn for each move.
     /// For bitset storage: Same as exclude() (no compaction needed).
     pub fn remove_immediate(&mut self, item: T, index: Option<InclusionIndex>, update_fn: impl FnMut(usize, usize)) -> bool {
+        let key = item.into();
+        
+        // Clear from bitset immediately (always!)
+        if key < self.bitset.len() && self.bitset[key] {
+            self.bitset.set(key, false);
+            self.bitset_count -= 1;
+        }
+        
+        // Remove from hot storage if applicable
         match &mut self.mode {
             StorageMode::Hot(hot) => {
                 if let Some(idx) = index {
@@ -529,14 +436,11 @@ where
                     false
                 }
             }
-            StorageMode::Bitset(bitset) => {
-                bitset.remove(item.into());
-                true
-            }
+            StorageMode::BitsetOnly => true,
         }
     }
 
-    /// Remove all excluded items (sweep tombstones in hot mode).
+    /// Remove all excluded items (sweep None holes in hot mode).
     /// Calls update_fn(old_index, new_index) for each item that moved during compaction.
     /// Also checks if we should migrate back to hot mode.
     pub fn sweep(&mut self, update_fn: impl FnMut(usize, usize)) {
@@ -544,15 +448,11 @@ where
             StorageMode::Hot(hot) => {
                 hot.sweep(update_fn);
             }
-            StorageMode::Bitset(bitset) => {
+            StorageMode::BitsetOnly => {
                 // Check if we should migrate back to hot mode
                 if let Some(hot_capacity) = self.config.hot_capacity {
-                    let threshold = hot_capacity
-                        - self
-                            .config
-                            .hysteresis_buffer
-                            .unwrap_or(hot_capacity / 10);
-                    if bitset.count() < threshold {
+                    let threshold = hot_capacity - self.config.hysteresis_buffer.unwrap_or(hot_capacity / 10);
+                    if self.bitset_count < threshold {
                         self.migrate_to_hot();
                     }
                 }
@@ -565,8 +465,9 @@ where
     pub fn iter(&self) -> Box<dyn Iterator<Item = T> + '_> {
         match &self.mode {
             StorageMode::Hot(hot) => Box::new(hot.iter()),
-            StorageMode::Bitset(bitset) => {
-                Box::new(bitset.iter().map(|idx| T::from(idx as u32)))
+            StorageMode::BitsetOnly => {
+                let range = if self.bitset_count == 0 { 0 } else { self.highest_set + 1 };
+                Box::new(self.bitset.ones().take_while(move |&idx| idx < range).map(|idx| T::from(idx as u32)))
             }
         }
     }
@@ -575,31 +476,31 @@ where
     pub fn count(&self) -> usize {
         match &self.mode {
             StorageMode::Hot(hot) => hot.count(),
-            StorageMode::Bitset(bitset) => bitset.count(),
+            StorageMode::BitsetOnly => self.bitset_count,
         }
     }
 
-    /// Check if item is included.
+    /// Check if item is included (O(1) via bitset, regardless of mode).
     pub fn contains(&self, item: T) -> bool {
-        match &self.mode {
-            StorageMode::Hot(hot) => hot.contains(item),
-            StorageMode::Bitset(bitset) => bitset.contains(item.into()),
-        }
+        let key = item.into();
+        key < self.bitset.len() && self.bitset[key]
     }
 
     /// Clear all items.
     pub fn clear(&mut self) {
+        self.bitset.clear();
+        self.bitset_count = 0;
+        self.highest_set = 0;
+        
         match &mut self.mode {
             StorageMode::Hot(hot) => {
                 for i in 0..hot.count {
                     hot.items[i] = None;
                 }
                 hot.count = 0;
-                hot.tombstones.clear();
-                hot.tombstone_count = 0;
-                hot.presence.clear();
+                hot.live_count = 0;
             }
-            StorageMode::Bitset(bitset) => bitset.clear(),
+            StorageMode::BitsetOnly => {}
         }
     }
 
@@ -610,55 +511,39 @@ where
                 mode: "Hot",
                 count: hot.count(),
                 capacity: hot.capacity,
-                tombstones: hot.tombstone_count,
+                tombstones: hot.count - hot.live_count,
             },
-            StorageMode::Bitset(bitset) => SetStats {
+            StorageMode::BitsetOnly => SetStats {
                 mode: "Bitset",
-                count: bitset.count(),
+                count: self.bitset_count,
                 capacity: self.config.max_capacity,
                 tombstones: 0,
             },
         }
     }
 
-    /// Migrate from hot to bitset mode.
+    /// Migrate from hot to bitset-only mode (bitset already in sync, just drop hot Vec).
     fn migrate_to_bitset(&mut self) {
         if let StorageMode::Hot(hot) = &self.mode {
-            info!(
-                "InclusionSet: Migrating to bitset mode ({} items)",
-                hot.count()
-            );
-            let mut bitset = BitsetStorage::new(self.config.max_capacity);
-
-            // Move ALL items to bitset
-            for item in hot.iter() {
-                bitset.insert(item.into());
-            }
-
-            self.mode = StorageMode::Bitset(bitset);
+            info!("InclusionSet: Migrating to bitset-only mode ({} items)", hot.count());
+            // Bitset already contains all items - just drop the hot Vec
+            self.mode = StorageMode::BitsetOnly;
         }
     }
 
-    /// Migrate from bitset to hot mode.
+    /// Migrate from bitset-only to hot mode (rebuild hot Vec from bitset).
     fn migrate_to_hot(&mut self) {
-        if let StorageMode::Bitset(bitset) = &self.mode {
+        if let StorageMode::BitsetOnly = &self.mode {
             if let Some(hot_capacity) = self.config.hot_capacity {
-                info!(
-                    "InclusionSet: Migrating to hot mode ({} items)",
-                    bitset.count()
-                );
+                info!("InclusionSet: Migrating to hot mode ({} items)", self.bitset_count);
 
-                let mut hot = HotStorage::new(
-                    hot_capacity,
-                    self.config.max_capacity,
-                    self.config.sorted,
-                );
+                let mut hot = HotStorage::new(hot_capacity, self.config.sorted);
 
-                // Move ALL items to hot storage
-                for idx in bitset.iter() {
+                // Rebuild hot storage from bitset
+                let range = if self.bitset_count == 0 { 0 } else { self.highest_set + 1 };
+                for idx in self.bitset.ones().take_while(|&i| i < range) {
                     let item = T::from(idx as u32);
                     if hot.insert(item).is_none() {
-                        // Shouldn't happen since we checked count < threshold
                         warn!("InclusionSet: Failed to migrate item to hot mode");
                         return; // Abort migration
                     }

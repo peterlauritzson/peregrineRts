@@ -96,7 +96,7 @@ pub fn draw_unit_paths(
 
         let path_state = match path {
             Path::Active(state) => state,
-            Path::Completed | Path::Blocked => continue,
+            Path::Completed | Path::Blocked | Path::Inactive => continue,
         };
         
         match path_state {
